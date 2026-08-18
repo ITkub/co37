@@ -65,6 +65,7 @@ MANAGED_FILES = [
     "REVERSE-PROXY.md",
     "run-tests.sh",
     "GITHUB.md",
+    "LICENSE",
 ]
 
 # Der Watcher ersetzt sich selbst. Die neue Fassung wird uebernommen, der
@@ -79,7 +80,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.28.1"
+WATCHER_VERSION = "0.29.0"
 WATCHER_INFO = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 

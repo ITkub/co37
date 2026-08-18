@@ -1,9 +1,13 @@
-# CO-37
+# CO-37 — Core Operations Manager
 
 Patch-Management für Windows- und Linux-Systeme mit Checkmk-Anbindung.
+Selbst gehostet, agentenbasiert, ohne Cloud-Anbindung.
 
-Vorgesehen für den Betrieb **im lokalen Netz**. Ein Server je Netz, Zugriff von
-außen über WireGuard. Es gibt keine Domain-, TLS- oder Enrollment-Token-Verwaltung.
+Vorgesehen für den Betrieb **im lokalen Netz**. Ein Server je Netz. TLS über
+einen vorgeschalteten Reverse Proxy — siehe `REVERSE-PROXY.md`.
+
+**Bis zu 10 Hosts kostenlos**, auch geschäftlich. Darüber hinaus wird eine
+kommerzielle Lizenz benötigt: siehe [Lizenz](#lizenz).
 
 ---
 
@@ -685,19 +689,91 @@ Skript in Node gegen ein laufendes Backend ausführt. Siehe `tests/README.md`.
 
 # Offene Punkte
 
-- Agent- und Update-Pakete sind unsigniert
-- Keine Token-Rotation: ein kompromittiertes Agent-Token gilt, bis der Host
-  entfernt wird
-- Ein einziger Admin-Token, keine Rollen oder Mehrbenutzerbetrieb
-- Der Agent fragt beim Server nach (15 Sekunden im Ruhezustand, 5 Sekunden
-  während Aufträge laufen). Der Server kann nichts von sich aus zustellen.
-  Long Polling wäre der nächste Schritt für sofortige Zustellung — ein
-  lauschender Dienst auf jedem Host wäre die schlechtere Lösung.
+- Agent- und Update-Pakete sind unsigniert. Wer Schreibzugriff auf das
+  Paketverzeichnis hat, kann Code unterschieben.
 - Prüfen wird nicht nach Zeitplan ausgelöst, nur Patchen und Neustarts.
-- Aufträge von vor 0.6.0 haben kein Protokoll. Dort bleibt die Ansicht leer.
-- Das Frontend greift auf Formularfelder über den Element-Namen zu
-  (`cUrl.value`). Browser stellen das bereit, es ist aber empfindlich
-  gegenüber Namensgleichheit mit Variablen.
-- Kein Rollback von Patches, kein Ausschluss einzelner Updates
+- Kein Rollback von Patches, kein Ausschluss einzelner Updates.
+- Der Agent fragt beim Server nach — Abstand über `CO37_POLL_INTERVAL`
+  einstellbar, Vorgabe 60 Sekunden, während laufender Aufträge 5 Sekunden.
+  Der Server kann nichts von sich aus zustellen. Long Polling wäre der
+  nächste Schritt für sofortige Zustellung; ein lauschender Dienst auf jedem
+  Host wäre die schlechtere Lösung.
 - Die Schema-Migration ergänzt fehlende Spalten, entfernt aber keine alten.
   Ungenutzte Felder aus früheren Fassungen bleiben in der Datenbank stehen.
+- Aufträge von vor 0.6.0 haben kein Protokoll. Dort bleibt die Ansicht leer.
+- Das Frontend greift an einigen Stellen über den Element-Namen auf
+  Formularfelder zu (`cUrl.value`). Browser stellen das bereit, es ist aber
+  empfindlich gegenüber Namensgleichheit mit Variablen.
+
+## Bewusste Festlegungen
+
+Keine Versäumnisse, sondern Entscheidungen — hier festgehalten, damit sie
+nicht bei jedem Durchsehen neu diskutiert werden.
+
+- **Downtimes werden nicht vorzeitig aufgehoben**, sie laufen ihre Dauer ab.
+  Früher aufzuheben hieße, sich auf den Agent als Zeugen zu verlassen: der
+  meldet sich Sekunden nach dem Start, während Checkmk den Host noch nicht
+  neu geprüft hat und Dienste erst hochlaufen. Die Benachrichtigungen gingen
+  dann trotzdem raus. Gesteuert wird über `downtime_minutes` je Host.
+- **`style-src 'unsafe-inline'`** bleibt in der Content-Security-Policy. Das
+  Markup ist voller `style`-Attribute; ein Umbau wäre umfangreich ohne
+  echten Gewinn, da eingeschleustes CSS mit den übrigen Regeln wenig
+  anrichtet. `script-src` kommt dagegen ohne aus.
+- **Kein Hintergrunddienst.** Zeitpläne, Nachschläge und das Aufräumen
+  hängender Aufträge werden beim Heartbeat ausgewertet. So kann nichts
+  auseinanderlaufen.
+- **Der HTTPS-Zwang schließt den Port nicht.** Er antwortet mit 403.
+  Wirklich zu ist er erst mit einer Firewallregel — die gehört zum Rechner,
+  nicht in diese Anwendung, und dafür bräuchte das Backend Rechte, die es
+  bewusst nicht hat.
+
+---
+
+# Lizenz
+
+CO-37 steht unter der **Business Source License 1.1**. Der vollständige Text
+liegt in [`LICENSE`](LICENSE).
+
+Das ist **kein Open Source** im Sinne der OSI-Definition — der Quelltext ist
+einsehbar und veränderbar, die produktive Nutzung aber begrenzt.
+
+## Kostenlos
+
+Bis zu **10 Hosts je Installation**, ohne zeitliche Begrenzung, auch
+geschäftlich. Gezählt werden freigegebene Hosts; wartende, abgelehnte und
+gelöschte zählen nicht.
+
+Damit sind Homelabs und kleine Umgebungen abgedeckt, und wer mehr Hosts hat,
+kann CO-37 in Ruhe ausprobieren.
+
+## Kommerzielle Lizenz
+
+Ab 11 Hosts. Der Schlüssel legt fest, wie viele Hosts freigeschaltet sind und
+wie lange er gilt — wahlweise ein, zwei oder drei Jahre.
+
+Anfragen an **sales@itkub.de**.
+
+Läuft ein Schlüssel ab, werden bereits freigegebene Hosts **weiterhin
+gepatcht**. Lediglich neue Freigaben oberhalb von 10 sind dann nicht mehr
+möglich. Ein Patch-Management-Werkzeug, das wegen einer Lizenzfrage Systeme
+ungepatcht lässt, wäre das Gegenteil dessen, wofür es gekauft wurde.
+
+## Umwandlung in eine freie Lizenz
+
+Jede Fassung wird spätestens vier Jahre nach ihrer Veröffentlichung
+automatisch unter der Apache License 2.0 verfügbar. Das ist Bestandteil der
+Business Source License und nicht widerrufbar.
+
+---
+
+# Kontakt
+
+**Michael Kuban — ITkub**
+Aichacher Str. 9
+86573 Obergriesbach
+Germany
+
+- Lizenzen und Vertrieb: sales@itkub.de
+- Fehler und Vorschläge: über die Issues dieses Repositories
+
+CO-37 wird von einer Person entwickelt. Antwortzeiten richten sich danach.

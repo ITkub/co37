@@ -42,7 +42,7 @@ zip -rq "$OUT" \
   backend frontend agent packaging tests \
   update_watcher.py \
   setup.sh build_packages.sh build_release.sh migrate_to_co37.sh README.md \
-  REVERSE-PROXY.md GITHUB.md run-tests.sh .gitignore .gitattributes \
+  REVERSE-PROXY.md GITHUB.md LICENSE run-tests.sh .gitignore .gitattributes \
   -x '*__pycache__*' '*.pyc' '*.db' '*.db-*' 'backend/test*' '.DS_Store' 'packaging/cache/*' 'packaging/_msi_build/*'
 
 # ---------------------------------------------------------------------

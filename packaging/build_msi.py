@@ -276,7 +276,7 @@ def build(version: str, out_dir: Path) -> Path:
     # Hersteller steht spaeter in den Programmeigenschaften jedes Windows-
     # Hosts. Neutral als Vorgabe, damit ein weitergegebenes Paket nicht die
     # Firma dessen traegt, der es gebaut hat. Fuer eigene Pakete setzen:
-    #     CO37_VENDOR="Meine Firma" python3 packaging/build_msi.py
+    #     CO37_VENDOR="ITkub" python3 packaging/build_msi.py
     vendor = os.environ.get("CO37_VENDOR", "CO-37")
 
     wxs = f'''<?xml version="1.0" encoding="utf-8"?>

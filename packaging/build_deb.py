@@ -191,7 +191,7 @@ def build(version: str, out_dir: Path) -> Path:
         # Verantwortlicher steht spaeter in den Paketeigenschaften. Neutral
         # als Vorgabe, damit ein weitergegebenes Paket nicht die Firma
         # dessen traegt, der es gebaut hat. Fuer eigene Pakete setzen:
-        #     CO37_VENDOR="Meine Firma <mail@example.com>" ...
+        #     CO37_VENDOR="ITkub <sales@itkub.de>" ...
         ("control", CONTROL.format(
             version=version,
             vendor=os.environ.get("CO37_VENDOR", "CO-37 <noreply@example.invalid>"),
