@@ -1,0 +1,60 @@
+# ======================================================================
+# Geheimnisse - nichts davon darf jemals hochgeladen werden
+# ======================================================================
+# Ein einmal eingecheckter Schluessel ist praktisch nicht mehr aus der
+# Historie zu entfernen. Er gilt dann als kompromittiert und muss ersetzt
+# werden - beim Lizenzschluessel hiesse das: alle Kundenschluessel neu
+# ausstellen und eine neue Fassung veroeffentlichen.
+*.pem
+*.key
+!license_key.pub
+license-private*
+.co37/
+lizenzen.csv
+
+# Zugangsdaten der Installation
+admin.token
+secret.key
+trusted_proxy
+agent.conf
+
+# ======================================================================
+# Daten und Zustand
+# ======================================================================
+*.db
+*.db-shm
+*.db-wal
+data/
+*.log
+*.log.1
+
+# ======================================================================
+# Gebaute Erzeugnisse
+# ======================================================================
+# Die Pakete entstehen aus dem Quellstand. Sie mitzufuehren blaeht das
+# Repository auf und fuehrt zu der Frage, welche Fassung nun gilt.
+co37_v*.zip
+*.deb
+*.msi
+packaging/cache/
+packaging/_msi_build/
+dist/
+build/
+
+# ======================================================================
+# Python
+# ======================================================================
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# ======================================================================
+# Werkzeuge und Betriebssysteme
+# ======================================================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

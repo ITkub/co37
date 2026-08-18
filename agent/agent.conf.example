@@ -1,0 +1,13 @@
+# CO-37 Agent
+#
+# Beim ersten Start meldet sich der Agent selbst an und traegt danach sein
+# Dauertoken hier ein. Ein Anmeldetoken wird nicht benoetigt - der Host
+# wartet stattdessen auf Freigabe im Dashboard.
+
+server = https://co37.beispiel.com
+
+# Wird nach der Anmeldung automatisch gesetzt:
+# token =
+
+# Nur bei selbstsigniertem Zertifikat:
+# verify_ssl = false
