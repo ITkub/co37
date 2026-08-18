@@ -12,6 +12,10 @@ license-private*
 .co37/
 lizenzen.csv
 
+# Der oeffentliche Teil gehoert dagegen INS Repository - er wird
+# ausgeliefert, damit CO-37 Schluessel pruefen kann. Die Ausnahme oben
+# (!license_key.pub) sorgt dafuer, dass ihn keine der Regeln erwischt.
+
 # Zugangsdaten der Installation
 admin.token
 secret.key

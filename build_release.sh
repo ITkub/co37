@@ -37,9 +37,27 @@ fi
 
 OUT="co37_v${VERSION//./_}.zip"
 
+# ---------------------------------------------------------------------
+# Gegenpruefung: kein privater Schluessel im Paket
+# ---------------------------------------------------------------------
+# Der private Lizenzschluessel gehoert nach ~/.co37 und niemals hierher.
+# Liegt er trotzdem im Projektverzeichnis - versehentlich hineinkopiert,
+# aus einer Sicherung zurueckgeholt - waere er sonst in jedem
+# ausgelieferten Paket. Wer ihn hat, kann beliebige Lizenzschluessel
+# ausstellen.
+GEHEIM=$(find backend frontend agent packaging tests tools . -maxdepth 2 \
+  \( -name "*.pem" -o -name "license-private*" -o -name "*.key" \) \
+  ! -name "secret.key" 2>/dev/null | sort -u)
+if [ -n "$GEHEIM" ]; then
+  echo "!!! Privater Schluessel im Projektverzeichnis gefunden:"
+  echo "$GEHEIM" | sed 's/^/    /'
+  echo "    Er darf nicht ins Paket. Nach ~/.co37 verschieben und erneut bauen."
+  exit 1
+fi
+
 rm -f "$OUT"
 zip -rq "$OUT" \
-  backend frontend agent packaging tests \
+  backend frontend agent packaging tests tools \
   update_watcher.py \
   setup.sh build_packages.sh build_release.sh migrate_to_co37.sh README.md \
   REVERSE-PROXY.md GITHUB.md LICENSE run-tests.sh .gitignore .gitattributes \
