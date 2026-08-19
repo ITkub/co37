@@ -346,6 +346,32 @@ global.setTimeout = origSetTimeout;
     check("Hinweistext vorhanden", el("roHint").innerHTML.length > 20);
   } catch(e){ check("loadRollout laeuft durch", false, e.message); }
 
+  console.log("\n=== Einstellungsdialog ===");
+  {
+    // Acht Reiter passen bei den 600px der uebrigen Dialoge nicht in eine
+    // Zeile. Kommt ein neunter dazu, faellt es sonst erst im Betrieb auf.
+    const anzahl = (html.match(/data-tab="\w+"/g) || []).length;
+    const breite = html.match(/dialog#dlgSettings\{width:min\((\d+)px/);
+    check("Einstellungsdialog hat eine eigene Breite", !!breite,
+          breite && breite[1] + "px");
+
+    // Ueberschlag: Beschriftungen bei 12px halbfett, plus Innenabstaende,
+    // Abstaende und Rand.
+    // Zwischen data-tab und dem Tag-Ende koennen weitere Attribute
+    // stehen - bei zweien steht class dahinter statt davor.
+    const labels = [...html.matchAll(/data-tab="\w+"[^>]*>([^<]+)</g)]
+                   .map(m => m[1]);
+    const geschaetzt = labels.join("").length * 6.8 + labels.length * 28
+                     + (labels.length - 1) * 2 + 36;
+    check("Reiter passen rechnerisch in eine Zeile",
+          !!breite && geschaetzt < Number(breite[1]),
+          `${Math.round(geschaetzt)}px bei ${breite && breite[1]}px`);
+    check("alle Reiter gefunden", labels.length === anzahl, labels.length);
+
+    check("Fliesstexte im Dialog sind begrenzt",
+          /dialog#dlgSettings \.hint\{max-width:\d+ch\}/.test(html));
+  }
+
   console.log("\n=== Schriften ===");
   {
     const fsf = require("fs"), pathf = require("path");
@@ -518,6 +544,14 @@ global.setTimeout = origSetTimeout;
       const re = new RegExp(`data-tab="${id}"[^>]*class="admin-only"`);
       check(`${id} ist als admin-only gekennzeichnet`, re.test(src));
     }
+    // Der Lizenzstand ist fuer jeden lesbar: wer am Limit scheitert, soll
+    // den Grund nachvollziehen koennen. Der Schluessel selbst wird nur
+    // Administratoren zum Eintragen angeboten.
+    check("tabLizenz ist NICHT admin-only",
+          !/data-tab="tabLizenz"[^>]*admin-only/.test(html));
+    check("Eingabe des Schluessels ist admin-only",
+          /admin-only[^>]*>\s*(?:<[^>]+>\s*)*Lizenzschlüssel/.test(html)
+          || html.includes('class="section admin-only"'));
     check("tabAccount ist NICHT admin-only",
           !/data-tab="tabAccount"[^>]*admin-only/.test(src));
   }

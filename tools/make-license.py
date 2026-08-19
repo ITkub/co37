@@ -30,6 +30,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+from typing import Optional
 
 try:
     from cryptography.hazmat.primitives import serialization
@@ -102,6 +103,18 @@ def init():
                  f"entstehen, die Datei vorher von Hand wegsichern und loeschen -\n"
                  f"ALLE bisher ausgestellten Schluessel werden damit ungueltig.")
 
+    if OEFFENTLICH.is_file():
+        # Der ausgelieferte oeffentliche Schluessel gehoert zu einem
+        # bestehenden Paar. Wird er ueberschrieben, prueft keiner der
+        # bereits ausgestellten Schluessel mehr - bei jedem Kunden.
+        sys.exit(f"Es gibt bereits einen ausgelieferten oeffentlichen "
+                 f"Schluessel:\n"
+                 f"    {OEFFENTLICH}\n\n"
+                 f"Er wird nicht ueberschrieben. Alle damit ausgestellten\n"
+                 f"Schluessel wuerden sonst ungueltig - bei jedem Kunden.\n\n"
+                 f"Soll wirklich ein neues Paar entstehen, die Datei vorher\n"
+                 f"von Hand wegsichern und loeschen.")
+
     HOME.mkdir(parents=True, exist_ok=True)
     privat = Ed25519PrivateKey.generate()
 
@@ -165,9 +178,19 @@ Eine ungeprueffte Sicherung ist keine Sicherung.
 # ======================================================================
 # Schluessel ausstellen
 # ======================================================================
-def ausstellen(kunde: str, hosts: int, jahre, unbefristet: bool) -> str:
+def ausstellen(kunde: str, hosts: int, jahre, unbefristet: bool,
+               ab: Optional[date] = None) -> str:
+    """
+    Stellt einen Schluessel aus.
+
+    'ab' verschiebt den Beginn der Laufzeit - bei einer Verlaengerung auf
+    das Ablaufdatum des bisherigen Schluessels, damit die Restlaufzeit
+    nicht verfaellt. Das Ausstellungsdatum bleibt der heutige Tag: es
+    dokumentiert, wann der Schluessel entstanden ist.
+    """
     privat = lade_privat()
     heute = date.today()
+    beginn = ab or heute
 
     daten = {
         "v": 1,
@@ -175,7 +198,7 @@ def ausstellen(kunde: str, hosts: int, jahre, unbefristet: bool) -> str:
         # 0 bedeutet unbegrenzt - so muss kein Sonderwert erfunden werden.
         "h": hosts,
         "iat": heute.isoformat(),
-        "exp": None if unbefristet else (heute + timedelta(days=365 * jahre)).isoformat(),
+        "exp": None if unbefristet else (beginn + timedelta(days=365 * jahre)).isoformat(),
         "nr": naechste_nummer(),
     }
 
@@ -183,6 +206,77 @@ def ausstellen(kunde: str, hosts: int, jahre, unbefristet: bool) -> str:
     schluessel = f"{VORSATZ}{_b64(roh)}.{_b64(privat.sign(roh))}"
     eintragen(daten, schluessel)
     return schluessel
+
+
+# ======================================================================
+# Verlaengerung
+# ======================================================================
+# Bewusst hier und nicht beim Einspielen: wuerde CO-37 die Restlaufzeit
+# selbst aufschlagen, koennte ein Kunde denselben Schluessel mehrfach
+# eintragen und sich die Laufzeit verlaengern. Die Rechnung gehoert auf
+# die Seite, auf der der private Schluessel liegt.
+def lese_schluessel(schluessel: str) -> dict:
+    """Liest einen Schluessel und prueft seine Signatur."""
+    schluessel = schluessel.strip()
+    if not schluessel.startswith(VORSATZ) or "." not in schluessel:
+        sys.exit("Der angegebene Vorgaenger sieht nicht nach einem "
+                 "CO-37-Schluessel aus.")
+    kern, sig = schluessel[len(VORSATZ):].split(".", 1)
+    try:
+        roh = _unb64(kern)
+        daten = json.loads(roh)
+    except Exception:  # noqa: BLE001
+        sys.exit("Der angegebene Vorgaenger ist beschaedigt.")
+    try:
+        lade_oeffentlich().verify(_unb64(sig), roh)
+    except InvalidSignature:
+        # Ohne diese Pruefung wuerde auf eine Faelschung aufgerechnet.
+        sys.exit("Die Signatur des Vorgaengers stimmt nicht. Er stammt nicht "
+                 "von diesem Schluesselpaar.")
+    return daten
+
+
+def aus_register(nummer: int) -> dict:
+    """Holt einen frueher ausgestellten Schluessel aus dem Register."""
+    if not REGISTER.is_file():
+        sys.exit(f"Kein Register unter {REGISTER}.")
+    with open(REGISTER, encoding="utf-8", newline="") as fh:
+        for zeile in csv.DictReader(fh, delimiter=";"):
+            if zeile.get("nr", "").strip() == str(nummer):
+                return lese_schluessel(zeile["schluessel"])
+    sys.exit(f"Im Register steht kein Schluessel mit der Nummer {nummer}.")
+
+
+def verlaengerungsbeginn(alt: dict, kunde: str) -> date:
+    """
+    Ab wann die neue Laufzeit zaehlt.
+
+    Ist der Vorgaenger noch gueltig, ab dessen Ablaufdatum - sonst
+    verfaellt die Restlaufzeit, und niemand verlaengert mehr vorzeitig.
+    Ist er bereits abgelaufen, ab heute; rueckwirkend zu rechnen waere ein
+    Verlust fuer den Kunden ohne Gegenwert.
+    """
+    heute = date.today()
+
+    if alt.get("exp") is None:
+        sys.exit("Der Vorgaenger ist unbefristet - da gibt es nichts "
+                 "aufzuschlagen.\n"
+                 "Eine Verlaengerung wuerde die Unbefristetheit in eine "
+                 "feste Laufzeit verwandeln.\n"
+                 "Ohne --verlaengert ausstellen, wenn das gewollt ist.")
+
+    if alt.get("k", "") != kunde:
+        print(f"Achtung: der Vorgaenger lautet auf '{alt.get('k')}',\n"
+              f"der neue Schluessel auf '{kunde}'.\n")
+        if input("Trotzdem verlaengern? [ja/nein] ").strip().lower() != "ja":
+            sys.exit("Abgebrochen.")
+
+    ende = date.fromisoformat(alt["exp"])
+    if ende <= heute:
+        print(f"Hinweis: der Vorgaenger ist am {ende:%d.%m.%Y} abgelaufen.\n"
+              f"Die neue Laufzeit beginnt deshalb heute.\n")
+        return heute
+    return ende
 
 
 def naechste_nummer() -> int:
@@ -350,6 +444,11 @@ def main():
                    help="Laufzeit in Jahren")
     p.add_argument("--unbefristet", action="store_true",
                    help="ohne Ablaufdatum")
+    p.add_argument("--verlaengert", metavar="SCHLUESSEL",
+                   help="Restlaufzeit des bisherigen Schluessels aufschlagen")
+    p.add_argument("--verlaengert-nr", type=int, metavar="NR",
+                   dest="verlaengert_nr",
+                   help="dasselbe, aber ueber die Nummer aus dem Register")
     p.add_argument("--sicherung", action="store_true",
                    help="privaten Schluessel druckfreundlich ausgeben")
     p.add_argument("--pruefen", metavar="DATEI",
@@ -388,6 +487,44 @@ def main():
     if a.unbefristet and a.jahre:
         sys.exit("--jahre und --unbefristet schliessen sich aus.")
 
+    if a.verlaengert and a.verlaengert_nr:
+        sys.exit("--verlaengert und --verlaengert-nr schliessen sich aus.")
+
+    beginn = None
+    if a.verlaengert or a.verlaengert_nr:
+        if a.unbefristet:
+            sys.exit("--verlaengert und --unbefristet schliessen sich aus:\n"
+                     "ein unbefristeter Schluessel hat kein Ende, auf das\n"
+                     "sich etwas aufschlagen liesse.")
+        alt = (aus_register(a.verlaengert_nr) if a.verlaengert_nr
+               else lese_schluessel(a.verlaengert))
+        beginn = verlaengerungsbeginn(alt, a.kunde)
+
+        alt_hosts = alt.get("h", 0)
+        neu_ende = beginn + timedelta(days=365 * a.jahre)
+        print("Verlaengerung:")
+        print(f"  bisher:  {alt.get('k')} · "
+              f"{'unbegrenzt' if alt_hosts == 0 else alt_hosts} Hosts · "
+              f"bis {date.fromisoformat(alt['exp']):%d.%m.%Y}")
+        print(f"  neu:     {a.kunde} · "
+              f"{'unbegrenzt' if hosts == 0 else hosts} Hosts · "
+              f"bis {neu_ende:%d.%m.%Y}")
+        rest = (beginn - date.today()).days
+        if rest > 0:
+            print(f"  Aus der bisherigen Laufzeit werden {rest} Tage "
+                  f"uebernommen.")
+        if alt_hosts != hosts:
+            # Bewusst keine Umrechnung nach Wert: das waere eine
+            # Rechenaufgabe, die niemand nachvollziehen kann.
+            print(f"  Die Hostzahl aendert sich von "
+                  f"{'unbegrenzt' if alt_hosts == 0 else alt_hosts} auf "
+                  f"{'unbegrenzt' if hosts == 0 else hosts}. Die "
+                  f"Restlaufzeit wird unveraendert uebernommen.")
+        print()
+        if input("Ausstellen? [ja/nein] ").strip().lower() != "ja":
+            sys.exit("Abgebrochen.")
+        print()
+
     if a.unbefristet and hosts == 0:
         # Der eine Schluessel, der alles aushebelt, wenn er abhanden kommt:
         # er laeuft nie ab, es gibt also keine natuerliche
@@ -398,7 +535,7 @@ def main():
         if input("Trotzdem ausstellen? [ja/nein] ").strip().lower() != "ja":
             sys.exit("Abgebrochen.")
 
-    schluessel = ausstellen(a.kunde, hosts, a.jahre, a.unbefristet)
+    schluessel = ausstellen(a.kunde, hosts, a.jahre, a.unbefristet, ab=beginn)
     print()
     zeigen(schluessel)
     print()

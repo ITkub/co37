@@ -40,6 +40,8 @@ cd "$HIER" || exit 1
 # ausgestiegen.
 REIHEN=(
   "proxy-fallback  python3 tests/proxy-fallback-test.py"
+  "license        python3 tests/license-test.py"
+  "release-sig    python3 tests/release-sig-test.py"
   "patchdue        python3 tests/patchdue-test.py"
   "login-throttle  python3 tests/login-throttle-test.py"
   "agent-selfheal  python3 tests/agent-selfheal-test.py"

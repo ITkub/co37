@@ -753,6 +753,11 @@ wie lange er gilt — wahlweise ein, zwei oder drei Jahre.
 
 Anfragen an **sales@itkub.de**.
 
+Der Schlüssel wird unter *Einstellungen → Lizenz* eingetragen. Er enthält
+Kunde, Hostzahl und Laufzeit im Klartext und ist signiert — verändern
+lässt er sich nicht, einsehen schon. Geprüft wird lokal, ohne Rückruf und
+ohne Internetverbindung.
+
 Läuft ein Schlüssel ab, werden bereits freigegebene Hosts **weiterhin
 gepatcht**. Lediglich neue Freigaben oberhalb von 10 sind dann nicht mehr
 möglich. Ein Patch-Management-Werkzeug, das wegen einer Lizenzfrage Systeme

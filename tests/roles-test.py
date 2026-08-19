@@ -268,6 +268,70 @@ try:
 except urllib.error.HTTPError as e:
     check("nach dem Abmelden kein Zugriff mehr", e.code == 401, e.code)
 
+# --------------------------------------------------- Lizenz und Host-Limit
+code, res = call("/api/v1/license", hdr=adm)
+check("Lizenzstand abrufbar", code == 200, code)
+check("ohne Schluessel gilt der Freibetrag",
+      res.get("erlaubte_hosts") == res.get("frei_ohne_schluessel"),
+      res.get("erlaubte_hosts"))
+frei = res.get("frei_ohne_schluessel", 10)
+check("Freibetrag ist 10", frei == 10, frei)
+
+# Auch fuer einen Benutzer lesbar: wer am Limit scheitert, soll den Grund
+# nachvollziehen koennen.
+#
+# Neu anmelden noetig: weiter oben hat der Test das Passwort dieses Kontos
+# geaendert, und das beendet bestehende Sitzungen.
+code, res2 = call("/api/v1/login", {"username": "tester",
+                                    "password": "neues-passwort-123"})
+usr2 = {"X-Session": res2.get("session", "")} if code == 200 else {}
+code, _ = call("/api/v1/license", hdr=usr2)
+check("Lizenzstand auch fuer Benutzer lesbar", code == 200, code)
+
+code, _ = call("/api/v1/license", {"key": "Unsinn"}, hdr=adm)
+check("ungueltiger Schluessel wird abgewiesen", code == 400, code)
+code, res = call("/api/v1/license", hdr=adm)
+check("Zustand bleibt danach unveraendert",
+      res.get("erlaubte_hosts") == frei, res.get("erlaubte_hosts"))
+
+# Bis zum Freibetrag auffuellen und die Grenze pruefen. Die bereits
+# angelegten Hosts mitzaehlen.
+belegt = call("/api/v1/license", hdr=adm)[1]["belegt"]
+angelegt = []
+for i in range(belegt, frei + 1):
+    name = f"TEST-LIMIT{i:02d}"
+    c, r = call("/api/v1/agent/enroll",
+                {"hostname": name, "os_type": "linux",
+                 "os_version": "Debian 13", "agent_version": "0.30.0"})
+    if c != 200:
+        continue
+    hosts = call("/api/v1/hosts", hdr=adm)[1]
+    hid = [h["id"] for h in hosts if h["hostname"] == name][0]
+    angelegt.append((name, hid, call(f"/api/v1/hosts/{hid}/approve", {}, hdr=adm)[0]))
+
+erlaubt = [a for a in angelegt if a[2] == 200]
+verweigert = [a for a in angelegt if a[2] == 403]
+check("Freigabe bis zum Freibetrag moeglich", len(erlaubt) >= 1, len(erlaubt))
+check("darueber hinaus abgewiesen", len(verweigert) >= 1, len(verweigert))
+
+code, res = call("/api/v1/license", hdr=adm)
+check("Belegung entspricht dem Freibetrag", res.get("belegt") == frei,
+      f"{res.get('belegt')} von {frei}")
+
+# Wird ein Host geloescht, wird der Platz wieder frei.
+if erlaubt and verweigert:
+    call(f"/api/v1/hosts/{erlaubt[0][1]}", method="DELETE", hdr=adm)
+    code, _ = call(f"/api/v1/hosts/{verweigert[0][1]}/approve", {}, hdr=adm)
+    check("nach dem Loeschen wird der Platz frei", code == 200, code)
+
+# Ein bereits freigegebener Host darf erneut freigegeben werden, auch am
+# Limit - sonst scheitert ein harmloser Doppelklick.
+if erlaubt:
+    ziel = [a for a in erlaubt if a[1] != erlaubt[0][1]]
+    if ziel:
+        code, _ = call(f"/api/v1/hosts/{ziel[0][1]}/approve", {}, hdr=adm)
+        check("erneute Freigabe am Limit moeglich", code == 200, code)
+
 # --------------------------------------------------- Sicherheitskopfzeilen
 h = headers_of("/api/health")
 check("Kopfzeilen ueberhaupt vorhanden", h is not None)

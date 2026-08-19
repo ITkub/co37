@@ -639,7 +639,18 @@ async function updateAgent(id){
   afterAction();
 }
 
-async function approve(id){ await api("POST", `/api/v1/hosts/${id}/approve`); await load(); toast("Host freigegeben"); }
+async function approve(id){
+  try {
+    await api("POST", `/api/v1/hosts/${id}/approve`);
+  } catch(e){
+    // api() hat die Begruendung des Backends bereits angezeigt - beim
+    // erreichten Host-Limit steht dort, wie viele belegt sind und wohin
+    // man sich wendet. Hier nur den Ablauf sauber beenden.
+    return;
+  }
+  await load();
+  toast("Host freigegeben");
+}
 async function reject(id){
   if (!confirm("Host ablehnen? Er bekommt keine Aufträge und bleibt in der Liste.")) return;
   await api("POST", `/api/v1/hosts/${id}/reject`); await load(); toast("Host abgelehnt");
@@ -1066,7 +1077,8 @@ document.getElementById("dtList").onclick = async () => {
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = e => e.target.closest("dialog").close());
 // Eingegrenzt auf #sTabs und die eigenen Bereiche. Ein ungenauer Selektor
 // hat hier vorher die Reiter des Host-Dialogs mit ueberschrieben.
-const STABS = ["tabAgents","tabCmk","tabUpd","tabProxy","tabAccount","tabUsers","tabAudit"];
+const STABS = ["tabAgents","tabCmk","tabUpd","tabProxy","tabLizenz",
+               "tabAccount","tabUsers","tabAudit"];
 document.querySelectorAll("#sTabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("#sTabs button").forEach(x => x.classList.toggle("on", x === b));
   STABS.forEach(id => document.getElementById(id).classList.toggle("on", id === b.dataset.tab));
@@ -1082,6 +1094,8 @@ document.getElementById("btnSettings").onclick = () => {
   STABS.forEach(id => document.getElementById(id).classList.toggle("on", id === first));
   document.getElementById("dlgSettings").showModal();
   loadAccount();
+  // Fuer jeden lesbar: wer am Limit scheitert, soll den Grund sehen.
+  loadLizenz();
   // Die Routen dahinter sind ohnehin auf Administratoren beschraenkt -
   // aufrufen wuerde nur 403 erzeugen und den Dialog mit Fehlern fuellen.
   if (isAdmin){
@@ -1462,6 +1476,75 @@ async function loadWatcher(){
   }
 }
 
+/* ---------- Lizenz ---------- */
+async function loadLizenz(){
+  let d;
+  try { d = await api("GET", "/api/v1/license"); }
+  catch(e){ return; }
+
+  const box = document.getElementById("lizStand");
+  const grenze = d.erlaubte_hosts;           // null bedeutet unbegrenzt
+  const belegt = d.belegt;
+
+  // Der Anteil ist der Wert, den man beim Öffnen sehen will: passt es
+  // noch, oder ist gleich Schluss?
+  const eng = grenze !== null && belegt >= grenze;
+  const knapp = grenze !== null && belegt >= grenze - 2;
+  const farbe = eng ? "var(--led-reboot)"
+              : knapp ? "var(--led-pending)" : "var(--led-ok)";
+
+  let zeilen = [];
+  if (d.vorhanden){
+    zeilen.push(`Lizenziert für <b>${esc(d.kunde)}</b>`
+                + (d.nummer ? ` · Schlüssel Nr. ${d.nummer}` : ""));
+    zeilen.push(d.unbefristet
+      ? "Unbefristet"
+      : `Gültig bis <b>${fmtTime(d.gueltig_bis, {year:"numeric",month:"2-digit",day:"2-digit"})}</b>`
+        + (d.abgelaufen ? " — <b>abgelaufen</b>"
+                        : ` (noch ${d.tage_uebrig} Tage)`));
+  } else {
+    zeilen.push("Kein Lizenzschlüssel eingetragen — freie Nutzung.");
+  }
+
+  zeilen.push(`<b style="color:${farbe}">${belegt} von `
+              + `${grenze === null ? "unbegrenzt" : grenze}</b> Hosts freigegeben`);
+
+  if (d.hinweis)
+    zeilen.push(`<b style="color:var(--led-pending)">${esc(d.hinweis)}</b>`);
+  if (eng)
+    zeilen.push("Weitere Hosts lassen sich erst freigeben, wenn Platz frei "
+                + "wird oder ein größerer Schlüssel eingetragen ist.");
+
+  box.innerHTML = zeilen.join("<br>");
+}
+
+document.getElementById("lizSave").onclick = async () => {
+  const k = document.getElementById("lizKey").value.trim();
+  if (!k){ toast("Kein Schlüssel eingegeben", true); return; }
+  try {
+    await api("POST", "/api/v1/license", { key: k });
+  } catch(e){
+    // Der bisherige Zustand bleibt bestehen - das Backend weist einen
+    // ungültigen Schlüssel ab, ohne ihn zu speichern.
+    toast("Schlüssel abgelehnt — bisheriger Stand bleibt", true);
+    return;
+  }
+  document.getElementById("lizKey").value = "";
+  await loadLizenz();
+  await load();
+  toast("Lizenzschlüssel eingetragen");
+};
+
+document.getElementById("lizClear").onclick = async () => {
+  if (!confirm("Lizenzschlüssel entfernen?\n\n"
+    + "Danach gelten wieder 10 Hosts für neue Freigaben. Bereits "
+    + "freigegebene Hosts bleiben unberührt und werden weiter gepatcht."))
+    return;
+  await api("POST", "/api/v1/license", { key: "" });
+  await loadLizenz();
+  toast("Lizenzschlüssel entfernt");
+};
+
 /* ---------- Zugang: Proxy und HTTPS-Zwang ---------- */
 let PROXY_TIMER = null;
 
@@ -1597,11 +1680,26 @@ async function loadUpdate(){
   if (busy && !UPD_TIMER) UPD_TIMER = setInterval(loadUpdate, 3000);
   if (!busy && UPD_TIMER){ clearInterval(UPD_TIMER); UPD_TIMER = null; }
 }
-async function uploadZip(file){
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".zip")){ toast("Bitte eine ZIP-Datei wählen", true); return; }
-  const fd = new FormData(); fd.append("file", file);
-  toast("Paket wird geprüft…");
+/*
+ * Nimmt eine Auswahl entgegen und sortiert sie selbst: das Paket und die
+ * zugehoerige .sig-Datei. Beide gemeinsam auswaehlen oder gemeinsam
+ * hineinziehen - so gibt es keine Reihenfolge, die man falsch machen
+ * kann, und kein zweites Feld, das man uebersieht.
+ */
+async function uploadZip(dateien){
+  const liste = dateien instanceof FileList || Array.isArray(dateien)
+              ? [...dateien] : (dateien ? [dateien] : []);
+  if (!liste.length) return;
+
+  const zip = liste.find(f => f.name.toLowerCase().endsWith(".zip"));
+  const sig = liste.find(f => f.name.toLowerCase().endsWith(".sig"));
+
+  if (!zip){ toast("Bitte die ZIP-Datei des Pakets wählen", true); return; }
+
+  const fd = new FormData();
+  fd.append("file", zip);
+  if (sig) fd.append("sigfile", sig);
+  toast(sig ? "Paket und Signatur werden geprüft…" : "Paket wird geprüft…");
   const res = await fetch(API + "/api/v1/update/upload",
     {method:"POST", credentials: "same-origin", body:fd});
   if (!res.ok){ toast((await res.text()).slice(0,220), true); return; }
@@ -1609,10 +1707,10 @@ async function uploadZip(file){
 }
 const drop = document.getElementById("uDrop"), fileInput = document.getElementById("uFile");
 drop.onclick = () => fileInput.click();
-fileInput.onchange = e => uploadZip(e.target.files[0]);
+fileInput.onchange = e => uploadZip(e.target.files);
 ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
-drop.addEventListener("drop", e => uploadZip(e.dataTransfer.files[0]));
+drop.addEventListener("drop", e => uploadZip(e.dataTransfer.files));
 
 document.getElementById("uRun").onclick = async () => {
   if (!confirm(`Update von ${uCur.textContent} auf ${uNew.textContent} ausführen?\n\nDer Dienst wird kurz neu gestartet.`)) return;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- CO37_FRONTEND_VERSION: 0.30.0 -->
+<!-- CO37_FRONTEND_VERSION: 0.33.0 -->
 <title>CO-37</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2212%22%20fill%3D%22%23020817%22%2F%3E%3Cpath%20d%3D%22M32%209%2046%2016v13c0%2011-6%2018-14%2022-8-4-14-11-14-22V16z%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223.5%22%20stroke-linejoin%3D%22round%22%2F%3E%3Cpath%20d%3D%22M22%2027h20l-4%207H26z%22%20fill%3D%22%23ffffff%22%2F%3E%3Cpath%20d%3D%22M26%2038h12%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E">
 <style>
@@ -179,6 +179,17 @@ label input,label select{width:100%}
 .section{border-top:1px solid var(--line);padding-top:14px;
   display:flex;flex-direction:column;gap:11px}
 .section-title{font-family:var(--font-ui);font-weight:600;font-size:12px}
+
+/* Der Einstellungsdialog traegt acht Reiter. Bei den 600px der uebrigen
+   Dialoge brechen sie in eine zweite Zeile um, obwohl auf einem Bildschirm
+   reichlich Platz waere. Deshalb hier eigens breiter - die anderen Dialoge
+   bleiben schmal, ein Anmeldefeld ueber die halbe Breite sieht verloren
+   aus. Bei schmalen Anzeigen greift weiterhin 94vw. */
+dialog#dlgSettings{width:min(900px,94vw)}
+/* Der Dialog wird breiter, damit die Reiter in eine Zeile passen - die
+   Fliesstexte sollen aber nicht mitwachsen. Ueber etwa 90 Zeichen je Zeile
+   findet das Auge den Zeilenanfang nicht mehr zuverlaessig. */
+dialog#dlgSettings .hint{max-width:78ch}
 
 .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 18px;flex-wrap:wrap}
 .tabs button{background:none;border:none;border-bottom:2px solid transparent;
@@ -519,6 +530,7 @@ label input,label select{width:100%}
     <button class="admin-only" data-tab="tabCmk">Checkmk</button>
     <button class="admin-only" data-tab="tabUpd">Update</button>
     <button class="admin-only" data-tab="tabProxy">Zugang</button>
+    <button data-tab="tabLizenz">Lizenz</button>
     <button data-tab="tabAccount">Konto</button>
     <button data-tab="tabUsers" class="admin-only">Benutzer</button>
     <button data-tab="tabAudit" class="admin-only">Protokoll</button>
@@ -615,6 +627,25 @@ label input,label select{width:100%}
       <div><button class="primary" id="cSave">Verbinden und speichern</button></div>
     </div>
 
+    <div class="pane" id="tabLizenz">
+      <div class="section">
+        <div class="section-title">Umfang</div>
+        <div id="lizStand" class="hint"></div>
+      </div>
+
+      <div class="section admin-only">
+        <div class="section-title">Lizenzschlüssel</div>
+        <div class="hint">Bis zu 10 Hosts sind ohne Schlüssel möglich, auch geschäftlich und ohne zeitliche Begrenzung. Gezählt werden freigegebene Hosts; wartende, abgelehnte und gelöschte zählen nicht.<br><br>Für mehr Hosts wird ein Schlüssel benötigt — erhältlich über <b>sales@itkub.de</b>.<br><br>Läuft ein Schlüssel ab, werden bereits freigegebene Hosts <b>weiterhin gepatcht</b>. Lediglich neue Freigaben oberhalb von 10 sind dann nicht mehr möglich.</div>
+        <label>Schlüssel
+          <input id="lizKey" placeholder="CO37-…" autocomplete="off">
+        </label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="primary" id="lizSave" style="align-self:flex-start">Eintragen</button>
+          <button class="danger" id="lizClear" style="align-self:flex-start">Entfernen</button>
+        </div>
+      </div>
+    </div>
+
     <div class="pane" id="tabProxy">
       <div class="section">
         <div class="section-title">Reverse Proxy</div>
@@ -650,9 +681,10 @@ label input,label select{width:100%}
       <div class="vrow"><span>Zustand</span><span class="state" id="uState">—</span></div>
       <div class="vrow"><span>Update-Watcher</span><b id="wVer">—</b></div>
       <div class="hint" id="wHint" style="display:none"></div>
-      <div class="drop" id="uDrop">ZIP-Paket hier ablegen oder klicken<br>
-        <span style="font-size:11px">co37_vX_Y_Z.zip, max. 50 MB</span></div>
-      <input type="file" id="uFile" accept=".zip" style="display:none">
+      <div class="drop" id="uDrop">ZIP-Paket <b>und</b> .sig-Datei hier ablegen oder klicken<br>
+        <span style="font-size:11px">co37_vX_Y_Z.zip und co37_vX_Y_Z.zip.sig, zusammen auswählen · max. 50 MB</span></div>
+      <input type="file" id="uFile" accept=".zip,.sig" multiple style="display:none">
+      <div class="hint">Die Signatur weist nach, dass das Paket vom Herausgeber stammt und unterwegs nicht verändert wurde. Sie wird <b>vor</b> dem Auspacken geprüft — der Watcher entpackt als root, ein untergeschobenes Paket wäre damit Codeausführung als root.<br><br>Eine Prüfsumme allein genügt dafür nicht: wer die Datei austauschen kann, kann auch die Prüfsummendatei daneben austauschen.</div>
       <div id="uPending" style="display:none">
         <div class="vrow" style="margin-bottom:10px"><span>Bereitgestellt</span><b id="uNew">—</b></div>
         <div class="hint" style="margin-bottom:10px">Der aktuelle Stand wird gesichert, ausgetauscht und der Dienst neu gestartet. Schlägt der Health-Check fehl, wird zurückgerollt.</div>

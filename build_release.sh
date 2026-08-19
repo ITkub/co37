@@ -1,4 +1,17 @@
 #!/bin/bash
+#
+# ABGELOEST durch build_release.py - bitte diese Fassung verwenden:
+#
+#     python3 build_release.py 0.33.0
+#
+# Grund: dieses Skript braucht 'zip' und 'unzip'. Git Bash unter Windows
+# bringt beide nicht mit, das Bauen lief dort also nicht. Python kann
+# ZIP-Dateien von Haus aus. Ausserdem signiert die Python-Fassung das
+# Paket gleich mit und setzt die Ausfuehrungsrechte der Shell-Skripte
+# ausdruecklich - Pythons ZIP-Werkzeug uebertraegt sie sonst nicht.
+#
+# Bleibt vorerst liegen, falls jemand darauf angewiesen ist.
+#
 # Erzeugt ein Update-Paket aus dem aktuellen Stand.
 #   bash build_release.sh            -> Version aus backend/VERSION
 #   bash build_release.sh 0.3.0      -> setzt Version vorher

@@ -17,6 +17,8 @@ import logging
 import os
 import shutil
 import zipfile
+
+import release_sig
 from datetime import datetime
 
 from utctime import utcnow
@@ -117,7 +119,8 @@ def _safe_extract(zf: zipfile.ZipFile, target: Path):
             shutil.copyfileobj(src, out)
 
 
-def validate_and_store_update(file_bytes: bytes, filename: str) -> dict:
+def validate_and_store_update(file_bytes: bytes, filename: str,
+                              signature: str = "") -> dict:
     """
     Prueft ein hochgeladenes ZIP. Bei Erfolg wird es als incoming.zip abgelegt
     und der Status auf 'uploaded' gesetzt - die Ausfuehrung muss danach noch
@@ -130,6 +133,15 @@ def validate_and_store_update(file_bytes: bytes, filename: str) -> dict:
 
     if get_status().get("state") in ("triggered", "running"):
         raise ValueError("Es laeuft bereits ein Update. Bitte abwarten.")
+
+    # Signatur zuerst, vor dem Auspacken. Der Watcher entpackt das Paket
+    # spaeter als root - ein untergeschobenes Paket waere damit
+    # Codeausfuehrung als root. Was nicht vom Herausgeber stammt, wird
+    # gar nicht erst angefasst.
+    try:
+        release_sig.pruefen(file_bytes, signature)
+    except release_sig.SignaturFehler as exc:
+        raise ValueError(str(exc))
 
     shutil.rmtree(PROBE_DIR, ignore_errors=True)
     PROBE_DIR.mkdir(parents=True)
@@ -164,6 +176,10 @@ def validate_and_store_update(file_bytes: bytes, filename: str) -> dict:
     status = {
         "state": "uploaded",
         "filename": filename,
+        # Zum Abgleich mit der Angabe neben dem Download. Ersetzt keine
+        # Signatur, hilft aber bei der Frage "habe ich die richtige Datei".
+        "sha256": release_sig.pruefsumme(file_bytes),
+        "signed": bool(signature),
         "new_version": new_version,
         "current_version": get_current_version(),
         "uploaded_at": utcnow().isoformat(),

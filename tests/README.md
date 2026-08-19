@@ -158,3 +158,35 @@ diesem Zustand auch der Weg zum Abschalten zu ist.
 Ebenfalls dort: `/api/health` ueber Loopback bleibt frei. Ohne diese
 Ausnahme haelt der Watcher ein eingespieltes Update fuer fehlgeschlagen
 und spielt die Sicherung zurueck.
+
+## Lizenzprüfung
+
+```
+python3 tests/license-test.py
+```
+
+Braucht kein Backend. Legt sich ein eigenes Schlüsselpaar in einem
+temporären Verzeichnis an und stellt damit Schlüssel aus — der echte
+private Schlüssel liegt beim Lizenzgeber und ist hier weder vorhanden
+noch nötig.
+
+Der wichtigste Fall darin ist der, der **nicht** auslösen darf: ein
+abgelaufener oder fehlender Schlüssel bringt nichts zum Stillstand.
+Bereits freigegebene Hosts werden weiter gepatcht; begrenzt wird
+ausschließlich die Freigabe neuer Hosts.
+
+Die Durchsetzung über HTTP — Freigabe bis zum Limit, Abweisung darüber,
+Platz wird beim Löschen wieder frei — prüft `roles-test.py`.
+
+## Signatur von Update-Paketen
+
+```
+python3 tests/release-sig-test.py
+```
+
+Braucht kein Backend. Legt sich ein eigenes Schlüsselpaar an — der echte
+private Signaturschlüssel liegt beim Herausgeber.
+
+Geprüft wird unter anderem der häufigste Bedienfehler: die Signatur eines
+**anderen** Pakets. Und der Fall, der nichts blockieren darf: ohne
+ausgelieferten öffentlichen Schlüssel läuft alles wie bisher.

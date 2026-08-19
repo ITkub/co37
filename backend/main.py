@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import (
-    Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile,
+    Depends, FastAPI, File, Form, Header, HTTPException, Query, Request,
+    UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
@@ -31,6 +32,7 @@ from sqlalchemy import or_
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import joblog
+import license
 import migrate
 import update_manager
 from checkmk import CheckmkClient, CheckmkError
@@ -85,6 +87,7 @@ async def lifespan(app: FastAPI):
             # Proxy-Einstellungen in den Zwischenspeicher: sie werden bei
             # jeder einzelnen Anfrage gebraucht.
             load_proxy_config(session)
+            load_license(session)
     except Exception as exc:  # noqa: BLE001
         print(f"Startbenutzer konnte nicht angelegt werden: {exc}", flush=True)
 
@@ -356,6 +359,72 @@ SET_HTTPS_DEADLINE = "https_only_deadline"
 # Bewusst nicht aus dem ersten Aufruf gelernt: ein einziger Aufruf ueber
 # eine falsche Adresse wuerde sie dauerhaft setzen.
 SET_PUBLIC_URL = "public_url"
+
+# Lizenzschluessel. Steht im Klartext in der Datenbank - er ist kein
+# Geheimnis, sondern ein signierter Nachweis. Wer ihn liest, kann damit
+# nichts anfangen, was er nicht ohnehin duerfte.
+SET_LICENSE = "license_key"
+
+# Im Arbeitsspeicher gehalten: die Pruefung laeuft bei jeder Freigabe und
+# bei jedem Abruf der Hostliste.
+_LIZENZ = license.Lizenz()
+
+
+def load_license(session: Session):
+    """Liest den gespeicherten Schluessel in den Zwischenspeicher."""
+    global _LIZENZ
+    roh = _setting(session, SET_LICENSE, "")
+    if not roh:
+        _LIZENZ = license.Lizenz()
+        return
+    try:
+        _LIZENZ = license.pruefen(roh)
+    except license.LizenzFehler:
+        # Ein gespeicherter Schluessel, der nicht mehr prueft - etwa weil
+        # der oeffentliche Teil ausgetauscht wurde. Nicht loeschen, nur
+        # nicht anwenden: der Betreiber soll in der Oberflaeche sehen,
+        # dass etwas nicht stimmt.
+        _LIZENZ = license.Lizenz()
+
+
+def approved_hosts(session: Session) -> int:
+    """Gezaehlt werden freigegebene Hosts - so steht es in der Lizenz."""
+    return len(session.exec(
+        select(Host).where(Host.approval_state == ApprovalState.approved)
+    ).all())
+
+
+def check_host_limit(session: Session):
+    """
+    Wirft, wenn kein Platz mehr frei ist.
+
+    Aufgerufen ausschliesslich bei der Freigabe. Alles andere laeuft
+    unveraendert weiter - auch bei abgelaufenem Schluessel. Ein
+    Patch-Management-Werkzeug, das wegen einer Lizenzfrage Systeme
+    ungepatcht laesst, schafft genau die Luecke, gegen die es angeschafft
+    wurde.
+    """
+    grenze = _LIZENZ.erlaubte_hosts
+    if grenze is None:
+        return
+    belegt = approved_hosts(session)
+    if belegt < grenze:
+        return
+
+    if _LIZENZ.vorhanden and not _LIZENZ.abgelaufen:
+        text = (f"Der Lizenzschluessel umfasst {grenze} Hosts, es sind "
+                f"bereits {belegt} freigegeben. Fuer weitere Hosts wird ein "
+                f"groesserer Schluessel benoetigt: sales@itkub.de")
+    elif _LIZENZ.abgelaufen:
+        text = (f"Der Lizenzschluessel ist abgelaufen. Ohne gueltigen "
+                f"Schluessel sind {grenze} Hosts moeglich, es sind bereits "
+                f"{belegt} freigegeben. Bereits freigegebene Hosts werden "
+                f"weiter gepatcht. Verlaengerung: sales@itkub.de")
+    else:
+        text = (f"Ohne Lizenzschluessel sind {grenze} Hosts moeglich, es "
+                f"sind bereits {belegt} freigegeben. Fuer mehr Hosts: "
+                f"sales@itkub.de")
+    raise HTTPException(403, text)
 
 # Frist, innerhalb derer nach dem Einschalten eine Anmeldung ueber HTTPS
 # erfolgen muss. Sonst schaltet sich der Zwang von selbst wieder ab.
@@ -2321,6 +2390,12 @@ def approve_host(host_id: int, request: Request,
     host = session.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host nicht gefunden")
+
+    # Nur beim Wechsel nach freigegeben pruefen. Ein bereits freigegebener
+    # Host, der erneut freigegeben wird, darf nicht am Limit scheitern.
+    if host.approval_state != ApprovalState.approved:
+        check_host_limit(session)
+
     host.approval_state = ApprovalState.approved
     session.add(host)
     audit(session, who.name, "host.approve", host.hostname, request)
@@ -3341,6 +3416,61 @@ def create_install_token(request: Request,
     }
 
 
+class LicenseIn(BaseModel):
+    key: str
+
+
+@app.get("/api/v1/license", dependencies=[Depends(require_login)])
+def get_license(session: Session = Depends(get_session)):
+    """
+    Stand der Lizenz samt Belegung.
+
+    Fuer jeden angemeldeten Benutzer lesbar, nicht nur fuer
+    Administratoren: wer eine Freigabe versucht und am Limit scheitert,
+    soll den Grund nachvollziehen koennen.
+    """
+    d = _LIZENZ.als_dict()
+    d["belegt"] = approved_hosts(session)
+    d["frei_ohne_schluessel"] = license.FREIE_HOSTS
+    return d
+
+
+@app.post("/api/v1/license", dependencies=[Depends(require_admin)])
+def set_license(payload: LicenseIn, request: Request,
+                who: Principal = Depends(require_admin),
+                session: Session = Depends(get_session)):
+    """
+    Traegt einen Schluessel ein oder entfernt ihn.
+
+    Ein ungueltiger Schluessel wird abgewiesen, ohne den bisherigen
+    Zustand anzutasten - sonst kostet ein Tippfehler beim Einfuegen die
+    halbe Installation.
+    """
+    roh = (payload.key or "").strip()
+
+    if not roh:
+        set_setting(session, SET_LICENSE, "")
+        audit(session, who.name, "license.remove", None, request)
+        session.commit()
+        load_license(session)
+        return get_license(session)
+
+    try:
+        geprueft = license.pruefen(roh)
+    except license.LizenzFehler as exc:
+        # Bewusst kein Speichern und kein Zuruecksetzen.
+        raise HTTPException(400, str(exc))
+
+    set_setting(session, SET_LICENSE, roh)
+    audit(session, who.name, "license.set",
+          f"Nr. {geprueft.nummer}, {geprueft.kunde}, "
+          f"{'unbegrenzt' if geprueft.unbegrenzt else geprueft.daten.get('h')} Hosts, "
+          f"bis {geprueft.daten.get('exp') or 'unbefristet'}", request)
+    session.commit()
+    load_license(session)
+    return get_license(session)
+
+
 class ProxySettings(BaseModel):
     trusted_proxy: Optional[str] = None
     https_only: Optional[bool] = None
@@ -3502,11 +3632,23 @@ def update_status():
 
 @app.post("/api/v1/update/upload")
 async def update_upload(request: Request, file: UploadFile = File(...),
+                        signature: str = Form(default=""),
+                        sigfile: Optional[UploadFile] = File(default=None),
                         who: Principal = Depends(require_admin),
                         session: Session = Depends(get_session)):
+    """
+    Nimmt ein Update-Paket entgegen.
+
+    Die Signatur kann als Text mitgeschickt oder als .sig-Datei angehaengt
+    werden - je nachdem, was der Oberflaeche gerade vorliegt.
+    """
     name = file.filename or "update.zip"
+    sig = signature.strip()
+    if not sig and sigfile is not None:
+        sig = (await sigfile.read()).decode("ascii", "replace").strip()
     try:
-        res = update_manager.validate_and_store_update(await file.read(), name)
+        res = update_manager.validate_and_store_update(
+            await file.read(), name, sig)
     except ValueError as exc:
         audit(session, who.name, "update.upload.failed", f"{name}: {exc}", request)
         session.commit()
