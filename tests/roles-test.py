@@ -90,6 +90,9 @@ VERBOTEN = [
     ("GET",    "/api/v1/users", None),
     ("POST",   "/api/v1/users", {"username": "x", "password": "yyyyyyyy"}),
     ("GET",    "/api/v1/audit", None),
+    # Die Vorgabesprache gilt fuer alle und fuer die Anmeldeseite - das ist
+    # eine Einstellung der Installation, keine Anzeigevorliebe.
+    ("POST",   "/api/v1/settings/language", {"language": "de"}),
     ("POST",   "/api/v1/install-token", {}),
     ("GET",    "/api/v1/install-token", None),
     ("GET",    "/api/v1/packages", None),
@@ -111,6 +114,9 @@ ERLAUBT = [
     ("GET", "/api/v1/jobs", None),
     ("GET", "/api/v1/jobs/active", None),
     ("GET", "/api/v1/me", None),
+    # Die eigene Sprache ist eine Anzeigeeinstellung. Sie einem Benutzer zu
+    # verwehren waere schikanoes und truege nichts zur Sicherheit bei.
+    ("POST", "/api/v1/me/language", {"language": "de"}),
 ]
 for method, path, body in ERLAUBT:
     code, res = call(path, body, method=method, hdr=usr)

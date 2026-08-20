@@ -244,6 +244,14 @@ class User(SQLModel, table=True):
     must_change_password: bool = Field(default=False)
 
     disabled: bool = Field(default=False)
+
+    # Sprache der Oberflaeche. None heisst ausdruecklich "nicht gewaehlt",
+    # dann gilt die Vorgabe der Installation. Ein Vorgabewert 'en' waere
+    # hier falsch: er liesse sich nicht mehr von einer bewussten Wahl
+    # unterscheiden, und eine spaeter geaenderte Vorgabe erreichte
+    # bestehende Benutzer nie.
+    language: Optional[str] = Field(default=None)
+
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
     last_login: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
 

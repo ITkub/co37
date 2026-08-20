@@ -1957,6 +1957,53 @@ async function startApp(){
   scheduleRefresh();
 }
 
+/* ---------- Sprache ---------- */
+/*
+ * Reihenfolge: Wahl des Benutzers, Cookie, Vorgabe der Installation,
+ * Englisch. Die Vorgabe kommt aus /api/health, weil die Anmeldeseite sie
+ * braucht, bevor irgendein Benutzer bekannt ist.
+ *
+ * Laeuft mit dem, was gerade da ist, und ohne zu scheitern: Ist der Server
+ * nicht erreichbar, bleibt es beim Cookie oder bei Englisch. Eine
+ * Oberflaeche, die wegen einer Spracheinstellung nicht startet, waere der
+ * schlechtere Tausch.
+ */
+async function spracheAnwenden(benutzer){
+  let vorgabe = null;
+  try {
+    const h = await (await fetch(API + "/api/health", {cache: "no-store"})).json();
+    vorgabe = h.default_language || null;
+  } catch(e){}
+  // Beim Ermitteln nicht ins Cookie schreiben: sonst wuerde die Vorgabe der
+  // Installation beim ersten Besuch als eigene Wahl festgeschrieben und
+  // eine spaetere Aenderung der Vorgabe erreichte niemanden mehr.
+  setzeSprache(ermittleSprache({ benutzer, vorgabe }), { merken: false });
+}
+
+async function spracheWaehlen(code){
+  if (!setzeSprache(code)) return;          // schreibt das Cookie
+  try {
+    await api("POST", "/api/v1/me/language", { language: code });
+    if (ME) ME.language = code;
+    toast(t("language.own.saved"));
+  } catch(e){
+    // Die Oberflaeche steht bereits um. Dass der Server sie sich nicht
+    // merken konnte, hat api() schon gemeldet.
+  }
+}
+
+async function vorgabespracheWaehlen(code){
+  try {
+    await api("POST", "/api/v1/settings/language", { language: code });
+    toast(t("language.default.saved"));
+  } catch(e){}
+}
+
+document.getElementById("spMeine").onchange =
+  (e) => spracheWaehlen(e.target.value);
+document.getElementById("spVorgabe").onchange =
+  (e) => vorgabespracheWaehlen(e.target.value);
+
 (async () => {
   // Ob eine Sitzung besteht, weiss nur der Server - das Cookie ist fuer
   // JavaScript unsichtbar. Also einfach fragen: bei 401 schaltet api()
@@ -1964,7 +2011,13 @@ async function startApp(){
   try {
     ME = await api("GET", "/api/v1/me");
     setSession(true);
-  } catch(e){ return; }
+  } catch(e){
+    // Auch die Anmeldemaske will in der richtigen Sprache erscheinen.
+    await spracheAnwenden(null);
+    return;
+  }
+  await spracheAnwenden(ME.language);
+  document.getElementById("spMeine").value = SPRACHE;
   document.getElementById("appShell").style.display = "";
   await startApp();
 })();

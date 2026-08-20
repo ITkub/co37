@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- CO37_FRONTEND_VERSION: 0.34.6 -->
+<!-- CO37_FRONTEND_VERSION: 0.35.0 -->
 <title>CO-37</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2212%22%20fill%3D%22%23020817%22%2F%3E%3Cpath%20d%3D%22M32%209%2046%2016v13c0%2011-6%2018-14%2022-8-4-14-11-14-22V16z%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223.5%22%20stroke-linejoin%3D%22round%22%2F%3E%3Cpath%20d%3D%22M22%2027h20l-4%207H26z%22%20fill%3D%22%23ffffff%22%2F%3E%3Cpath%20d%3D%22M26%2038h12%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E">
 <style>
@@ -547,14 +547,18 @@ dialog#dlgSettings .hint{max-width:78ch}
          Checkmk die Zugangsdaten, Update laedt Code hoch, den der Watcher
          als root auspackt. Alle drei nur fuer Administratoren. Fuer
          Benutzer bleibt Konto, dort aendern sie ihr Passwort. -->
-    <button class="on admin-only" data-tab="tabAgents">Agents</button>
-    <button class="admin-only" data-tab="tabCmk">Checkmk</button>
-    <button class="admin-only" data-tab="tabUpd">Update</button>
-    <button class="admin-only" data-tab="tabProxy">Zugang</button>
-    <button data-tab="tabLizenz">Lizenz</button>
-    <button data-tab="tabAccount">Konto</button>
-    <button data-tab="tabUsers" class="admin-only">Benutzer</button>
-    <button data-tab="tabAudit" class="admin-only">Protokoll</button>
+    <!-- Der ausgeschriebene Text ist Englisch und zugleich der Rueckfall,
+         falls das Skript nicht laeuft. data-i18n traegt beim Umschalten die
+         andere Sprache ein. -->
+    <button class="on admin-only" data-tab="tabAgents" data-i18n="settings.tab.agents">Agents</button>
+    <button class="admin-only" data-tab="tabCmk" data-i18n="settings.tab.checkmk">Checkmk</button>
+    <button class="admin-only" data-tab="tabUpd" data-i18n="settings.tab.update">Update</button>
+    <button class="admin-only" data-tab="tabProxy" data-i18n="settings.tab.access">Access</button>
+    <button data-tab="tabLizenz" data-i18n="settings.tab.license">License</button>
+    <button data-tab="tabAccount" data-i18n="settings.tab.account">Account</button>
+    <button data-tab="tabUsers" class="admin-only" data-i18n="settings.tab.users">Users</button>
+    <button data-tab="tabAudit" class="admin-only" data-i18n="settings.tab.audit">Log</button>
+    <button data-tab="tabSprache" data-i18n="settings.tab.language">Language</button>
   </div>
   <div class="dlg-body">
 
@@ -730,6 +734,29 @@ dialog#dlgSettings .hint{max-width:78ch}
       </div>
     </div>
 
+    <!-- Sprache. Die eigene Wahl steht am Benutzer in der Datenbank und
+         folgt ihm auf jeden Rechner. Die Vorgabe der Installation gilt fuer
+         alle, die selbst nichts gewaehlt haben, und fuer die Anmeldeseite -
+         dort ist noch kein Benutzer bekannt. Nur Administratoren. -->
+    <div class="pane" id="tabSprache">
+      <div class="hint" data-i18n="language.hint">The language applies to this interface only. Messages from older agents keep the wording they were recorded with.</div>
+      <div class="section" style="border-top:none;padding-top:0">
+        <label data-i18n="language.own">My language</label>
+        <select id="spMeine">
+          <option value="en" data-i18n="language.name.en">English</option>
+          <option value="de" data-i18n="language.name.de">Deutsch</option>
+        </select>
+      </div>
+      <div class="section admin-only">
+        <label data-i18n="language.default">Default for this installation</label>
+        <select id="spVorgabe">
+          <option value="en" data-i18n="language.name.en">English</option>
+          <option value="de" data-i18n="language.name.de">Deutsch</option>
+        </select>
+        <div class="hint" data-i18n="language.default.hint">Applies to users who have not chosen a language themselves, and to the sign-in page.</div>
+      </div>
+    </div>
+
     <div class="pane" id="tabUsers">
       <div class="hint">Benutzer dürfen alles am Patch-Management, aber keine Benutzer verwalten. Das können nur Administratoren.</div>
       <div class="section" style="border-top:none;padding-top:0">
@@ -808,6 +835,10 @@ dialog#dlgSettings .hint{max-width:78ch}
   <div class="dlg-foot"><button data-close>Schließen</button></div>
 </dialog>
 
+<!-- i18n.js vor app.js: dort steht t(), und app.js ruft es beim Aufbau
+     der Oberflaeche bereits auf. Beide ohne type=module, damit script-src
+     bei 'self' bleiben kann und keine Einbindung ueber Umwege noetig ist. -->
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

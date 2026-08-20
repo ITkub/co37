@@ -32,6 +32,12 @@ const html = fs.readFileSync(HTML_PATH, "utf8");
 // Regel script-src ohne 'unsafe-inline' auskommt.
 const JS_PATH = require("path").join(require("path").dirname(HTML_PATH), "app.js");
 const appjs = fs.readFileSync(JS_PATH, "utf8");
+// i18n.js steht im Browser als zweites Skript daneben und teilt sich mit
+// app.js den globalen Namensraum. Hier muss es davor stehen, sonst fehlen
+// t() und setzeSprache - und was app.js davon benutzt, faellt erst im
+// Betrieb auf.
+const I18N_PATH = require("path").join(require("path").dirname(HTML_PATH), "i18n.js");
+const i18njs = fs.readFileSync(I18N_PATH, "utf8");
 
 // ---------------------------------------------------------------- DOM-Attrappe
 const store = {};
@@ -156,7 +162,7 @@ global.setInterval = () => 0;
 global.setTimeout = () => 0;
 
 // -------------------------------------------------------------- Skript laden
-const script = appjs;
+const script = i18njs + "\n" + appjs;
 const mod = { exports: {} };
 const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, toast, "
   + "rebootHost: typeof rebootHost !== 'undefined' ? rebootHost : null, "
@@ -387,6 +393,20 @@ global.setTimeout = origSetTimeout;
     // erscheint die Meldung mittig statt unten rechts.
     check("popover-Vorgaben ueberschrieben",
           /\.toast\[popover\]\{[^}]*inset:auto/.test(html));
+  }
+
+  console.log("\n=== Skripte werden auch wirklich eingebunden ===");
+  {
+    // Dieser Test haengt beide Dateien aneinander und fuehrt sie zusammen
+    // aus. Fehlte im Markup die Zeile fuer i18n.js, liefe der Test trotzdem
+    // durch und der Browser zeigte eine Oberflaeche ohne Uebersetzungen -
+    // eine Abweichung, die genau hier verborgen bliebe.
+    const skripte = [...html.matchAll(/<script src="([^"]+)"/g)].map(m => m[1]);
+    check("i18n.js ist eingebunden", skripte.includes("i18n.js"), skripte.join(", "));
+    check("app.js ist eingebunden", skripte.includes("app.js"), skripte.join(", "));
+    check("i18n.js steht vor app.js",
+          skripte.indexOf("i18n.js") < skripte.indexOf("app.js"),
+          skripte.join(", "));
   }
 
   console.log("\n=== Server nicht erreichbar ===");

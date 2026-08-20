@@ -365,6 +365,23 @@ SET_PUBLIC_URL = "public_url"
 # nichts anfangen, was er nicht ohnehin duerfte.
 SET_LICENSE = "license_key"
 
+# Vorgabesprache der Installation. Gilt fuer Benutzer, die selbst nichts
+# gewaehlt haben, und fuer die Anmeldeseite - dort ist noch kein Benutzer
+# bekannt. Englisch ist die Vorgabe der Vorgabe.
+SET_LANGUAGE = "default_language"
+SPRACHEN = ("en", "de")
+
+
+def pruefe_sprache(code) -> Optional[str]:
+    """
+    Gibt die Sprachkennung zurueck, wenn sie bekannt ist, sonst None.
+
+    Genauer Vergleich gegen die Liste, keine Teilzeichenkette und kein
+    Praefix: 'de-DE' ist nicht 'de', und was hier durchrutscht, landet
+    unuebersetzt in der Oberflaeche.
+    """
+    return code if code in SPRACHEN else None
+
 # Im Arbeitsspeicher gehalten: die Pruefung laeuft bei jeder Freigabe und
 # bei jedem Abruf der Hostliste.
 _LIZENZ = license.Lizenz()
@@ -3250,7 +3267,50 @@ def whoami(who: Principal = Depends(require_login)):
         "is_admin": who.is_admin,
         "must_change_password": bool(
             who.user.must_change_password if who.user else False),
+        # None heisst "nicht gewaehlt". Die Oberflaeche faellt dann auf die
+        # Vorgabe der Installation zurueck, nicht auf einen Wert von hier -
+        # sonst waere die Vorgabe fuer bestehende Konten wirkungslos.
+        "language": (who.user.language if who.user else None),
     }
+
+
+class SpracheWahl(BaseModel):
+    language: str
+
+
+@app.post("/api/v1/me/language")
+def set_own_language(payload: SpracheWahl,
+                     who: Principal = Depends(require_login),
+                     session: Session = Depends(get_session)):
+    """
+    Speichert die Sprache am eigenen Konto. Keine Rolle noetig - das ist
+    eine Anzeigeeinstellung, kein Eingriff.
+
+    Der API-Key hat kein Konto und damit nichts zu speichern. Das ist kein
+    Fehlerfall, den jemand beheben muesste: die Oberflaeche merkt sich die
+    Wahl dann nur im Cookie.
+    """
+    code = pruefe_sprache(payload.language)
+    if not code:
+        raise HTTPException(400, f"Unbekannte Sprache: {payload.language}")
+    if not who.user:
+        return {"language": code, "gespeichert": False}
+    who.user.language = code
+    session.add(who.user)
+    session.commit()
+    return {"language": code, "gespeichert": True}
+
+
+@app.post("/api/v1/settings/language", dependencies=[Depends(require_admin)])
+def set_default_language(payload: SpracheWahl,
+                         session: Session = Depends(get_session)):
+    """Vorgabesprache der Installation. Nur Administratoren."""
+    code = pruefe_sprache(payload.language)
+    if not code:
+        raise HTTPException(400, f"Unbekannte Sprache: {payload.language}")
+    set_setting(session, SET_LANGUAGE, code)
+    session.commit()
+    return {"language": code}
 
 
 @app.post("/api/v1/me/password")
@@ -3607,6 +3667,12 @@ def health(session: Session = Depends(get_session)):
         "version": update_manager.get_current_version(),
         "agent_version": agent_source_version(),
         "schema_version": migrate.get_version(engine),
+        # Bewusst hier und nicht in einem eigenen Endpunkt: die Anmeldeseite
+        # braucht die Vorgabesprache, bevor irgendein Benutzer bekannt ist,
+        # und /api/health fragt die Oberflaeche ohnehin bei jedem Durchlauf
+        # ab. Ein zweiter offener Endpunkt waere zusaetzliche Angriffsflaeche
+        # fuer eine Auskunft, die kein Geheimnis ist.
+        "default_language": _setting(session, SET_LANGUAGE, "en"),
     }
 
 

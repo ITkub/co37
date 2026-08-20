@@ -45,7 +45,9 @@ logger = logging.getLogger(__name__)
 # 15: host.last_seen_secure - kam der letzte Kontakt verschluesselt ueber
 #    den Proxy? Grundlage fuer die Bereitschaftsanzeige vor dem
 #    Umschalten auf HTTPS-Zwang.
-SCHEMA_VERSION = 15
+# 16: user.language - Sprache der Oberflaeche je Konto. Ohne Vorgabewert:
+#    NULL heisst "nie gewaehlt", dann gilt die Vorgabe der Installation.
+SCHEMA_VERSION = 16
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -78,6 +80,13 @@ EXPECTED_COLUMNS = {
         "downtime_ref": "VARCHAR",
         "scheduled_at": "DATETIME",
         "expires_at": "DATETIME",
+    },
+    "user": {
+        # Ohne DEFAULT: NULL heisst "hat sich nie entschieden", und dann
+        # gilt die Vorgabe der Installation. Ein DEFAULT 'en' machte aus
+        # jedem bestehenden Konto eine bewusste Wahl fuer Englisch - eine
+        # spaeter geaenderte Vorgabe erreichte diese Konten nie mehr.
+        "language": "VARCHAR",
     },
 }
 

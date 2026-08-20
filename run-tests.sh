@@ -104,6 +104,8 @@ REIHEN=(
   "reboot-report   $PY tests/reboot-report-test.py"
   "harness         $PY tests/harness-test.py"
   "archiv          $PY tests/archiv-test.py"
+  "i18n            node tests/i18n-test.js frontend/index.html"
+  "i18n-api        $PY tests/i18n-api-test.py"
   "proxy-https     $PY tests/proxy-https-test.py"
   "agent-api       $PY tests/agent-api-test.py"
   "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
