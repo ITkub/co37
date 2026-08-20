@@ -221,6 +221,20 @@ Wer die Datei austauschen kann, kann auch die Prüfsummendatei daneben
 austauschen. Sie schützt gegen einen abgebrochenen Download, nicht gegen
 Manipulation.
 
+## Der Schlüssel lässt sich nicht per Update austauschen
+
+Zwei Sicherungen, damit ein Update die Vertrauensbasis nicht verändern
+kann:
+
+- **Fehlt `release_key.pub` im Paket**, bleibt der vorhandene erhalten.
+  Der Watcher räumt Verzeichnisse vor dem Kopieren ab — ohne diese
+  Ausnahme nähme ein Paket ohne Schlüssel ihn mit, und danach liefe jedes
+  weitere Update ohne Prüfung durch.
+- **Bringt ein Paket einen anderen Schlüssel mit**, wird es abgewiesen.
+
+Soll der Schlüssel wirklich gewechselt werden, muss er von Hand auf dem
+Server ersetzt werden — bewusst, nicht als Nebenwirkung eines Updates.
+
 ## Der Übergang
 
 **Das Paket, das die Prüfung einführt, muss noch von der bisherigen

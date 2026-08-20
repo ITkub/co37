@@ -91,11 +91,50 @@ def _find_update_root(extract_dir: Path) -> Path:
     return extract_dir
 
 
+# Oeffentliche Schluessel, die ein Update niemals stillschweigend
+# veraendern darf. Sie entscheiden, wem diese Installation vertraut.
+GESCHUETZTE_SCHLUESSEL = ["backend/release_key.pub", "backend/license_key.pub"]
+
+
+def _pruefe_schluessel(root: Path) -> Optional[str]:
+    """
+    Ein Update darf die Vertrauensbasis nicht austauschen.
+
+    Bringt ein Paket einen ANDEREN oeffentlichen Schluessel mit als den
+    hier vorhandenen, wird es abgewiesen. Sonst genuegte ein
+    untergeschobenes Paket mit eigenem Schluessel, und ab dann waere jedes
+    weitere Paket desselben Absenders gueltig - ohne Meldung, ohne Spur.
+
+    Fehlt der Schluessel im Paket, ist das kein Fehler: er bleibt beim
+    Einspielen erhalten (siehe update_watcher.py). Genau so ist die
+    Pruefung schon einmal stillschweigend ausgefallen - ein Paket ohne
+    release_key.pub, und der Watcher hatte die Datei mitgeloescht.
+    """
+    hier = Path(__file__).resolve().parent.parent
+    for rel in GESCHUETZTE_SCHLUESSEL:
+        vorhanden = hier / rel
+        im_paket = root / rel
+        if not vorhanden.is_file() or not im_paket.is_file():
+            continue
+        alt = vorhanden.read_text(encoding="ascii", errors="replace").strip()
+        neu = im_paket.read_text(encoding="ascii", errors="replace").strip()
+        if alt and neu and alt != neu:
+            name = Path(rel).name
+            return (
+                f"Das Paket bringt einen anderen {name} mit als den hier "
+                f"hinterlegten. Ein Update darf die Vertrauensbasis nicht "
+                f"austauschen - das Paket wird nicht eingespielt. Soll der "
+                f"Schluessel wirklich gewechselt werden, muss er von Hand "
+                f"ersetzt werden."
+            )
+    return None
+
+
 def _validate_root(root: Path) -> Optional[str]:
     missing = [p for p in REQUIRED_PATHS if not (root / p).exists()]
     if missing:
         return "Kein gueltiges CO-37-Update-Paket. Es fehlen: " + ", ".join(missing)
-    return None
+    return _pruefe_schluessel(root)
 
 
 def _safe_extract(zf: zipfile.ZipFile, target: Path):

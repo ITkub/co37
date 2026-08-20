@@ -84,6 +84,8 @@ for (const m of html.matchAll(/<button([^>]*?)data-(h?)tab="(\w+)"([^>]*)>/g)) {
 // mitgeschnitten, damit der Test ihn aufrufen kann - im Browser passiert
 // das ueber ein echtes Klickereignis.
 let CLICK_HANDLER = null;
+// Offene Dialoge fuer document.querySelectorAll("dialog[open]").
+const DIALOGE_OFFEN = [];
 
 global.document = {
   documentElement: { dataset: {} },
@@ -92,7 +94,14 @@ global.document = {
   addEventListener(typ, fn) { if (typ === "click") CLICK_HANDLER = fn; },
   removeEventListener() {},
   getElementById: el,
-  createElement: () => mkEl("tmp"),
+  createElement: () => {
+    const e = mkEl("tmp");
+    // Die Meldung wird als popover eingeblendet, wenn der Browser es
+    // kann. Hier bewusst NICHT vorhanden, damit der Ersatzweg geprueft
+    // wird: anhaengen an den offenen Dialog.
+    e.setAttribute = (k, v) => { e.dataset[k] = v; };
+    return e;
+  },
   querySelector(sel) {
     // Kein Dialog offen in der Attrappe - der Kopier-Rueckfallweg faellt
     // dann auf document.body zurueck, wie im Browser ohne offenen Dialog.
@@ -100,6 +109,8 @@ global.document = {
     return null;
   },
   querySelectorAll(sel) {
+    // Meldungen haengen sich an den obersten offenen Dialog.
+    if (sel === "dialog[open]") return DIALOGE_OFFEN;
     if (sel === "#sTabs button") return tabButtons.filter(b => b._group === "sTabs");
     if (sel === "#hTabs button") return tabButtons.filter(b => b._group === "hTabs");
     if (sel === "[data-close]") return [];
@@ -345,6 +356,35 @@ global.setTimeout = origSetTimeout;
           el("roState").textContent);
     check("Hinweistext vorhanden", el("roHint").innerHTML.length > 20);
   } catch(e){ check("loadRollout laeuft durch", false, e.message); }
+
+  console.log("\n=== Meldungen bei offenem Dialog ===");
+  {
+    // Ein mit showModal() geoeffneter Dialog liegt im obersten Fenster des
+    // Browsers - darueber kommt kein z-index. Eine Meldung am body haengt
+    // damit dahinter und ist nicht lesbar. Genau so ist die Begruendung
+    // fuer ein abgewiesenes Update untergegangen.
+    const angehaengt = [];
+    const dialog = { appendChild: (e) => angehaengt.push(e), remove(){} };
+    DIALOGE_OFFEN.length = 0;
+    DIALOGE_OFFEN.push(dialog);
+
+    api.toast("Testmeldung", true);
+    check("Meldung landet im offenen Dialog", angehaengt.length === 1,
+          angehaengt.length);
+    check("Fehlermeldung ist als solche gekennzeichnet",
+          (angehaengt[0] || {}).className === "toast err",
+          (angehaengt[0] || {}).className);
+
+    DIALOGE_OFFEN.length = 0;
+    api.toast("Ohne Dialog");
+    check("ohne offenen Dialog bleibt es beim body", angehaengt.length === 1,
+          angehaengt.length);
+
+    // Die Gestaltung des popover-Wegs muss zurueckgenommen sein, sonst
+    // erscheint die Meldung mittig statt unten rechts.
+    check("popover-Vorgaben ueberschrieben",
+          /\.toast\[popover\]\{[^}]*inset:auto/.test(html));
+  }
 
   console.log("\n=== Einstellungsdialog ===");
   {

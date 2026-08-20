@@ -38,6 +38,11 @@ data/
 # Die Pakete entstehen aus dem Quellstand. Sie mitzufuehren blaeht das
 # Repository auf und fuehrt zu der Frage, welche Fassung nun gilt.
 co37_v*.zip
+# Die Signatur und die Pruefsumme gehoeren zum Paket, nicht zum Quellstand.
+# Ohne das zugehoerige Archiv sind sie im Repository wertlos, und das
+# Archiv steht eine Zeile darueber schon nicht drin.
+co37_v*.zip.sig
+co37_v*.zip.sha256
 *.deb
 *.msi
 packaging/cache/

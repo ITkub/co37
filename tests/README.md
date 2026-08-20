@@ -190,3 +190,22 @@ private Signaturschlüssel liegt beim Herausgeber.
 Geprüft wird unter anderem der häufigste Bedienfehler: die Signatur eines
 **anderen** Pakets. Und der Fall, der nichts blockieren darf: ohne
 ausgelieferten öffentlichen Schlüssel läuft alles wie bisher.
+
+## Vertrauensbasis
+
+```
+python3 tests/keyguard-test.py
+```
+
+Braucht kein Backend. Prueft zwei Regeln, beide aus einem Vorfall
+entstanden:
+
+**Ein Paket ohne `release_key.pub` darf die Datei nicht loeschen.** Der
+Watcher raeumt `MANAGED_DIRS` vor dem Kopieren ab — ein Paket ohne den
+Schluessel hat ihn dadurch mitgenommen, und danach ging jedes weitere
+Update **ohne Signatur** durch. Ohne Meldung, ohne Spur.
+
+**Ein Paket mit einem anderen Schluessel wird abgewiesen.** Sonst
+genuegte ein untergeschobenes Paket mit eigenem Schluessel, und ab dann
+waere jedes weitere Paket desselben Absenders gueltig. Ein Wechsel bleibt
+moeglich, aber von Hand und bewusst.

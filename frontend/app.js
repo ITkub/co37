@@ -144,12 +144,44 @@ async function api(method, path, body){
   }
   return res.status === 204 ? null : res.json();
 }
+/*
+ * Kurzmeldung unten rechts.
+ *
+ * Ein Dialog, der mit showModal() geoeffnet wurde, liegt im obersten
+ * Fenster des Browsers - darueber kommt kein z-index. Eine Meldung am
+ * body haengt damit zwangslaeufig dahinter und ist nicht lesbar. Genau so
+ * ist die Begruendung fuer ein abgewiesenes Update untergegangen.
+ *
+ * Zwei Wege, je nachdem was der Browser kann:
+ *   1. popover - liegt ebenfalls im obersten Fenster, unabhaengig von
+ *      Dialogen. Der saubere Weg.
+ *   2. sonst in den offenen Dialog haengen. Dann liegt die Meldung mit
+ *      ihm im obersten Fenster. Sie verschwindet, wenn er geschlossen
+ *      wird - das ist der Preis, aber besser als unsichtbar.
+ */
 function toast(msg, err){
   const el = document.createElement("div");
   el.className = "toast" + (err ? " err" : "");
   el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 5000);
+
+  let ziel = document.body;
+  let alsPopover = false;
+
+  if (typeof el.showPopover === "function"){
+    // 'manual' statt 'auto': eine 'auto'-Einblendung schliesst sich, sobald
+    // woanders geklickt wird - und Fehlermeldungen sollen stehen bleiben.
+    el.setAttribute("popover", "manual");
+    alsPopover = true;
+  } else {
+    const dialoge = document.querySelectorAll("dialog[open]");
+    if (dialoge.length) ziel = dialoge[dialoge.length - 1];
+  }
+
+  ziel.appendChild(el);
+  if (alsPopover){
+    try { el.showPopover(); } catch(e){}
+  }
+  setTimeout(() => el.remove(), err ? 9000 : 5000);
 }
 /**
  * Maskiert Text fuer die Ausgabe in HTML.
@@ -1702,7 +1734,15 @@ async function uploadZip(dateien){
   toast(sig ? "Paket und Signatur werden geprüft…" : "Paket wird geprüft…");
   const res = await fetch(API + "/api/v1/update/upload",
     {method:"POST", credentials: "same-origin", body:fd});
-  if (!res.ok){ toast((await res.text()).slice(0,220), true); return; }
+  if (!res.ok){
+    // Die Antwort ist JSON. Ohne Auspacken stand die Begruendung als
+    // {"detail":"..."} in der Meldung - lesbar, aber unschoen, und der
+    // Anfang wurde von der Klammer verbraucht.
+    let msg = await res.text();
+    try { msg = JSON.parse(msg).detail || msg; } catch(e){}
+    toast(String(msg).slice(0, 300), true);
+    return;
+  }
   await loadUpdate(); toast("Paket geprüft und bereitgestellt");
 }
 const drop = document.getElementById("uDrop"), fileInput = document.getElementById("uFile");

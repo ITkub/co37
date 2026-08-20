@@ -74,6 +74,21 @@ MANAGED_FILES = [
 # Vorgang mitten im Austausch abgebrochen.
 SELF_FILE = "update_watcher.py"
 
+# Dateien, die ein Update nicht loeschen darf.
+#
+# MANAGED_DIRS werden vor dem Kopieren geloescht - anders liessen sich
+# entfallene Dateien nie entfernen. Diese hier entscheiden aber, wem die
+# Installation vertraut, und sie entstehen beim Herausgeber, nicht im
+# Paket. Ein Paket ohne sie wuerde die Signaturpruefung stillschweigend
+# abschalten: ohne release_key.pub prueft CO-37 nichts mehr.
+#
+# Genau so ist es passiert - ein Paket, das den Schluessel nicht enthielt,
+# und danach ging jedes weitere Update ohne Signatur durch.
+BEWAHRTE_DATEIEN = [
+    "backend/release_key.pub",
+    "backend/license_key.pub",
+]
+
 POLL_SECONDS = 10
 
 # Kennung dieser Watcher-Fassung. Wird beim Start hinterlegt, damit in der
@@ -81,7 +96,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.33.0"
+WATCHER_VERSION = "0.34.2"
 WATCHER_INFO = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 
@@ -185,6 +200,16 @@ def backup_current(tag: str) -> Path:
 
 
 def restore_backup(src: Path):
+    # Auch hier bewahren. Die Sicherung stammt vom Stand vor dem Update -
+    # enthielt schon der Schluessel, ist alles gut. Wurde er dagegen erst
+    # nach der Sicherung angelegt, ginge er beim Zurueckrollen verloren,
+    # und die Signaturpruefung waere danach still abgeschaltet.
+    bewahrt = {}
+    for rel in BEWAHRTE_DATEIEN:
+        p = BASE / rel
+        if p.is_file():
+            bewahrt[rel] = p.read_bytes()
+
     for name in MANAGED_DIRS:
         target = BASE / name
         source = src / name
@@ -192,6 +217,13 @@ def restore_backup(src: Path):
             continue
         shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(source, target)
+
+    for rel, inhalt in bewahrt.items():
+        ziel = BASE / rel
+        if ziel.is_file():
+            continue
+        ziel.parent.mkdir(parents=True, exist_ok=True)
+        ziel.write_bytes(inhalt)
     for name in MANAGED_FILES + [SELF_FILE]:
         source = src / name
         if source.is_file():
@@ -213,6 +245,14 @@ def swap_in_new_code(root: Path) -> bool:
     Tauscht Verzeichnisse und Dateien auf oberster Ebene aus.
     Gibt zurueck, ob sich der Watcher selbst geaendert hat.
     """
+    # Vor dem Loeschen sichern, danach zurueckschreiben, sofern das Paket
+    # sie nicht selbst mitbringt.
+    bewahrt = {}
+    for rel in BEWAHRTE_DATEIEN:
+        p = BASE / rel
+        if p.is_file():
+            bewahrt[rel] = p.read_bytes()
+
     for name in MANAGED_DIRS:
         source = root / name
         if not source.exists():
@@ -220,6 +260,15 @@ def swap_in_new_code(root: Path) -> bool:
         target = BASE / name
         shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(source, target)
+
+    for rel, inhalt in bewahrt.items():
+        ziel = BASE / rel
+        if ziel.is_file():
+            continue          # Paket bringt die Datei mit - dann gilt sie
+        ziel.parent.mkdir(parents=True, exist_ok=True)
+        ziel.write_bytes(inhalt)
+        log(f"{rel} aus dem bisherigen Stand uebernommen "
+            f"(im Paket nicht enthalten)")
 
     for name in MANAGED_FILES:
         source = root / name
