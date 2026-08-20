@@ -30,6 +30,57 @@ HIER=$(cd "$(dirname "$0")" && pwd)
 cd "$HIER" || exit 1
 
 # ---------------------------------------------------------------------
+# Werkzeuge suchen
+# ---------------------------------------------------------------------
+# Nicht fest 'python3' aufrufen. Unter Windows gibt es das nicht - dort
+# faengt ein Platzhalter des Microsoft Store den Aufruf ab, schreibt einen
+# Hinweis und scheitert. Frueher lief das in den Portcheck weiter unten
+# und wurde dort zu "Port belegt" - eine Meldung, die mit dem wahren Grund
+# nichts zu tun hat. Der Port war frei. Daraufhin wurde einmal ungetestet
+# gebaut, eingecheckt und ausgeliefert.
+#
+# Darum die Kandidaten wirklich ausfuehren statt nur im Pfad zu suchen:
+# 'command -v' sagt, dass etwas dort liegt, nicht dass es taugt. Nur was
+# sich als Python 3 meldet, zaehlt - der Store-Platzhalter faellt damit
+# von selbst durch, ein altes Python 2 ebenfalls.
+werkzeug_fehlt() {
+  rm -rf "$TMP"
+  exit 1
+}
+
+PY=""
+for kandidat in "${CO37_PYTHON:-}" python3 python py; do
+  [ -z "$kandidat" ] && continue
+  if "$kandidat" -c "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)" \
+       >/dev/null 2>&1; then
+    PY="$kandidat"; break
+  fi
+done
+
+if [ -z "$PY" ]; then
+  echo "Kein Python 3 gefunden. Versucht wurden: python3, python, py."
+  echo "Unter Windows meldet sich hier oft nur der Platzhalter des"
+  echo "Microsoft Store. Eigener Pfad: CO37_PYTHON=/pfad/zu/python $0"
+  werkzeug_fehlt
+fi
+
+# node braucht nur die Frontend-Reihe. Ohne diese Pruefung faellt sie
+# spaeter mit null Pruefungen durch, und der Grund steht klein am Ende
+# ihrer Ausgabe. Lieber gleich hier und deutlich.
+#
+# Nur verlangen, wenn diese Reihe ueberhaupt drankommt: wer gezielt
+# 'run-tests.sh agent-api' aufruft, braucht kein node und soll deswegen
+# nicht abgewiesen werden.
+if [ -z "$NUR" ] || [ "$NUR" = "frontend" ]; then
+  if ! node --version >/dev/null 2>&1; then
+    echo "node nicht gefunden. Die Frontend-Reihe braucht es."
+    echo "Entweder node installieren oder eine einzelne Reihe waehlen,"
+    echo "etwa: $0 agent-api"
+    werkzeug_fehlt
+  fi
+fi
+
+# ---------------------------------------------------------------------
 # Reihenfolge
 # ---------------------------------------------------------------------
 # roles MUSS zuletzt laufen. Am Ende loest die Reihe die Drosselung der
@@ -38,19 +89,24 @@ cd "$HIER" || exit 1
 # anmeldet, liefe in die Sperre und meldete Fehler, die nichts mit ihr zu
 # tun haben - genau so ist der Frontend-Test schon einmal stumm
 # ausgestiegen.
+#
+# $PY steht hier direkt drin, nicht als Platzhalter wie PORT und KEY.
+# Eine Ersetzung waere wieder ein Treffer auf eine Teilzeichenkette -
+# das Muster, an dem hier schon mehrfach etwas gescheitert ist.
 REIHEN=(
-  "proxy-fallback  python3 tests/proxy-fallback-test.py"
-  "license        python3 tests/license-test.py"
-  "release-sig    python3 tests/release-sig-test.py"
-  "keyguard       python3 tests/keyguard-test.py"
-  "patchdue        python3 tests/patchdue-test.py"
-  "login-throttle  python3 tests/login-throttle-test.py"
-  "agent-selfheal  python3 tests/agent-selfheal-test.py"
-  "reboot-report   python3 tests/reboot-report-test.py"
-  "proxy-https     python3 tests/proxy-https-test.py"
-  "agent-api       python3 tests/agent-api-test.py"
+  "proxy-fallback  $PY tests/proxy-fallback-test.py"
+  "license        $PY tests/license-test.py"
+  "release-sig    $PY tests/release-sig-test.py"
+  "keyguard       $PY tests/keyguard-test.py"
+  "patchdue        $PY tests/patchdue-test.py"
+  "login-throttle  $PY tests/login-throttle-test.py"
+  "agent-selfheal  $PY tests/agent-selfheal-test.py"
+  "reboot-report   $PY tests/reboot-report-test.py"
+  "harness         $PY tests/harness-test.py"
+  "proxy-https     $PY tests/proxy-https-test.py"
+  "agent-api       $PY tests/agent-api-test.py"
   "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
-  "roles           python3 tests/roles-test.py"
+  "roles           $PY tests/roles-test.py"
 )
 
 aufraeumen() {
@@ -63,7 +119,10 @@ trap aufraeumen EXIT INT TERM
 # ---------------------------------------------------------------------
 # Backend starten
 # ---------------------------------------------------------------------
-if ! python3 tests/port-frei.py "$PORT"; then
+# Ab hier ist die Meldung ehrlich: dass Python laeuft, steht oben schon
+# fest. Frueher landete jeder Grund, aus dem dieser Aufruf scheiterte,
+# hier als "Port belegt" - auch ein fehlendes Python.
+if ! "$PY" tests/port-frei.py "$PORT"; then
   echo "Port $PORT ist belegt. Anderen waehlen: CO37_TEST_PORT=8100 $0"
   exit 1
 fi
@@ -75,7 +134,7 @@ echo "Backend auf Port $PORT, Daten in $TMP"
   CO37_SECRET_KEY="testsecret" \
   CO37_DB="sqlite:///$TMP/co37.db" \
   CO37_DATA="$TMP" \
-  python3 -m uvicorn main:app --port "$PORT" > "$TMP/backend.log" 2>&1
+  "$PY" -m uvicorn main:app --port "$PORT" > "$TMP/backend.log" 2>&1
 ) &
 BACKEND_PID=$!
 
