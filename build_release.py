@@ -224,6 +224,10 @@ def main():
     p.add_argument("version", nargs="?", help="Version, sonst backend/VERSION")
     p.add_argument("--no-sign", action="store_true",
                    help="nicht signieren, auch wenn ein Schluessel vorliegt")
+    p.add_argument("--kein-archiv", action="store_true",
+                   help="alte Pakete liegen lassen statt ins Archiv zu schieben")
+    p.add_argument("--behalten", type=int, default=2,
+                   help="wie viele Pakete im Ordner bleiben (Vorgabe 2)")
     a = p.parse_args()
 
     vfile = HIER / "backend" / "VERSION"
@@ -250,6 +254,32 @@ def main():
 
     if not a.no_sign:
         signiere(ziel)
+
+    if not a.kein_archiv:
+        archiviere_alte(a.behalten)
+
+
+def archiviere_alte(behalten: int):
+    """
+    Schiebt alte Pakete ins Archiv - als eigener Prozess, wie beim
+    Signieren, damit der Dateiname mit Bindestrich kein Importproblem ist.
+
+    Bewusst zum Schluss und ausdruecklich fehlertolerant: das frische
+    Paket ist zu diesem Zeitpunkt gebaut und signiert. Scheitert das
+    Aufraeumen - Ziel nicht beschreibbar, Datei gesperrt - darf der Bau
+    deswegen nicht als gescheitert dastehen. Ein Hinweis genuegt.
+    """
+    werkzeug = HIER / "tools" / "archiv-pakete.py"
+    if not werkzeug.is_file():
+        return
+    r = subprocess.run(
+        [sys.executable, str(werkzeug), "--behalten", str(behalten)],
+        capture_output=True, text=True)
+    ausgabe = (r.stdout or "").rstrip() or (r.stderr or "").rstrip()
+    if ausgabe:
+        print(ausgabe)
+    if r.returncode != 0:
+        print("Hinweis: Archivieren fehlgeschlagen. Das Paket selbst ist fertig.")
 
 
 if __name__ == "__main__":

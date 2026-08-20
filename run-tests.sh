@@ -103,6 +103,7 @@ REIHEN=(
   "agent-selfheal  $PY tests/agent-selfheal-test.py"
   "reboot-report   $PY tests/reboot-report-test.py"
   "harness         $PY tests/harness-test.py"
+  "archiv          $PY tests/archiv-test.py"
   "proxy-https     $PY tests/proxy-https-test.py"
   "agent-api       $PY tests/agent-api-test.py"
   "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
