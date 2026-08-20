@@ -27,7 +27,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.34.2"
+AGENT_VERSION = "0.34.3"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -433,15 +433,18 @@ def reboot_reasons() -> list[str]:
     return _kernel_mismatch_reason()
 
 
-def reboot_required() -> bool:
-    """Wahr, sobald irgendein Grund vorliegt - auch ein schwacher."""
-    return bool(reboot_reasons())
-
-
 def reboot_required_strong() -> bool:
     """
     Wahr nur bei Gruenden, die einen Neustart tatsaechlich rechtfertigen.
-    Massgeblich fuer automatische Neustarts.
+    Massgeblich fuer automatische Neustarts und fuer alles, was
+    host.reboot_required im Backend schreibt.
+
+    Es gab hier einmal ein Gegenstueck reboot_required(), das jeden Grund
+    zaehlte - auch einen schwachen. Es ist entfernt worden, nachdem die
+    Job-Rueckmeldung versehentlich danach gegriffen hatte: der
+    naheliegendere Name war der falsche. Wer einen Neustartbedarf ohne
+    diese Filterung braucht, soll reboot_reasons() nehmen und sichtbar
+    selbst entscheiden, was er damit tut.
     """
     return bool(set(reboot_reasons()) - WEAK_REBOOT_REASONS)
 
@@ -796,7 +799,29 @@ def handle_job(job: dict):
     params = job.get("params", {})
     sink = LogSink(job_id)
 
-    def report(state, error=None, result=None):
+    def report(state, error=None, result=None, reboot=None):
+        """
+        Meldet den Auftragszustand zurueck.
+
+        reboot: bereits ermittelter Neustartbedarf nach der strengen Regel.
+        None heisst: selbst ermitteln.
+
+        Die strenge Regel ist Pflicht, nicht Geschmack. Heartbeat,
+        Scan-Ergebnis und diese Rueckmeldung schreiben im Backend
+        dasselbe Feld host.reboot_required, und es gewinnt der letzte
+        Schreiber. Solange hier die laxe Regel stand, ueberschrieb die
+        Schlussmeldung eines Patchlaufs den soeben korrekt gemeldeten
+        Zustand mit einem schwachen Grund: die Oberflaeche sprang auf
+        "Neustart noetig", bis der naechste Heartbeat es zuruecknahm.
+        Sichtbar als kurzes Rotwerden nach jedem Update ohne
+        Neustartbedarf, weil Windows Update praktisch immer Dateien zum
+        Aufraeumen vormerkt.
+
+        Wo der Wert im Auftrag schon feststeht, wird er durchgereicht
+        statt neu erhoben. Ein zweiter Registry-Lauf kostet nicht nur
+        Zeit, sein Ergebnis koennte auch von dem abweichen, was der
+        Auftrag eine Zeile darueber ins Protokoll geschrieben hat.
+        """
         sink.flush()
         api("POST", "/api/v1/agent/report", {
             "job_id": job_id,
@@ -804,7 +829,8 @@ def handle_job(job: dict):
             "log": sink.tail(),
             "error": error,
             "result": result or {},
-            "reboot_required": reboot_required(),
+            "reboot_required": (
+                reboot_required_strong() if reboot is None else bool(reboot)),
         })
 
     try:
@@ -850,7 +876,8 @@ def handle_job(job: dict):
                 "job_id": job_id, "reboot_required": needs_reboot,
                 "reboot_reasons": scan_reasons, "updates": updates,
             })
-            report("done", result={"found": len(updates), "reboot_required": needs_reboot})
+            report("done", result={"found": len(updates), "reboot_required": needs_reboot},
+                   reboot=needs_reboot)
             return
 
         # ------------------------------------------------------------------
@@ -900,7 +927,8 @@ def handle_job(job: dict):
 
             if not needs_reboot:
                 sink.write("Fertig.", progress="Fertig")
-                report("done", result={"rebooting": False, "reboot_required": False})
+                report("done", result={"rebooting": False, "reboot_required": False},
+                       reboot=False)
                 return
 
             sink.write("", progress="Fordere Freigabe an")
@@ -915,7 +943,7 @@ def handle_job(job: dict):
                 report("done", result={
                     "rebooting": False, "reboot_required": True,
                     "blocked_reason": decision.get("reason"),
-                })
+                }, reboot=True)
                 return
 
             if decision.get("downtime_set"):
@@ -927,7 +955,8 @@ def handle_job(job: dict):
 
             delay = params.get("reboot_delay", 30)
             sink.write(f"Neustart in {delay} Sekunden.", progress="Startet neu")
-            report("done", result={"rebooting": True, "reboot_required": True})
+            report("done", result={"rebooting": True, "reboot_required": True},
+                   reboot=True)
             time.sleep(3)
             trigger_reboot(delay)
             return

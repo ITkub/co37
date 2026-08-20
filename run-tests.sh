@@ -46,6 +46,7 @@ REIHEN=(
   "patchdue        python3 tests/patchdue-test.py"
   "login-throttle  python3 tests/login-throttle-test.py"
   "agent-selfheal  python3 tests/agent-selfheal-test.py"
+  "reboot-report   python3 tests/reboot-report-test.py"
   "proxy-https     python3 tests/proxy-https-test.py"
   "agent-api       python3 tests/agent-api-test.py"
   "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
