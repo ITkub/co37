@@ -162,6 +162,9 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "rebootHost: typeof rebootHost !== 'undefined' ? rebootHost : null, "
   + "setHosts: (h) => { HOSTS = h; }, "
   + "checkVersion, setPageVersion: (v) => { PAGE_VERSION = v; }, "
+  + "apiCall: api, offlineSeit: () => OFFLINE_SEIT, "
+  + "setOfflineSeit: (t) => { OFFLINE_SEIT = t; }, "
+  + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
   + "loadRollout, loadUsers, loadAudit, loadAccount, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); } };";
 const wrapped = new Function(script + EXPORTS);
@@ -384,6 +387,94 @@ global.setTimeout = origSetTimeout;
     // erscheint die Meldung mittig statt unten rechts.
     check("popover-Vorgaben ueberschrieben",
           /\.toast\[popover\]\{[^}]*inset:auto/.test(html));
+  }
+
+  console.log("\n=== Server nicht erreichbar ===");
+  {
+    // Waehrend eines Systemupdates startet das Backend neu und der Proxy
+    // antwortet 502. Mehrere Zeitgeber fragen gleichzeitig weiter; frueher
+    // gab jede fehlgeschlagene Abfrage eine eigene Kurzmeldung. Der
+    // wichtigste Fall hier ist der, der NICHT ausloesen darf.
+    const echtesFetch = global.fetch;
+    const bar = el("offlineBar");
+    const meldungen = [];
+    DIALOGE_OFFEN.length = 0;
+    DIALOGE_OFFEN.push({ appendChild: (e) => meldungen.push(e), remove(){} });
+
+    const antwortet = (status, koerper) => {
+      global.fetch = async () => ({
+        status, ok: status >= 200 && status < 300,
+        text: async () => koerper || "",
+        json: async () => (koerper ? JSON.parse(koerper) : {}),
+      });
+    };
+    const ruf = () => api.apiCall("GET", "/api/v1/hosts").catch(() => {});
+
+    // --- der Fall, der nicht ausloesen darf ---
+    antwortet(502, "Bad Gateway");
+    api.setOfflineSeit(null); api.setUpdateLaeuft(false);
+    bar.style.display = "none";
+    await ruf();
+    check("502 gibt keine Kurzmeldung", meldungen.length === 0, meldungen.length);
+    check("502 blendet nicht sofort die Leiste ein",
+          bar.style.display === "none", bar.style.display);
+    check("502 wird als Erreichbarkeitsfehler vermerkt",
+          api.offlineSeit() !== null);
+
+    // --- haelt es an, muss es sichtbar werden ---
+    api.setOfflineSeit(Date.now() - 25000);
+    await ruf();
+    check("nach 25 s Ausfall erscheint die Leiste",
+          bar.style.display === "flex", bar.style.display);
+    check("auch dann keine Kurzmeldung", meldungen.length === 0, meldungen.length);
+
+    // --- waehrend eines Updates laenger stillhalten ---
+    api.setUpdateLaeuft(true);
+    api.setOfflineSeit(Date.now() - 25000);
+    bar.style.display = "none";
+    await ruf();
+    check("waehrend eines Updates bleibt es bei 25 s still",
+          bar.style.display === "none", bar.style.display);
+    api.setOfflineSeit(Date.now() - 200000);
+    await ruf();
+    check("waehrend eines Updates erscheint sie nach 200 s doch",
+          bar.style.display === "flex", bar.style.display);
+
+    // --- gar keine Antwort: fetch selbst scheitert ---
+    global.fetch = async () => { throw new TypeError("Failed to fetch"); };
+    api.setUpdateLaeuft(false); api.setOfflineSeit(null);
+    bar.style.display = "none";
+    await ruf();
+    check("Totalausfall gibt ebenfalls keine Kurzmeldung",
+          meldungen.length === 0, meldungen.length);
+    check("Totalausfall zaehlt als Erreichbarkeitsfehler",
+          api.offlineSeit() !== null);
+
+    // --- Erholung ---
+    antwortet(200, "{}");
+    api.setOfflineSeit(Date.now() - 200000);
+    bar.style.display = "flex";
+    await api.apiCall("GET", "/api/v1/hosts");
+    check("erste Antwort nimmt die Leiste wieder weg",
+          bar.style.display === "none", bar.style.display);
+    check("Zaehler ist zurueckgesetzt", api.offlineSeit() === null);
+
+    // --- Anwendungsfehler muss weiterhin sofort melden ---
+    antwortet(400, JSON.stringify({ detail: "Kaputte Eingabe" }));
+    meldungen.length = 0;
+    bar.style.display = "none";
+    await ruf();
+    check("Anwendungsfehler meldet weiterhin sofort",
+          meldungen.length === 1, meldungen.length);
+    check("Anwendungsfehler blendet keine Leiste ein",
+          bar.style.display === "none", bar.style.display);
+    check("Anwendungsfehler zaehlt nicht als Erreichbarkeitsfehler",
+          api.offlineSeit() === null);
+
+    global.fetch = echtesFetch;
+    DIALOGE_OFFEN.length = 0;
+    api.setOfflineSeit(null); api.setUpdateLaeuft(false);
+    bar.style.display = "none";
   }
 
   console.log("\n=== Einstellungsdialog ===");

@@ -122,17 +122,77 @@ async function checkVersion(){
 }
 document.getElementById("reloadNow").onclick = () => location.reload();
 
+/* ---------- Erreichbarkeit ---------- */
+/*
+ * Ein nicht erreichbarer Server ist kein Anwendungsfehler.
+ *
+ * Waehrend eines Systemupdates startet das Backend neu, der Reverse Proxy
+ * antwortet solange mit 502. Gleichzeitig fragen mehrere Zeitgeber - die
+ * Hostliste alle drei bis fuenfzehn Sekunden, der Updatestand alle drei,
+ * dazu Watcher, Proxy und Bauzustand. Jede fehlgeschlagene Abfrage ergab
+ * eine eigene Kurzmeldung von neun Sekunden Standzeit; bei zwanzig
+ * Sekunden Ausfall waren das leicht ein Dutzend.
+ *
+ * Umgekehrt war der ernstere Fall stumm: faellt alles aus, scheitert
+ * schon fetch selbst, und das wurde hier gar nicht abgefangen - keine
+ * Meldung. Der harmlose Fall laermte, der ernste schwieg.
+ *
+ * Darum getrennt: Anwendungsfehler sofort melden, Erreichbarkeitsfehler
+ * erst, wenn sie anhalten - und dann einmal als ruhige Leiste statt als
+ * Flut von Kurzmeldungen.
+ */
+const GATEWAY_CODES = [502, 503, 504];
+const OFFLINE_GEDULD = 20000;
+// Waehrend eines Updates ist der Ausfall erwartet. Die Oberflaeche weiss
+// das aus dem zuletzt gesehenen Zustand - dafuer braucht sie den Server
+// nicht, sie hat es sich vorher gemerkt.
+const OFFLINE_GEDULD_UPDATE = 180000;
+let OFFLINE_SEIT = null;
+let UPDATE_LAEUFT = false;
+
+function offlineLeiste(sichtbar){
+  const bar = document.getElementById("offlineBar");
+  if (bar) bar.style.display = sichtbar ? "flex" : "none";
+}
+
+function verbindungFehlt(){
+  if (OFFLINE_SEIT === null) OFFLINE_SEIT = Date.now();
+  const geduld = UPDATE_LAEUFT ? OFFLINE_GEDULD_UPDATE : OFFLINE_GEDULD;
+  if (Date.now() - OFFLINE_SEIT >= geduld) offlineLeiste(true);
+}
+
+function verbindungDa(){
+  if (OFFLINE_SEIT === null) return;
+  OFFLINE_SEIT = null;
+  offlineLeiste(false);
+}
+
 /* ---------- API ---------- */
 async function api(method, path, body){
-  const res = await fetch(API + path, {
-    method, headers: {"Content-Type": "application/json"},
-    // Das Cookie geht nur mit, wenn es ausdruecklich verlangt wird -
-    // bei fetch ist same-origin zwar die Vorgabe, aber sie war es nicht
-    // immer, und ein stiller Ausfall waere hier eine Abmeldung bei jedem
-    // Klick.
-    credentials: "same-origin",
-    body: body ? JSON.stringify(body) : undefined
-  });
+  let res;
+  try {
+    res = await fetch(API + path, {
+      method, headers: {"Content-Type": "application/json"},
+      // Das Cookie geht nur mit, wenn es ausdruecklich verlangt wird -
+      // bei fetch ist same-origin zwar die Vorgabe, aber sie war es nicht
+      // immer, und ein stiller Ausfall waere hier eine Abmeldung bei jedem
+      // Klick.
+      credentials: "same-origin",
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch(e){
+    // fetch scheitert erst, wenn ueberhaupt niemand antwortet: Netz weg,
+    // Proxy weg, Server weg. Immer Erreichbarkeit, nie Anwendung.
+    verbindungFehlt();
+    throw e;
+  }
+  if (GATEWAY_CODES.includes(res.status)){
+    verbindungFehlt();
+    throw new Error("Server nicht erreichbar (" + res.status + ")");
+  }
+  // Ab hier hat das Backend selbst geantwortet - auch ein 403 ist eine
+  // Antwort. Also ist es wieder da.
+  verbindungDa();
   // 401 heisst: Sitzung abgelaufen oder verworfen. Zurueck zur Anmeldung,
   // statt den Benutzer mit Fehlermeldungen zu bewerfen.
   if (res.status === 401){ setSession(false); showLogin("Sitzung abgelaufen. Bitte erneut anmelden."); throw new Error("401"); }
@@ -1703,6 +1763,11 @@ async function loadUpdate(){
 
   const busy = st.state === "triggered" || st.state === "running";
   const done = ["success","rolled_back","error"].includes(st.state);
+  // Gemerkt fuer den Fall, dass gleich niemand mehr antwortet: waehrend
+  // eines Updates darf der Ausfall laenger dauern, ohne dass die
+  // Oberflaeche Alarm schlaegt. Bleibt stehen, wenn die naechste Abfrage
+  // scheitert - genau dann wird es gebraucht.
+  UPDATE_LAEUFT = busy;
   document.getElementById("uDrop").style.display = (pending||busy) ? "none" : "block";
   document.getElementById("uLogBox").style.display = (busy||done) ? "block" : "none";
   if (busy || done){
