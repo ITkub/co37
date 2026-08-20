@@ -625,8 +625,22 @@ global.setTimeout = origSetTimeout;
           el("rackHead").innerHTML.slice(0, 60));
 
     global.matchMedia = () => ({ matches: false, addEventListener(){} });
+    // Nicht auf ein deutsches Wort festnageln: seit 0.35.x kommt die
+    // Beschriftung aus dem Woerterbuch, und die Vorgabe ist Englisch. Ein
+    // fester Anker haette hier nur gemeldet, dass sich die Sprache
+    // geaendert hat - nicht, ob die Kopfzeile funktioniert. Also beide
+    // Sprachen pruefen; das prueft zugleich den Weg durch t().
+    api.setzeSprache("en");
     api.renderRackHead();
-    check("breite Ansicht mit Kopfzeile", el("rackHead").innerHTML.includes("Sicherheit"));
+    check("breite Ansicht mit Kopfzeile, englisch",
+          el("rackHead").innerHTML.includes("Security"),
+          el("rackHead").innerHTML.slice(0, 80));
+    api.setzeSprache("de");
+    api.renderRackHead();
+    check("breite Ansicht mit Kopfzeile, deutsch",
+          el("rackHead").innerHTML.includes("Sicherheit"),
+          el("rackHead").innerHTML.slice(0, 80));
+    api.setzeSprache("en");
   }
 
   console.log("\n=== Spaltenausrichtung ===");

@@ -35,7 +35,7 @@ async function doLogin(){
   const username = document.getElementById("loginUser").value.trim();
   const password = document.getElementById("loginPass").value;
   if (!username || !password){
-    document.getElementById("loginError").textContent = "Bitte beides ausfüllen.";
+    document.getElementById("loginError").textContent = t("login.fill_both");
     return;
   }
   let res;
@@ -47,11 +47,11 @@ async function doLogin(){
       body: JSON.stringify({username, password})
     });
   } catch(e){
-    document.getElementById("loginError").textContent = "Server nicht erreichbar.";
+    document.getElementById("loginError").textContent = t("login.unreachable");
     return;
   }
   if (!res.ok){
-    let msg = "Anmeldung fehlgeschlagen.";
+    let msg = t("login.failed");
     try { msg = (await res.json()).detail || msg; } catch(e){}
     document.getElementById("loginError").textContent = msg;
     return;
@@ -117,7 +117,7 @@ async function checkVersion(){
 
   const bar = document.getElementById("reloadBar");
   document.getElementById("reloadText").textContent =
-    `CO-37 wurde auf ${h.version} aktualisiert — diese Seite läuft noch mit ${PAGE_VERSION}.`;
+    t("app.new_version", { neu: h.version, alt: PAGE_VERSION });
   bar.style.display = "flex";
 }
 document.getElementById("reloadNow").onclick = () => location.reload();
@@ -188,14 +188,14 @@ async function api(method, path, body){
   }
   if (GATEWAY_CODES.includes(res.status)){
     verbindungFehlt();
-    throw new Error("Server nicht erreichbar (" + res.status + ")");
+    throw new Error(t("msg.unreachable_code", { code: res.status }));
   }
   // Ab hier hat das Backend selbst geantwortet - auch ein 403 ist eine
   // Antwort. Also ist es wieder da.
   verbindungDa();
   // 401 heisst: Sitzung abgelaufen oder verworfen. Zurueck zur Anmeldung,
   // statt den Benutzer mit Fehlermeldungen zu bewerfen.
-  if (res.status === 401){ setSession(false); showLogin("Sitzung abgelaufen. Bitte erneut anmelden."); throw new Error("401"); }
+  if (res.status === 401){ setSession(false); showLogin(t("login.session_expired")); throw new Error("401"); }
   if (!res.ok){
     let msg = await res.text();
     try { msg = JSON.parse(msg).detail || msg; } catch(e){}
@@ -267,7 +267,7 @@ function fmtTime(iso, opts){
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
-  return d.toLocaleString("de-DE", opts);
+  return d.toLocaleString(zeitSprache(), opts);
 }
 
 function fmtSize(b){
@@ -287,7 +287,7 @@ function fmtSize(b){
  */
 async function copy(text, label){
   if (!text || !text.trim()){
-    toast("Nichts zu kopieren", true);
+    toast(t("msg.nothing_to_copy"), true);
     return;
   }
 
@@ -318,23 +318,23 @@ async function copy(text, label){
     ta.setSelectionRange(0, text.length);
     const ok = document.execCommand("copy");
     ta.remove();
-    toast(ok ? label + " kopiert" : "Kopieren nicht möglich — bitte markieren", !ok);
+    toast(ok ? t("msg.copied", { was: label }) : t("msg.copy_failed_short"), !ok);
   } catch(e){
-    toast("Kopieren nicht möglich — bitte markieren und Strg+C", true);
+    toast(t("msg.copy_failed"), true);
   }
 }
 
 /* ---------- Zustand ---------- */
 /* Klartext der Neustart-Gruende. Muss zu REBOOT_REASON_TEXT im Agent passen. */
 const REBOOT_REASONS = {
-  windows_update: "Windows Update",
-  cbs_pending: "Komponentenspeicher",
-  cbs_inprogress: "Komponentenspeicher",
-  cbs_packages: "Komponentenspeicher",
-  pending_rename: "Dateireste",
-  netlogon: "Domänenbeitritt",
-  package_manager: "Paketverwaltung",
-  kernel: "neuer Kernel",
+  windows_update: "reason.windows_update",
+  cbs_pending: "reason.cbs",
+  cbs_inprogress: "reason.cbs",
+  cbs_packages: "reason.cbs",
+  pending_rename: "reason.pending_rename",
+  netlogon: "reason.netlogon",
+  package_manager: "reason.package_manager",
+  kernel: "reason.kernel",
 };
 // Gruende, die einen Neustart nur anzeigen, ihn aber nicht rechtfertigen.
 const WEAK_REASONS = ["pending_rename"];
@@ -344,8 +344,11 @@ function rebootNote(h){
   // gesetzt. Nachrangige Eintraege wie vorgemerkte Dateireste stehen
   // zwar weiter in reboot_reasons, fuehren aber zu keiner Meldung.
   const rs = (h.reboot_reasons || []).filter(r => !WEAK_REASONS.includes(r));
-  const why = rs.length ? ` (${rs.map(r => REBOOT_REASONS[r] || r).join(", ")})` : "";
-  return (h.auto_reboot ? "Neustart nötig, freigegeben" : "Neustart nötig") + why;
+  // t() gibt bei unbekanntem Schluessel den Schluessel zurueck - ein Grund,
+  // den die Oberflaeche nicht kennt, erscheint damit weiterhin im Klartext
+  // des Agents statt als leere Klammer.
+  const why = rs.length ? ` (${rs.map(r => t(REBOOT_REASONS[r] || r)).join(", ")})` : "";
+  return t(h.auto_reboot ? "host.reboot_needed_allowed" : "host.reboot_needed") + why;
 }
 
 function stateOf(h){
@@ -394,9 +397,8 @@ function render(){
 
   const box = document.getElementById("units");
   if (!list.length){
-    box.innerHTML = `<div class="empty">${HOSTS.length
-      ? "Kein Host passt zum Filter."
-      : "Noch kein Host angemeldet.<br><br>Agent auf einem Zielsystem installieren — siehe Einstellungen → Agents."}</div>`;
+    box.innerHTML = `<div class="empty">${
+      t(HOSTS.length ? "list.no_match" : "list.empty")}</div>`;
     return;
   }
 
@@ -411,33 +413,38 @@ function render(){
 
     const act = ACTIVE[h.id];
     const notes = [];
-    if (act) notes.push(act.progress ? `${act.job_type}: ${act.progress}` : `${act.job_type} läuft`);
+    if (act) notes.push(act.progress ? `${act.job_type}: ${act.progress}`
+                                      : t("note.job_running", { auftrag: act.job_type }));
     // Auftrag steht auf laufend, der Host meldet aber nicht mehr. Ohne
     // diesen Hinweis sieht die Zeile aus wie normale Arbeit.
-    if (act && h.status !== "online") notes.push("Host meldet sich nicht");
-    if (waiting) notes.push("wartet auf Freigabe");
-    if (h.approval_state === "rejected") notes.push("abgelehnt");
+    if (act && h.status !== "online") notes.push(t("note.silent"));
+    if (waiting) notes.push(t("note.pending_approval"));
+    if (h.approval_state === "rejected") notes.push(t("note.rejected"));
     // Ein Host, der sich angemeldet, aber nie gemeldet hat. Kann ein
     // abgebrochenes Aufsetzen sein - oder jemand, der den Namen eines noch
     // nicht eingerichteten Systems belegt hat, damit dieses sich spaeter
     // nicht anmelden kann.
     if (h.approval_state === "pending" && !h.last_seen)
-      notes.push("noch nie gemeldet");
+      notes.push(t("note.never_reported"));
     if (h.reboot_required) notes.push(rebootNote(h));
     // Vorschau, kein Zustand: die gefundenen Updates ziehen einen Neustart
     // nach sich. Nur zeigen, solange noch keiner aussteht - sonst stuenden
     // zwei Meldungen zum selben Thema nebeneinander.
     else if (h.updates_require_reboot && h.updates_available > 0)
-      notes.push("Updates erfordern Neustart");
-    if (stale) notes.push(`Agent ${h.agent_version} veraltet`);
-    if (PLANNED[h.id]) notes.push(`Neustart geplant: ${PLANNED[h.id].toLocaleString("de-DE",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}`);
-    if (h.patch_enabled && h.next_patch_run) notes.push(`Updates: ${fmtTime(h.next_patch_run,{weekday:"short",hour:"2-digit",minute:"2-digit"})}`);
+      notes.push(t("note.updates_need_reboot"));
+    if (stale) notes.push(t("note.agent_outdated", { version: h.agent_version }));
+    if (PLANNED[h.id]) notes.push(t("note.reboot_planned", {
+      zeit: PLANNED[h.id].toLocaleString(zeitSprache(),
+        {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) }));
+    if (h.patch_enabled && h.next_patch_run) notes.push(t("note.updates_at", {
+      zeit: fmtTime(h.next_patch_run,{weekday:"short",hour:"2-digit",minute:"2-digit"}) }));
     // Windows legt nach einem Neustart kumulativ nach. Der Nachschlag ist
     // vorgemerkt und laeuft an, sobald der Host wieder meldet.
-    if (h.patch_followup_left > 0) notes.push(`Nachschlag vorgemerkt (${h.patch_followup_left})`);
+    if (h.patch_followup_left > 0)
+      notes.push(t("note.followup", { anzahl: h.patch_followup_left }));
 
     return `<div class="unit" data-id="${h.id}">
-      <div class="slot${SORTABLE ? " grab" : ""}"${SORTABLE ? ' draggable="true" title="Ziehen, um die Reihenfolge zu ändern"' : ' title="Reihenfolge ändern nur ohne aktiven Filter"'}>${String(i+1).padStart(2,"0")}</div>
+      <div class="slot${SORTABLE ? " grab" : ""}"${SORTABLE ? ` draggable="true" title="${esc(t("list.drag"))}"` : ` title="${esc(t("list.drag_blocked"))}"`}>${String(i+1).padStart(2,"0")}</div>
       <div class="led ${LED[s]}"></div>
       <div class="hostcell">
         <div class="hostname">${esc(h.display_name || h.hostname)}</div>
@@ -448,22 +455,22 @@ function render(){
       <div class="reboot"><span class="chip ${sec?"crit":"zero"}">${sec}</span></div>
       <div class="cmk ${hasDt(h) ? "linked":""}">${
         h.checkmk_downtime_all
-          ? `alle Hosts · ${h.downtime_minutes} min`
+          ? `${t("list.all_hosts")} · ${h.downtime_minutes} min`
           : h.checkmk_hosts?.length
             ? esc(h.checkmk_hosts.join(", ")) + ` · ${h.downtime_minutes} min`
-            : "nicht verknüpft"}</div>
+            : t("list.not_linked")}</div>
       <div class="actions">
         ${waiting
           ? (admin
-             ? `<button class="primary" data-act="approve" data-id="${h.id}">Freigeben</button>
-                <button class="danger" data-act="reject" data-id="${h.id}">Ablehnen</button>`
-             : `<span style="color:var(--muted-2);font-size:11px">wartet auf Freigabe</span>`)
-          : `${act ? `<button class="primary" data-act="live" data-id="${act.id}" data-title="${esc(h.display_name||h.hostname)}">Live</button>` : ""}
-             <button data-act="scan" data-id="${h.id}">Prüfen</button>
-             <button data-act="patch" data-id="${h.id}" ${upd?"":"disabled"}>Patchen</button>
-             <button class="warn" data-act="reboot" data-id="${h.id}">Neustart</button>
-             ${stale && admin ? `<button data-act="agentupd" data-id="${h.id}">Agent</button>` : ""}
-             <button data-act="detail" data-id="${h.id}">Verlauf</button>`}
+             ? `<button class="primary" data-act="approve" data-id="${h.id}">${t("act.approve")}</button>
+                <button class="danger" data-act="reject" data-id="${h.id}">${t("act.reject")}</button>`
+             : `<span style="color:var(--muted-2);font-size:11px">${t("note.pending_approval")}</span>`)
+          : `${act ? `<button class="primary" data-act="live" data-id="${act.id}" data-title="${esc(h.display_name||h.hostname)}">${t("act.live")}</button>` : ""}
+             <button data-act="scan" data-id="${h.id}">${t("act.scan")}</button>
+             <button data-act="patch" data-id="${h.id}" ${upd?"":"disabled"}>${t("act.patch")}</button>
+             <button class="warn" data-act="reboot" data-id="${h.id}">${t("act.reboot")}</button>
+             ${stale && admin ? `<button data-act="agentupd" data-id="${h.id}">${t("act.agent")}</button>` : ""}
+             <button data-act="detail" data-id="${h.id}">${t("act.history")}</button>`}
         ${admin ? `<button data-act="edithost" data-id="${h.id}">…</button>` : ""}
       </div>
     </div>`;
@@ -492,7 +499,7 @@ async function saveOrder(){
   try {
     await api("POST", "/api/v1/hosts/order", { ids: HOSTS.map(h => h.id) });
   } catch(e){
-    toast("Reihenfolge konnte nicht gespeichert werden", true);
+    toast(t("msg.order_not_saved"), true);
     // Gespeicherten Stand zurueckholen, statt eine Anzeige stehen zu
     // lassen, die es auf dem Server nicht gibt.
     load().catch(() => {});
@@ -666,7 +673,7 @@ async function afterAction(){
 
 async function scan(id){
   await api("POST", `/api/v1/hosts/${id}/jobs`, {job_type:"scan", params:{}});
-  toast("Prüfung eingeplant — wird beim nächsten Agent-Kontakt ausgeführt");
+  toast(t("msg.scan_scheduled"));
   afterAction();
 }
 
@@ -674,18 +681,17 @@ async function patch(id){
   const h = HOSTS.find(x => x.id === id);
   const policy = h.auto_reboot
     ? (h.maintenance_window
-        ? `Ist ein Neustart nötig, erfolgt er im Fenster ${h.maintenance_window}.`
-        : "Ist ein Neustart nötig, erfolgt er anschließend.")
-    : "Ist ein Neustart nötig, wird er gemeldet, aber nicht ausgeführt.";
+        ? t("ask.policy_window", { fenster: h.maintenance_window })
+        : t("ask.policy_after"))
+    : t("ask.policy_report_only");
   // Vor der Bestaetigung ansagen, dass ein Neustart faellig wird. Bisher
   // stand das erst im Bericht nach dem Scan, und dort auch nur
   // missverstaendlich.
-  const willReboot = h.updates_require_reboot
-    ? "Unter den Updates sind Pakete, die einen Neustart erfordern (z.B. Kernel).\n"
-    : "";
-  if (!confirm(`${h.updates_available} Updates auf ${h.hostname} installieren.\n\n${willReboot}${policy}`)) return;
+  const willReboot = h.updates_require_reboot ? t("ask.will_reboot") + "\n" : "";
+  if (!confirm(t("ask.patch", { anzahl: h.updates_available, host: h.hostname })
+               + "\n\n" + willReboot + policy)) return;
   await api("POST", `/api/v1/hosts/${id}/jobs`, {job_type:"patch", params:{}});
-  toast("Patch-Auftrag eingeplant");
+  toast(t("msg.patch_scheduled"));
   afterAction();
 }
 
@@ -696,16 +702,17 @@ function rebootHost(id){
   REBOOT_ID = id;
   const linked = hasDt(h);
 
-  document.getElementById("rbTitle").textContent = `${h.display_name || h.hostname} neu starten`;
+  document.getElementById("rbTitle").textContent =
+    t("reboot.dialog_title", { host: h.display_name || h.hostname });
   document.getElementById("rbInfo").innerHTML =
-    `Startet <b>${esc(h.hostname)}</b> neu. Es werden keine Updates installiert.`;
+    t("reboot.dialog_info", { host: esc(h.hostname) });
   rbDowntime.checked = true;
   rbDtMin.value = h.downtime_minutes || 30;
   rbGrace.value = 10;
 
   document.getElementById("rbWarn").innerHTML = linked
-    ? `Downtime wird gesetzt auf: <b>${esc(dtTargetText(h))}</b>. Scheitert sie, unterbleibt der Neustart.`
-    : '<span style="color:var(--led-pending)">Kein Checkmk-Host verknüpft — es kann keine Downtime gesetzt werden. Das Monitoring wird beim Neustart Alarm schlagen.</span>';
+    ? t("reboot.downtime_target", { ziel: esc(dtTargetText(h)) })
+    : `<span style="color:var(--led-pending)">${t("reboot.no_link")}</span>`;
 
   document.getElementById("dlgReboot").showModal();
 }
@@ -721,13 +728,13 @@ document.getElementById("rbGo").onclick = async () => {
     params: {}
   });
   document.getElementById("dlgReboot").close();
-  toast(`Neustart ausgelöst — verfällt nach ${grace} Minuten ohne Kontakt`);
+  toast(t("msg.reboot_triggered", { minuten: grace }));
   afterAction();
 };
 
 async function updateAgent(id){
   await api("POST", `/api/v1/hosts/${id}/jobs`, {job_type:"selfupdate", params:{}});
-  toast("Agent-Aktualisierung eingeplant");
+  toast(t("msg.agent_update_scheduled"));
   afterAction();
 }
 
@@ -741,17 +748,17 @@ async function approve(id){
     return;
   }
   await load();
-  toast("Host freigegeben");
+  toast(t("msg.host_approved"));
 }
 async function reject(id){
-  if (!confirm("Host ablehnen? Er bekommt keine Aufträge und bleibt in der Liste.")) return;
-  await api("POST", `/api/v1/hosts/${id}/reject`); await load(); toast("Host abgelehnt");
+  if (!confirm(t("ask.reject_host"))) return;
+  await api("POST", `/api/v1/hosts/${id}/reject`); await load(); toast(t("msg.host_rejected"));
 }
 
 async function scanAll(){
   const ok = HOSTS.filter(h => h.approval_state === "approved");
   for (const h of ok){ try { await api("POST", `/api/v1/hosts/${h.id}/jobs`, {job_type:"scan", params:{}}); } catch(e){} }
-  toast(`Prüfung für ${ok.length} Hosts eingeplant`);
+  toast(t("msg.scan_many", { anzahl: ok.length }));
   afterAction();
 }
 
@@ -917,8 +924,10 @@ document.querySelectorAll("#hTabs button").forEach(b => b.onclick = () => {
 // Eine Quelle fuer die Beschriftungen. Die Reihenfolge muss zu den Zellen
 // einer Datenzeile passen; die zweite Spalte ist der Zustandsbalken und
 // bleibt ohne Text.
-const RACK_COLUMNS = ["Nr", "", "Host", "System", "Updates", "Sicherheit",
-                      "Checkmk", "Aktionen"];
+// Schluessel statt Text: die Liste wird beim Laden ausgewertet, da steht
+// die Sprache noch nicht fest. Uebersetzt wird erst beim Zeichnen.
+const RACK_COLUMNS = ["rack.no", "", "rack.host", "rack.system", "rack.updates",
+                      "rack.security", "rack.checkmk", "rack.actions"];
 
 // Muss mit der Medienabfrage im Stylesheet uebereinstimmen. Der
 // Frontend-Test vergleicht beide, damit sie nicht auseinanderlaufen.
@@ -934,10 +943,10 @@ function renderRackHead(){
     return;
   }
   head.innerHTML = RACK_COLUMNS.map((label, i) => {
-    if (i === 0) return `<div class="slot">${esc(label)}</div>`;
+    if (i === 0) return `<div class="slot">${esc(t(label))}</div>`;
     if (!label) return "<div></div>";
     const last = i === RACK_COLUMNS.length - 1;
-    return `<div${last ? ' style="text-align:right"' : ""}>${esc(label)}</div>`;
+    return `<div${last ? ' style="text-align:right"' : ""}>${esc(t(label))}</div>`;
   }).join("");
 }
 
@@ -1036,11 +1045,11 @@ async function loadPlanned(){
 }
 
 async function cancelJob(id){
-  if (!confirm("Eingeplanten Neustart abbrechen?")) return;
+  if (!confirm(t("ask.cancel_scheduled_reboot"))) return;
   await api("DELETE", `/api/v1/jobs/${id}`);
   await loadPlanned();
   await load();
-  toast("Abgebrochen");
+  toast(t("msg.cancelled"));
 }
 
 document.getElementById("plIn2h").onclick = () => {
@@ -1056,21 +1065,25 @@ document.getElementById("plTonight").onclick = () => {
 };
 
 document.getElementById("plSet").onclick = async () => {
-  if (!plWhen.value){ toast("Bitte Datum und Uhrzeit angeben", true); return; }
+  if (!plWhen.value){ toast(t("msg.need_datetime"), true); return; }
   const when = new Date(plWhen.value);
-  if (when <= new Date()){ toast("Der Zeitpunkt liegt in der Vergangenheit", true); return; }
+  if (when <= new Date()){ toast(t("msg.time_in_past"), true); return; }
 
   const h = HOSTS.find(x => x.id === EDIT_ID);
   const linked = hasDt(h);
   const wantDt = plDowntime.checked;
 
-  let msg = `Neustart von ${h.hostname} am ${when.toLocaleString("de-DE")} einplanen?\n\n`;
+  let msg = t("ask.schedule_reboot",
+               { host: h.hostname, zeit: when.toLocaleString(zeitSprache()) }) + "\n\n";
   if (wantDt && linked)
-    msg += `Vorher wird eine Downtime von ${h.downtime_minutes} Minuten gesetzt auf:\n${h.checkmk_downtime_all ? "alle in Checkmk konfigurierten Hosts" : h.checkmk_hosts.join("\n")}\n\nDer Neustart erfolgt nur, wenn die Downtime steht.`;
+    msg += t("ask.downtime_first", {
+      minuten: h.downtime_minutes,
+      ziel: h.checkmk_downtime_all ? t("dt.all_cmk_hosts") : h.checkmk_hosts.join("\n"),
+    });
   else if (wantDt && !linked)
-    msg += "WARNUNG: Downtime gewünscht, aber kein Checkmk-Host verknüpft. Es wird KEINE Downtime gesetzt — das Monitoring wird Alarm schlagen.";
+    msg += t("ask.downtime_wanted_no_link");
   else
-    msg += "Ohne Downtime. Das Monitoring wird Alarm schlagen.";
+    msg += t("ask.no_downtime");
   msg += `\n\nNachlaufzeit ${parseInt(plGrace.value)||120} Minuten: meldet sich der Host bis dahin nicht, wird der Neustart verworfen statt nachgeholt.`;
 
   if (!confirm(msg)) return;
@@ -1085,12 +1098,12 @@ document.getElementById("plSet").onclick = async () => {
   plWhen.value = "";
   await loadPlanned();
   await load();
-  toast("Neustart eingeplant");
+  toast(t("msg.reboot_scheduled"));
 };
 
 document.getElementById("hSave").onclick = async () => {
   if (upEnabled.checked && (!PATCH_DAYS.size || !upTime.value)){
-    toast("Für den Update-Zeitplan Wochentag und Uhrzeit angeben", true); return;
+    toast(t("msg.need_day_time"), true); return;
   }
   await api("PATCH", `/api/v1/hosts/${EDIT_ID}`, {
     display_name: hName.value.trim() || null,
@@ -1112,7 +1125,7 @@ document.getElementById("hSave").onclick = async () => {
 
 document.getElementById("hResetToken").onclick = async () => {
   const h = HOSTS.find(x => x.id === EDIT_ID);
-  if (!confirm(`Agent-Token von ${h.hostname} zurückziehen?\n\n`
+  if (!confirm(t("ask.revoke_token", { host: h.hostname }) + "\n\n"
     + `Der Agent meldet sich beim nächsten Kontakt neu an und wartet dann `
     + `auf Freigabe. Zeitplan und Verknüpfungen bleiben erhalten.\n\n`
     + `Bis zur erneuten Anmeldung kann sich jedes Gerät im Netz unter `
@@ -1120,16 +1133,16 @@ document.getElementById("hResetToken").onclick = async () => {
   await api("POST", `/api/v1/hosts/${EDIT_ID}/reset-token`);
   document.getElementById("dlgHost").close();
   await load();
-  toast("Token zurückgezogen — Host wartet auf erneute Anmeldung");
+  toast(t("msg.token_revoked"));
 };
 
 document.getElementById("hDelete").onclick = async () => {
   const h = HOSTS.find(x => x.id === EDIT_ID);
-  if (!confirm(`${h.hostname} entfernen?\n\nAufträge und Update-Liste werden gelöscht. Der Agent kann sich danach neu anmelden.`)) return;
+  if (!confirm(t("ask.remove_host", { host: h.hostname }))) return;
   await api("DELETE", `/api/v1/hosts/${EDIT_ID}`);
   document.getElementById("dlgHost").close();
   await load();
-  toast("Host entfernt");
+  toast(t("msg.host_removed"));
 };
 
 /* ---------- Downtime von Hand ---------- */
@@ -1141,20 +1154,20 @@ document.getElementById("dtSet").onclick = async () => {
   } else if (dtMinutes.value){
     body.minutes = parseInt(dtMinutes.value);
   } else {
-    toast("Bitte Minuten oder eine Zeitspanne angeben", true); return;
+    toast(t("msg.need_minutes"), true); return;
   }
   const res = await api("POST", `/api/v1/hosts/${EDIT_ID}/downtime`, body);
   const out = document.getElementById("dtOut");
   out.textContent = `Gesetzt (${res.minutes} min): ${res.ok.join(", ") || "—"}`
     + (Object.keys(res.failed||{}).length ? `\nFehlgeschlagen: ${Object.keys(res.failed).join(", ")}` : "");
-  toast("Downtime gesetzt");
+  toast(t("msg.downtime_set"));
 };
 document.getElementById("dtClear").onclick = async () => {
-  if (!confirm("Alle von CO-37 gesetzten Downtimes dieses Hosts aufheben?")) return;
+  if (!confirm(t("ask.cancel_downtimes"))) return;
   const res = await api("DELETE", `/api/v1/hosts/${EDIT_ID}/downtime`);
   document.getElementById("dtOut").textContent =
     "Aufgehoben: " + Object.entries(res.removed||{}).map(([k,v]) => `${k} (${v})`).join(", ");
-  toast("Downtimes aufgehoben");
+  toast(t("msg.downtime_cancelled"));
 };
 document.getElementById("dtList").onclick = async () => {
   const res = await api("GET", `/api/v1/hosts/${EDIT_ID}/downtime`);
@@ -1224,7 +1237,7 @@ document.getElementById("cSave").onclick = async () => {
   CMK_STATUS = null;
   await loadCmk();
   await loadCmkForm();
-  toast("Checkmk verbunden");
+  toast(t("msg.cmk_connected"));
 };
 
 /* ---------- Agents ---------- */
@@ -1375,7 +1388,7 @@ async function makeInstallToken(){
   try {
     INSTALL_TOKEN = await api("POST", "/api/v1/install-token", {});
   } catch(e){
-    toast("Token konnte nicht erzeugt werden", true);
+    toast(t("msg.token_failed"), true);
     return;
   }
   renderLinuxCmd();
@@ -1418,7 +1431,7 @@ async function loadBuildStatus(){
 document.getElementById("pkgBuild").onclick = async () => {
   try { await api("POST", "/api/v1/packages/build"); }
   catch(e){ return; }
-  toast("Paketbau angefordert — läuft auf dem Server");
+  toast(t("msg.build_requested"));
   loadBuildStatus();
 };
 
@@ -1465,7 +1478,7 @@ document.getElementById("roMode").onchange = () => {
 
 document.getElementById("roSave").onclick = async () => {
   if (roAuto.checked && roMode.value === "staged" && !roPilot.value){
-    if (!confirm("Kein Pilot-Host gewählt. Ohne Pilot werden alle Hosts gleichzeitig aktualisiert.\n\nTrotzdem speichern?")) return;
+    if (!confirm(t("ask.no_pilot"))) return;
   }
   await api("POST", "/api/v1/agent-rollout", {
     autoroll: roAuto.checked,
@@ -1494,10 +1507,10 @@ document.getElementById("copyWin").onclick = () =>
 document.getElementById("agUpdateAll").onclick = async () => {
   const stale = HOSTS.filter(h => h.approval_state === "approved"
     && h.agent_version && AGENT_VER && h.agent_version !== AGENT_VER);
-  if (!stale.length){ toast("Alle Agents sind aktuell"); return; }
-  if (!confirm(`${stale.length} Agents auf ${AGENT_VER} aktualisieren?\n\nJeder Agent startet danach neu. Laufende Aufträge werden nicht unterbrochen.`)) return;
+  if (!stale.length){ toast(t("msg.agents_current")); return; }
+  if (!confirm(t("ask.update_agents", { anzahl: stale.length, version: AGENT_VER }))) return;
   for (const h of stale){ try { await api("POST", `/api/v1/hosts/${h.id}/jobs`, {job_type:"selfupdate", params:{}}); } catch(e){} }
-  toast(`Aktualisierung für ${stale.length} Agents eingeplant`);
+  toast(t("msg.agent_update_many", { anzahl: stale.length }));
   afterAction();
 };
 
@@ -1553,9 +1566,9 @@ async function loadCmkForm(){
 /* ---------- Systemupdate ---------- */
 let UPD_TIMER = null;
 const STATE_TEXT = {
-  idle:["Bereit",""], uploaded:["Paket wartet","warn"], triggered:["Angefordert","run"],
-  running:["Wird ausgeführt","run"], success:["Erfolgreich","ok"],
-  rolled_back:["Zurückgerollt","warn"], error:["Fehler","err"]
+  idle:["upd.idle",""], uploaded:["upd.uploaded","warn"], triggered:["upd.triggered","run"],
+  running:["upd.running","run"], success:["upd.success","ok"],
+  rolled_back:["upd.rolled_back","warn"], error:["upd.error","err"]
 };
 async function loadWatcher(){
   let w;
@@ -1621,19 +1634,19 @@ async function loadLizenz(){
 
 document.getElementById("lizSave").onclick = async () => {
   const k = document.getElementById("lizKey").value.trim();
-  if (!k){ toast("Kein Schlüssel eingegeben", true); return; }
+  if (!k){ toast(t("msg.no_key"), true); return; }
   try {
     await api("POST", "/api/v1/license", { key: k });
   } catch(e){
     // Der bisherige Zustand bleibt bestehen - das Backend weist einen
     // ungültigen Schlüssel ab, ohne ihn zu speichern.
-    toast("Schlüssel abgelehnt — bisheriger Stand bleibt", true);
+    toast(t("msg.key_rejected"), true);
     return;
   }
   document.getElementById("lizKey").value = "";
   await loadLizenz();
   await load();
-  toast("Lizenzschlüssel eingetragen");
+  toast(t("msg.key_applied"));
 };
 
 document.getElementById("lizClear").onclick = async () => {
@@ -1643,7 +1656,7 @@ document.getElementById("lizClear").onclick = async () => {
     return;
   await api("POST", "/api/v1/license", { key: "" });
   await loadLizenz();
-  toast("Lizenzschlüssel entfernt");
+  toast(t("msg.key_removed"));
 };
 
 /* ---------- Zugang: Proxy und HTTPS-Zwang ---------- */
@@ -1720,7 +1733,7 @@ function renderProxyState(d){
 document.getElementById("pxSavePublic").onclick = async () => {
   const v = document.getElementById("pxPublic").value.trim();
   if (v && !/^https?:\/\//.test(v)){
-    toast("Die Adresse muss mit http:// oder https:// beginnen", true); return;
+    toast(t("msg.url_scheme"), true); return;
   }
   await api("POST", "/api/v1/proxy-settings", { public_url: v });
   await loadProxy();
@@ -1762,7 +1775,8 @@ async function loadUpdate(){
   let st;
   try { st = await api("GET", "/api/v1/update/status"); } catch(e){ return; }
   document.getElementById("uCur").textContent = st.current_version || "—";
-  const [text, cls] = STATE_TEXT[st.state] || [st.state, ""];
+  const [schluessel, cls] = STATE_TEXT[st.state] || [st.state, ""];
+  const text = t(schluessel);
   const el = document.getElementById("uState");
   el.textContent = text; el.className = "state " + cls;
 
@@ -1800,7 +1814,7 @@ async function uploadZip(dateien){
   const zip = liste.find(f => f.name.toLowerCase().endsWith(".zip"));
   const sig = liste.find(f => f.name.toLowerCase().endsWith(".sig"));
 
-  if (!zip){ toast("Bitte die ZIP-Datei des Pakets wählen", true); return; }
+  if (!zip){ toast(t("msg.need_zip"), true); return; }
 
   const fd = new FormData();
   fd.append("file", zip);
@@ -1817,7 +1831,7 @@ async function uploadZip(dateien){
     toast(String(msg).slice(0, 300), true);
     return;
   }
-  await loadUpdate(); toast("Paket geprüft und bereitgestellt");
+  await loadUpdate(); toast(t("msg.package_staged"));
 }
 const drop = document.getElementById("uDrop"), fileInput = document.getElementById("uFile");
 drop.onclick = () => fileInput.click();
@@ -1827,18 +1841,18 @@ fileInput.onchange = e => uploadZip(e.target.files);
 drop.addEventListener("drop", e => uploadZip(e.dataTransfer.files));
 
 document.getElementById("uRun").onclick = async () => {
-  if (!confirm(`Update von ${uCur.textContent} auf ${uNew.textContent} ausführen?\n\nDer Dienst wird kurz neu gestartet.`)) return;
+  if (!confirm(t("ask.run_update", { von: uCur.textContent, nach: uNew.textContent }))) return;
   await api("POST", "/api/v1/update/trigger"); await loadUpdate();
 };
 document.getElementById("uCancel").onclick = async () => {
-  await api("POST", "/api/v1/update/cancel"); await loadUpdate(); toast("Paket verworfen");
+  await api("POST", "/api/v1/update/cancel"); await loadUpdate(); toast(t("msg.package_discarded"));
 };
 document.getElementById("uAck").onclick = async () => {
   await api("POST", "/api/v1/update/acknowledge"); await loadUpdate();
 };
 
 /* ---------- Start ---------- */
-document.getElementById("btnReload").onclick = () => load().then(() => toast("Aktualisiert"));
+document.getElementById("btnReload").onclick = () => load().then(() => toast(t("msg.refreshed")));
 document.getElementById("btnScanAll").onclick = scanAll;
 document.getElementById("filter").oninput = render;
 document.getElementById("fState").onchange = render;
@@ -1855,14 +1869,14 @@ document.getElementById("acSave").onclick = async () => {
   const oldPw = document.getElementById("acOld").value;
   const nw = document.getElementById("acNew").value;
   const nw2 = document.getElementById("acNew2").value;
-  if (nw !== nw2){ toast("Die beiden neuen Passwörter stimmen nicht überein", true); return; }
-  if (nw.length < 6){ toast("Passwort muss mindestens 6 Zeichen haben", true); return; }
+  if (nw !== nw2){ toast(t("msg.pw_mismatch"), true); return; }
+  if (nw.length < 6){ toast(t("msg.pw_short"), true); return; }
   try { await api("POST", "/api/v1/me/password", {old_password: oldPw, new_password: nw}); }
   catch(e){ return; }
   // Der Server verwirft dabei alle Sitzungen - auch die eigene.
   setSession(false);
   document.getElementById("dlgSettings").close();
-  showLogin("Passwort geändert. Bitte neu anmelden.");
+  showLogin(t("msg.pw_changed"));
 };
 
 async function loadUsers(){
@@ -1882,19 +1896,19 @@ async function loadUsers(){
 }
 
 async function resetPw(id, name){
-  const pw = prompt(`Neues Passwort für ${name}:`);
+  const pw = prompt(t("ask.new_password", { name }));
   if (!pw) return;
-  if (pw.length < 6){ toast("Passwort muss mindestens 6 Zeichen haben", true); return; }
+  if (pw.length < 6){ toast(t("msg.pw_short"), true); return; }
   try { await api("POST", `/api/v1/users/${id}/password`, {new_password: pw}); }
   catch(e){ return; }
-  toast(`Passwort für ${name} gesetzt, laufende Sitzungen beendet`);
+  toast(t("msg.pw_set", { name }));
   loadUsers(); loadAudit();
 }
 
 async function delUser(id, name){
-  if (!confirm(`Zugang ${name} entfernen?`)) return;
+  if (!confirm(t("ask.remove_user", { name }))) return;
   try { await api("DELETE", `/api/v1/users/${id}`); } catch(e){ return; }
-  toast(`${name} entfernt`);
+  toast(t("msg.removed", { name }));
   loadUsers(); loadAudit();
 }
 
@@ -1902,12 +1916,12 @@ document.getElementById("nuAdd").onclick = async () => {
   const username = document.getElementById("nuName").value.trim();
   const password = document.getElementById("nuPass").value;
   const role = document.getElementById("nuRole").value;
-  if (!username || !password){ toast("Name und Passwort ausfüllen", true); return; }
+  if (!username || !password){ toast(t("msg.need_name_pw"), true); return; }
   try { await api("POST", "/api/v1/users", {username, password, role}); }
   catch(e){ return; }
   document.getElementById("nuName").value = "";
   document.getElementById("nuPass").value = "";
-  toast(`${username} angelegt`);
+  toast(t("msg.created", { name: username }));
   loadUsers(); loadAudit();
 };
 
@@ -2007,8 +2021,22 @@ function spracheImDialogZeigen(){
   if (vorgabe) vorgabe.value = VORGABE_SPRACHE;
 }
 
+/*
+ * Was das Skript selbst zeichnet - Hostliste, Kopfzeile, offene Dialoge -
+ * ruehrt uebersetzeDom() nicht an: dort stehen keine data-i18n-Marken,
+ * sondern es wird bei jedem Zeichnen neu aufgebaut. Ohne diesen Aufruf
+ * bliebe die Tabelle nach dem Umschalten in der alten Sprache stehen, bis
+ * die naechste Aktualisierung von selbst kommt - je nach Lage bis zu
+ * fuenfzehn Sekunden. Das saehe nach einem Fehler aus.
+ */
+function neuZeichnenNachSprachwechsel(){
+  try { renderRackHead(); } catch(e){}
+  try { render(); } catch(e){}
+}
+
 async function spracheWaehlen(code){
   if (!setzeSprache(code)) return;          // schreibt das Cookie
+  neuZeichnenNachSprachwechsel();
   try {
     await api("POST", "/api/v1/me/language", { language: code });
     if (ME) ME.language = code;
