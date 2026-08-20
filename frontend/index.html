@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- CO37_FRONTEND_VERSION: 0.35.1 -->
+<!-- CO37_FRONTEND_VERSION: 0.35.0 -->
 <title>CO-37</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2212%22%20fill%3D%22%23020817%22%2F%3E%3Cpath%20d%3D%22M32%209%2046%2016v13c0%2011-6%2018-14%2022-8-4-14-11-14-22V16z%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223.5%22%20stroke-linejoin%3D%22round%22%2F%3E%3Cpath%20d%3D%22M22%2027h20l-4%207H26z%22%20fill%3D%22%23ffffff%22%2F%3E%3Cpath%20d%3D%22M26%2038h12%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E">
 <style>
@@ -366,7 +366,7 @@ dialog#dlgSettings .hint{max-width:78ch}
     <h1>CO-37</h1>
   </div>
   <div class="head-actions">
-    <button class="icon" id="btnTheme" title="Ansicht wechseln" aria-label="Ansicht wechseln"></button>
+    <button class="icon" id="btnTheme" title="Switch view" data-i18n-title="app.toggle_view" aria-label="Ansicht wechseln"></button>
     <span id="whoami" style="font-size:11px;color:var(--muted-2)"></span>
     <button id="btnSettings" data-i18n="app.settings">Settings</button>
     <button id="btnLogout" data-i18n="app.logout">Sign out</button>
@@ -383,7 +383,7 @@ dialog#dlgSettings .hint{max-width:78ch}
     <div class="stat"><b id="sWait">0</b><span data-i18n="stats.waiting">pending</span></div>
     <div class="stat"><b id="sPlan">0</b><span data-i18n="stats.scheduled">scheduled</span></div>
     <div class="sep"></div>
-    <input id="filter" placeholder="Filtern nach Host oder Tag" style="width:230px">
+    <input id="filter" placeholder="Filter by host or tag" data-i18n-placeholder="app.filter" style="width:230px">
     <select id="fState">
       <option value="" data-i18n="filter.all">All states</option>
       <option value="waiting" data-i18n="filter.pending_approval">Pending approval</option>
@@ -407,7 +407,11 @@ dialog#dlgSettings .hint{max-width:78ch}
   </div>
 </main>
 
-<footer id="appFoot"><span id="footVersion">CO-37</span><br>&copy; ITkub &ndash; Michael Kuban</footer>
+<!-- Firmierung und Versionszeile bleiben in jeder Sprache gleich.
+     data-i18n-skip sagt das ausdruecklich, damit die Vollstaendigkeits-
+     pruefung es nicht als vergessen meldet - und damit jeder sieht,
+     dass es eine Entscheidung war und kein Versehen. -->
+<footer id="appFoot" data-i18n-skip><span id="footVersion">CO-37</span><br>&copy; ITkub &ndash; Michael Kuban</footer>
 </div>
 
 <!-- ============ Host bearbeiten ============ -->
@@ -423,11 +427,11 @@ dialog#dlgSettings .hint{max-width:78ch}
   <div class="dlg-body">
 
     <div class="pane on" id="htAllg">
-      <label data-i18n="host.display_name">Display name<input id="hName" placeholder="z.B. Domaincontroller"></label>
+      <label data-i18n="host.display_name">Display name<input id="hName" placeholder="e.g. domain controller" data-i18n-placeholder="host.name_example"></label>
       <div class="section">
         <div class="section-title" data-i18n="host.reboot_policy">Restart policy after updates</div>
         <label class="check" data-i18n="host.auto_reboot"><input type="checkbox" id="hAuto"> Restart on its own when required</label>
-        <label data-i18n="host.maintenance_window">Maintenance window<input id="hWindow" placeholder="SA,SO 02:00-05:00"></label>
+        <label data-i18n="host.maintenance_window">Maintenance window<input id="hWindow" placeholder="SAT,SUN 02:00-05:00" data-i18n-placeholder="host.window_example"></label>
         <div class="hint" data-i18n-html="host.window_hint">This is <b>not a schedule</b>, it is a gate: it decides whether a restart that became due after patching may happen right away. Nothing is ever started on its own. An empty field means any time.<br><br>Format: <code>SAT,SUN 02:00-05:00</code> — spanning midnight works too: <code>MON-FRI 22:00-06:00</code></div>
       </div>
       <div class="section">
@@ -443,7 +447,7 @@ dialog#dlgSettings .hint{max-width:78ch}
 
     <div class="pane" id="htCmk">
       <div class="hint" data-i18n="host.cmk_hint">More than one host can be selected. When this host goes down, other objects are often affected too — cluster resources, services, dependent applications. All selected ones get the same downtime.</div>
-      <input id="hCmkSearch" placeholder="Checkmk-Hosts durchsuchen">
+      <input id="hCmkSearch" placeholder="Search Checkmk hosts" data-i18n-placeholder="host.cmk_search">
       <div class="picker" id="hCmkPicker"></div>
       <div class="picked" id="hCmkPicked"></div>
       <label style="max-width:240px" data-i18n="host.downtime_minutes">Downtime for a restart (minutes)<input id="hDowntime" type="number" min="1" max="1440" value="30"></label>
@@ -477,7 +481,7 @@ dialog#dlgSettings .hint{max-width:78ch}
     <div class="pane" id="htPlan">
       <div class="hint" data-i18n="plan.once_hint">Places a job at a fixed point in time. It is handed to the agent only then. Policy and maintenance window are bypassed — the time was chosen deliberately, after all.</div>
 
-      <label>Was soll passieren
+      <label data-i18n="plan.what">What should happen
         <select id="plKind">
           <option value="patch" data-i18n="plan.job.patch">Install updates</option>
           <option value="patch_reboot" data-i18n="plan.job.patch_reboot">Install updates and restart if required</option>
@@ -520,7 +524,7 @@ dialog#dlgSettings .hint{max-width:78ch}
         <label data-i18n="dt.from">From<input id="dtStart" type="datetime-local"></label>
         <label data-i18n="dt.to">To<input id="dtEnd" type="datetime-local"></label>
       </div>
-      <label data-i18n="dt.comment">Comment<input id="dtComment" placeholder="CO-37: Manuelle Wartung"></label>
+      <label data-i18n="dt.comment">Comment<input id="dtComment" placeholder="CO-37: manual maintenance" data-i18n-placeholder="dt.comment_example"></label>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="primary" id="dtSet" data-i18n="dt.set">Set downtime</button>
         <button id="dtClear" data-i18n="dt.cancel">Cancel</button>
@@ -539,7 +543,7 @@ dialog#dlgSettings .hint{max-width:78ch}
 
 <!-- ============ Einstellungen ============ -->
 <dialog id="dlgSettings">
-  <div class="dlg-head">Einstellungen<button data-close data-i18n="common.close2">Close</button></div>
+  <div class="dlg-head" data-i18n="settings.title">Settings<button data-close data-i18n="common.close2">Close</button></div>
   <div class="tabs" id="sTabs">
     <!-- Agents zeigt den Installationsbefehl samt Paket-Schluessel,
          Checkmk die Zugangsdaten, Update laedt Code hoch, den der Watcher
@@ -566,12 +570,12 @@ dialog#dlgSettings .hint{max-width:78ch}
       <div class="section" style="border-top:none;padding-top:0">
         <div class="section-title" data-i18n="settings.agents.download">Download agent</div>
         <div class="vrow" id="rowLinux">
-          <span><b>Linux</b> · .deb für Debian und Ubuntu<br>
+          <span data-i18n="settings.agents.linux_pkg"><b>Linux</b> · .deb for Debian and Ubuntu<br>
             <span style="color:var(--muted-2)" id="infoLinux">—</span></span>
           <button class="primary" id="dlLinux" data-i18n="settings.agents.download_deb">Download</button>
         </div>
         <div class="vrow" id="rowWin">
-          <span><b>Windows</b> · .msi, Python ist enthalten<br>
+          <span data-i18n="settings.agents.windows_pkg"><b>Windows</b> · .msi, Python included<br>
             <span style="color:var(--muted-2)" id="infoWin">—</span></span>
           <button class="primary" id="dlWin" data-i18n="settings.agents.download_msi">Download</button>
         </div>
@@ -606,13 +610,13 @@ dialog#dlgSettings .hint{max-width:78ch}
         <div class="section-title" data-i18n="settings.rollout.title">Agent updates</div>
         <label class="check" data-i18n="settings.rollout.auto"><input type="checkbox" id="roAuto"> Roll out automatically after a system update</label>
         <div class="row">
-          <label>Vorgehen
+          <label data-i18n="settings.rollout.mode">Procedure
             <select id="roMode">
               <option value="staged" data-i18n="settings.rollout.staged">Staged — one host first, then the rest</option>
               <option value="all" data-i18n="settings.rollout.all">All at once</option>
             </select>
           </label>
-          <label id="roPilotRow">Pilot-Host
+          <label id="roPilotRow" data-i18n="settings.rollout.pilot">Pilot host
             <select id="roPilot"><option value="" data-i18n="settings.rollout.none">— none selected —</option></select>
           </label>
         </div>
@@ -669,7 +673,7 @@ dialog#dlgSettings .hint{max-width:78ch}
       <div class="section">
         <div class="section-title" data-i18n="settings.proxy.title">Reverse proxy</div>
         <div class="hint" data-i18n-html="settings.proxy.hint">Address of the proxy in front. Only from there are the <code>X-Forwarded-For</code> and <code>X-Forwarded-Proto</code> headers evaluated — separate several with commas.<br><br><b>Encrypted requests are accepted from this address only.</b> If this is empty or holds the wrong address, every request claiming HTTPS is rejected — CO-37 does not terminate TLS itself, so the claim would be unproven. Unencrypted access stays available until the box below is ticked.<br><br>An entry that is too broad is a risk: anyone who can then set the header themselves bypasses the sign-in rate limit with invented senders.<br><br>The way back from a wrong entry is always unencrypted access straight to the internal port.</div>
-        <label style="max-width:320px" data-i18n="settings.proxy.trusted">Trusted proxy<input id="pxProxy" placeholder="z.B. 192.168.1.20"></label>
+        <label style="max-width:320px" data-i18n="settings.proxy.trusted">Trusted proxy<input id="pxProxy" placeholder="e.g. 192.168.1.20" data-i18n-placeholder="settings.proxy.example"></label>
         <div id="pxNow" class="hint"></div>
         <button id="pxSaveProxy" style="align-self:flex-start" data-i18n="settings.proxy.save">Save</button>
       </div>
@@ -677,7 +681,7 @@ dialog#dlgSettings .hint{max-width:78ch}
       <div class="section">
         <div class="section-title" data-i18n="settings.proxy.public_title">Public address</div>
         <div class="hint" data-i18n-html="settings.proxy.public_hint">The address at which CO-37 is reachable <b>from the target systems</b>. It ends up in the installation commands and therefore in the <code>agent.conf</code> of every newly set up host.<br><br>If the field is left empty, the address you are currently viewing the dashboard at is used. That makes it depend on how you open the page — set up a host over the internal port after switching, and its agent would talk unencrypted for good.<br><br>Existing agents are not affected. Their server address sits in <code>agent.conf</code> on the host and is not changed by any update.</div>
-        <label style="max-width:400px" data-i18n="settings.proxy.public">Public address<input id="pxPublic" placeholder="z.B. https://co37.beispiel.com"></label>
+        <label style="max-width:400px" data-i18n="settings.proxy.public">Public address<input id="pxPublic" placeholder="e.g. https://co37.example.com" data-i18n-placeholder="settings.proxy.public_example"></label>
         <div id="pxEffective" class="hint"></div>
         <button id="pxSavePublic" style="align-self:flex-start" data-i18n="settings.proxy.public_save">Save</button>
       </div>
@@ -696,7 +700,7 @@ dialog#dlgSettings .hint{max-width:78ch}
       <div class="vrow"><span data-i18n="settings.update.state">State</span><span class="state" id="uState">—</span></div>
       <div class="vrow"><span data-i18n="settings.update.watcher">Update watcher</span><b id="wVer">—</b></div>
       <div class="hint" id="wHint" style="display:none"></div>
-      <div class="drop" id="uDrop">ZIP-Paket <b>und</b> .sig-Datei hier ablegen oder klicken<br>
+      <div class="drop" id="uDrop" data-i18n-html="settings.update.drop">Drop the <b>ZIP package</b> and the <b>.sig file</b> here, or click<br>
         <span style="font-size:11px" data-i18n="settings.update.files">co37_vX_Y_Z.zip and co37_vX_Y_Z.zip.sig, select both · max. 50 MB</span></div>
       <input type="file" id="uFile" accept=".zip,.sig" multiple style="display:none">
       <div class="hint" data-i18n-html="settings.update.sig_hint">The signature proves that the package comes from the publisher and was not altered on the way. It is checked <b>before</b> unpacking — the watcher unpacks as root, so a substituted package would amount to code execution as root.<br><br>A checksum alone is not enough for this: anyone who can swap the file can swap the checksum file next to it as well.</div>
@@ -757,7 +761,7 @@ dialog#dlgSettings .hint{max-width:78ch}
         <div class="section-title" data-i18n="settings.users.new">Create a new user</div>
         <label data-i18n="settings.users.name">Username<input id="nuName" autocomplete="off"></label>
         <label data-i18n="settings.users.password">Password<input id="nuPass" type="password" autocomplete="new-password"></label>
-        <label>Rolle
+        <label data-i18n="settings.users.role">Role
           <select id="nuRole">
             <option value="user" data-i18n="settings.users.role_user">User</option>
             <option value="admin" data-i18n="settings.users.role_admin">Administrator</option>

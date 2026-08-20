@@ -1169,8 +1169,17 @@ document.getElementById("dtList").onclick = async () => {
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = e => e.target.closest("dialog").close());
 // Eingegrenzt auf #sTabs und die eigenen Bereiche. Ein ungenauer Selektor
 // hat hier vorher die Reiter des Host-Dialogs mit ueberschrieben.
-const STABS = ["tabAgents","tabCmk","tabUpd","tabProxy","tabLizenz",
-               "tabAccount","tabUsers","tabAudit"];
+//
+// Aus dem Markup abgeleitet statt daneben gepflegt. Die fest verdrahtete
+// Liste ist beim Hinzufuegen des Reiters 'Sprache' auseinandergelaufen:
+// der Knopf war da, der Bereich auch, nur die Liste kannte ihn nicht -
+// und der Dialog blieb beim Klick leer. Zwei Wahrheiten ueber dieselbe
+// Sache, von denen eine nicht mitgepflegt wurde.
+//
+// Der enge Selektor bleibt: '#sTabs button' und nicht '.tabs button',
+// sonst greift es in die Reiter des Host-Dialogs hinein.
+const STABS = [...document.querySelectorAll("#sTabs button")]
+  .map(b => b.dataset.tab).filter(Boolean);
 document.querySelectorAll("#sTabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("#sTabs button").forEach(x => x.classList.toggle("on", x === b));
   STABS.forEach(id => document.getElementById(id).classList.toggle("on", id === b.dataset.tab));

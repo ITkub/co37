@@ -265,24 +265,64 @@ console.log("\n=== Kein sichtbarer Text ohne Schluessel ===");
   // rutschte jeder Satz durch, in dem 'Agent' vorkommt.
   const neutral = /^(|[\s—–.,:;·-]*|CO-?37|Checkmk|Agent|Agents|TLS|HTTPS|MSI|SHA-256|JSON|\d+[\d\s.,:%]*|…)$/i;
 
-  const offen = [];
-  for (const m of maske.matchAll(re)) {
-    const inner = m[3].trim();
-    const nurText = inner.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-    if (!nurText || neutral.test(nurText)) continue;
-    if (/data-i18n/.test(m[2])) continue;
-    // Ein Element, dessen Text vollstaendig in verschluesselten Kindern
-    // steckt, ist selbst in Ordnung.
-    if (/data-i18n/.test(inner)
-        && !inner.replace(/<[^>]*data-i18n[^>]*>[\s\S]*?<\/\w+>/g, " ")
-                 .replace(/<[^>]*>/g, " ").trim()) continue;
-    offen.push(`${m[1]}: ${nurText.slice(0, 55)}`);
-  }
-  check("jeder sichtbare Text hat einen Schluessel", offen.length === 0,
-        offen.slice(0, 5).join(" | "));
+  // Nicht nach uebersetzbaren Elementen suchen, sondern die bereits
+  // verschluesselten samt Inhalt wegstreichen und ansehen, was uebrig
+  // bleibt. Die erste Fassung dieser Pruefung suchte mit demselben
+  // Ausdruck wie das Werkzeug, das die Texte herausgeholt hat - und hatte
+  // damit denselben blinden Fleck: ein Element, das andere Elemente
+  // enthaelt, uebersahen beide. Zwoelf Texte und acht Platzhalter blieben
+  // deutsch, und die Pruefung meldete alles in Ordnung.
+  // data-i18n-skip heisst: bleibt in jeder Sprache gleich, mit Absicht.
+  // Firmierung etwa. Ausdruecklich im Markup und nicht als Ausnahmeliste
+  // hier - so steht die Entscheidung dort, wo sie jemand sieht.
+  let rest = maske, vorher, runden = 0;
+  do {
+    vorher = rest;
+    // Der Wert ist bewusst freigestellt: data-i18n-skip steht ohne '=' im
+    // Markup, und ein Ausdruck, der eines verlangt, uebersieht es.
+    rest = rest.replace(
+      /<(\w+)[^>]*\bdata-i18n(?:-html|-skip|-placeholder|-title)?(?:\s*=\s*"[^"]*")?[^>]*>[\s\S]*?<\/\1>/g, " ")
+      .replace(/<(\w+)[^>]*\bdata-i18n[^>]*\/?>/g, " ");
+  } while (rest !== vorher && ++runden < 40);
 
-  const benutzt = [...html.matchAll(/data-i18n(?:-html)?="([^"]+)"/g)].map(m => m[1]);
-  check("es sind tatsaechlich viele", benutzt.length > 150, benutzt.length);
+  const offen = [...rest.matchAll(/>([^<>]+)</g)]
+    .map(m => m[1].replace(/\s+/g, " ").trim())
+    .filter(t => t && !neutral.test(t));
+  check("jeder sichtbare Text hat einen Schluessel", offen.length === 0,
+        [...new Set(offen)].slice(0, 6).join(" | "));
+
+  // Platzhalter und Titel waren beim ersten Anlauf gar nicht erfasst -
+  // sie stehen in Attributen, und dort hat niemand hingesehen.
+  const attrNeutral = /^(\d+|cmk|automation|CO37-…|https?:\/\/\S+)$/i;
+  const attrOffen = [...html.matchAll(/<[^>]*?(placeholder|title)="([^"]+)"[^>]*>/g)]
+    .filter(m => !attrNeutral.test(m[2]) && !/data-i18n-(placeholder|title)/.test(m[0]))
+    .map(m => `${m[1]}="${m[2].slice(0, 40)}"`);
+  check("jeder Platzhalter und Titel hat einen Schluessel",
+        attrOffen.length === 0, attrOffen.slice(0, 4).join(" | "));
+
+  const benutzt = [...html.matchAll(/data-i18n(?:-html|-placeholder|-title)?="([^"]+)"/g)]
+                  .map(m => m[1]);
+  check("es sind tatsaechlich viele", benutzt.length > 180, benutzt.length);
+}
+
+// --------------------------------------------- Reiter und Bereiche passen
+console.log("\n=== Jeder Reiter hat seinen Bereich ===");
+{
+  // Der Reiter 'Sprache' war da, sein Bereich auch - aber app.js pflegte
+  // die Liste der Bereiche daneben und kannte ihn nicht. Ergebnis: ein
+  // leerer Dialog. Diese Pruefung haelt Markup und Code zusammen.
+  const reiter = [...html.matchAll(/data-tab="(\w+)"/g)].map(m => m[1]);
+  const fehlend = reiter.filter(id => !new RegExp(`id="${id}"`).test(html));
+  check("zu jedem Reiter gibt es einen Bereich im Markup",
+        fehlend.length === 0, fehlend.join(", "));
+  check("es gibt ueberhaupt Reiter", reiter.length >= 9, reiter.length);
+
+  // Und die Liste in app.js darf nicht fest verdrahtet sein - sonst
+  // laeuft sie beim naechsten Reiter wieder auseinander.
+  const appjs = require("fs").readFileSync(
+    require("path").join(require("path").dirname(HTML_PATH), "app.js"), "utf8");
+  check("app.js leitet die Bereiche aus dem Markup ab",
+        /const STABS = \[\.\.\.document\.querySelectorAll/.test(appjs));
 }
 
 // ------------------------------------------------- Nur harmlose Auszeichnung
