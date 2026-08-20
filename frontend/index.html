@@ -317,7 +317,7 @@ dialog#dlgSettings .hint{max-width:78ch}
      font-family:var(--font-ui);font-size:12px;font-weight:600;
      display:none;align-items:center;gap:14px;justify-content:center">
   <span id="reloadText"></span>
-  <button id="reloadNow" style="background:#020817;color:#f1f5f9;border-color:#020817">Jetzt neu laden</button>
+  <button id="reloadNow" style="background:#020817;color:#f1f5f9;border-color:#020817" data-i18n="app.reload_now">Reload now</button>
 </div>
 
 <!-- Bleibt stehen, solange der Server nicht antwortet, und verschwindet von
@@ -329,11 +329,11 @@ dialog#dlgSettings .hint{max-width:78ch}
      background:var(--led-reboot);color:#f8fafc;padding:9px 20px;
      font-family:var(--font-ui);font-size:12px;font-weight:600;
      align-items:center;gap:14px;justify-content:center">
-  <span id="offlineText">Server antwortet nicht — es wird weiter versucht.</span>
+  <span id="offlineText" data-i18n="app.offline">Server is not responding — still trying.</span>
 </div>
 
 <dialog id="dlgLogin">
-  <div class="dlg-head">Anmeldung</div>
+  <div class="dlg-head" data-i18n="login.title">Sign in</div>
   <div class="dlg-body">
     <div class="login-brand">
       <svg viewBox="0 0 64 64" aria-hidden="true">
@@ -344,13 +344,13 @@ dialog#dlgSettings .hint{max-width:78ch}
         <path d="M26 38h12" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
       </svg>
       <div class="login-name">CO-37</div>
-      <div class="login-sub">Core Operations Manager</div>
+      <div class="login-sub" data-i18n="login.subtitle">Core Operations Manager</div>
     </div>
-    <label>Benutzername<input id="loginUser" autocomplete="username"></label>
-    <label>Passwort<input id="loginPass" type="password" autocomplete="current-password"></label>
+    <label data-i18n="login.user">Username<input id="loginUser" autocomplete="username"></label>
+    <label data-i18n="login.password">Password<input id="loginPass" type="password" autocomplete="current-password"></label>
     <div id="loginError" style="color:var(--led-reboot);font-size:11px;min-height:15px"></div>
   </div>
-  <div class="dlg-foot"><button class="primary" id="loginGo">Anmelden</button></div>
+  <div class="dlg-foot"><button class="primary" id="loginGo" data-i18n="login.submit">Sign in</button></div>
 </dialog>
 
 <div id="appShell" style="display:none">
@@ -368,32 +368,32 @@ dialog#dlgSettings .hint{max-width:78ch}
   <div class="head-actions">
     <button class="icon" id="btnTheme" title="Ansicht wechseln" aria-label="Ansicht wechseln"></button>
     <span id="whoami" style="font-size:11px;color:var(--muted-2)"></span>
-    <button id="btnSettings">Einstellungen</button>
-    <button id="btnLogout">Abmelden</button>
+    <button id="btnSettings" data-i18n="app.settings">Settings</button>
+    <button id="btnLogout" data-i18n="app.logout">Sign out</button>
   </div>
 </header>
 
 <main>
   <div class="bar">
-    <div class="stat"><b id="sTotal">0</b><span>Hosts</span></div>
+    <div class="stat"><b id="sTotal">0</b><span data-i18n="stats.hosts">Hosts</span></div>
     <div class="sep"></div>
-    <div class="stat"><b id="sOnline">0</b><span>online</span></div>
-    <div class="stat"><b id="sUpdates">0</b><span>Updates offen</span></div>
-    <div class="stat"><b id="sReboot">0</b><span>Neustart nötig</span></div>
-    <div class="stat"><b id="sWait">0</b><span>wartet</span></div>
-    <div class="stat"><b id="sPlan">0</b><span>geplant</span></div>
+    <div class="stat"><b id="sOnline">0</b><span data-i18n="stats.online">online</span></div>
+    <div class="stat"><b id="sUpdates">0</b><span data-i18n="stats.updates">Updates pending</span></div>
+    <div class="stat"><b id="sReboot">0</b><span data-i18n="stats.reboot">Restart required</span></div>
+    <div class="stat"><b id="sWait">0</b><span data-i18n="stats.waiting">pending</span></div>
+    <div class="stat"><b id="sPlan">0</b><span data-i18n="stats.scheduled">scheduled</span></div>
     <div class="sep"></div>
     <input id="filter" placeholder="Filtern nach Host oder Tag" style="width:230px">
     <select id="fState">
-      <option value="">Alle Zustände</option>
-      <option value="waiting">Wartet auf Freigabe</option>
-      <option value="reboot">Neustart nötig</option>
-      <option value="pending">Updates offen</option>
-      <option value="offline">Offline</option>
-      <option value="ok">Aktuell</option>
+      <option value="" data-i18n="filter.all">All states</option>
+      <option value="waiting" data-i18n="filter.pending_approval">Pending approval</option>
+      <option value="reboot" data-i18n="filter.reboot">Restart required</option>
+      <option value="pending" data-i18n="filter.updates">Updates pending</option>
+      <option value="offline" data-i18n="filter.offline">Offline</option>
+      <option value="ok" data-i18n="filter.uptodate">Up to date</option>
     </select>
-    <button id="btnScanAll">Alle prüfen</button>
-    <button id="btnReload">Neu laden</button>
+    <button id="btnScanAll" data-i18n="app.scan_all">Check all</button>
+    <button id="btnReload" data-i18n="app.refresh">Refresh</button>
   </div>
 
   <div class="rack">
@@ -412,136 +412,134 @@ dialog#dlgSettings .hint{max-width:78ch}
 
 <!-- ============ Host bearbeiten ============ -->
 <dialog id="dlgHost">
-  <div class="dlg-head"><span id="hTitle">Host</span><button data-close>Schließen</button></div>
+  <div class="dlg-head"><span id="hTitle" data-i18n="host.title">Host</span><button data-close data-i18n="common.close">Close</button></div>
   <div class="tabs" id="hTabs">
-    <button class="on" data-htab="htAllg">Allgemein</button>
+    <button class="on" data-htab="htAllg" data-i18n="host.tab.general">General</button>
     <button data-htab="htCmk">Checkmk</button>
-    <button data-htab="htUpd">Update planen</button>
-    <button data-htab="htPlan">Neustart planen</button>
-    <button data-htab="htDt">Downtime</button>
+    <button data-htab="htUpd" data-i18n="host.tab.schedule_update">Schedule update</button>
+    <button data-htab="htPlan" data-i18n="host.tab.schedule_reboot">Schedule restart</button>
+    <button data-htab="htDt" data-i18n="host.tab.downtime">Downtime</button>
   </div>
   <div class="dlg-body">
 
     <div class="pane on" id="htAllg">
-      <label>Anzeigename<input id="hName" placeholder="z.B. Domaincontroller"></label>
+      <label data-i18n="host.display_name">Display name<input id="hName" placeholder="z.B. Domaincontroller"></label>
       <div class="section">
-        <div class="section-title">Neustart-Richtlinie nach Updates</div>
-        <label class="check"><input type="checkbox" id="hAuto"> Neustart eigenständig ausführen, wenn nötig</label>
-        <label>Wartungsfenster<input id="hWindow" placeholder="SA,SO 02:00-05:00"></label>
-        <div class="hint">Das ist <b>kein Zeitplan</b>, sondern eine Schranke: sie entscheidet, ob ein nach dem Patchen fälliger Neustart sofort erfolgen darf. Es wird nichts von selbst gestartet. Leeres Feld bedeutet jederzeit.<br><br>Format: <code>SA,SO 02:00-05:00</code> — auch über Mitternacht: <code>MO-FR 22:00-06:00</code></div>
+        <div class="section-title" data-i18n="host.reboot_policy">Restart policy after updates</div>
+        <label class="check" data-i18n="host.auto_reboot"><input type="checkbox" id="hAuto"> Restart on its own when required</label>
+        <label data-i18n="host.maintenance_window">Maintenance window<input id="hWindow" placeholder="SA,SO 02:00-05:00"></label>
+        <div class="hint" data-i18n-html="host.window_hint">This is <b>not a schedule</b>, it is a gate: it decides whether a restart that became due after patching may happen right away. Nothing is ever started on its own. An empty field means any time.<br><br>Format: <code>SAT,SUN 02:00-05:00</code> — spanning midnight works too: <code>MON-FRI 22:00-06:00</code></div>
       </div>
       <div class="section">
-        <div class="section-title">System</div>
+        <div class="section-title" data-i18n="host.system">System</div>
         <div id="hInfo" class="hint"></div>
       </div>
       <div class="section">
-        <div class="section-title">Agent-Token</div>
-        <div class="hint">Das Token gilt unbegrenzt. Zurückziehen, wenn es abgeflossen sein könnte — etwa nachdem der Host weitergegeben oder neu aufgesetzt wurde.<br><br>Der Agent bemerkt es beim nächsten Kontakt und meldet sich von selbst neu an. Zeitplan, Checkmk-Verknüpfung und Verlauf bleiben erhalten. Bis zur erneuten Anmeldung steht der Name offen, deshalb landet der Host wieder in der Freigabe.</div>
-        <button class="danger" id="hResetToken" style="align-self:flex-start">Token zurückziehen</button>
+        <div class="section-title" data-i18n="host.agent_token">Agent token</div>
+        <div class="hint" data-i18n-html="host.token_hint">The token does not expire. Revoke it if it may have leaked — for instance after the host was handed on or rebuilt.<br><br>The agent notices at its next contact and enrols again by itself. Schedule, Checkmk link and history are kept. Until it has enrolled again the name is unclaimed, so the host returns to pending approval.</div>
+        <button class="danger" id="hResetToken" style="align-self:flex-start" data-i18n="host.revoke_token">Revoke token</button>
       </div>
     </div>
 
     <div class="pane" id="htCmk">
-      <div class="hint">Mehrere Hosts auswählbar. Fällt dieser Host aus, sind oft weitere Objekte mit betroffen — Cluster-Ressourcen, Dienste, abhängige Anwendungen. Alle ausgewählten bekommen dieselbe Downtime.</div>
+      <div class="hint" data-i18n="host.cmk_hint">More than one host can be selected. When this host goes down, other objects are often affected too — cluster resources, services, dependent applications. All selected ones get the same downtime.</div>
       <input id="hCmkSearch" placeholder="Checkmk-Hosts durchsuchen">
       <div class="picker" id="hCmkPicker"></div>
       <div class="picked" id="hCmkPicked"></div>
-      <label style="max-width:240px">Downtime-Dauer bei Neustart (Minuten)
-        <input id="hDowntime" type="number" min="1" max="1440" value="30">
-      </label>
+      <label style="max-width:240px" data-i18n="host.downtime_minutes">Downtime for a restart (minutes)<input id="hDowntime" type="number" min="1" max="1440" value="30"></label>
       <div class="section">
-        <div class="section-title">Monitoring-Träger</div>
-        <label class="check"><input type="checkbox" id="hDtAll"> Downtime auf <b>alle</b> Checkmk-Hosts setzen</label>
-        <div class="hint">Nur für Hosts, die das Monitoring selbst tragen — etwa den Virtualisierer, auf dem die Checkmk-Maschine läuft. Startet ein solcher Host neu, meldet jeder überwachte Host aus, ohne selbst betroffen zu sein.<br><br>Die Downtime greift dann auf allen in Checkmk konfigurierten Hosts, nicht nur auf den oben ausgewählten. Ist die Option gesetzt, genügt sie allein — eine Verknüpfung oben ist dann nicht mehr nötig.</div>
+        <div class="section-title" data-i18n="host.monitoring_carrier">Monitoring carrier</div>
+        <label class="check"><input type="checkbox" id="hDtAll"> <span data-i18n="host.downtime_all">Set downtime on all Checkmk hosts</span></label>
+        <div class="hint" data-i18n-html="host.carrier_hint">Only for hosts that carry the monitoring themselves — the hypervisor running the Checkmk machine, for example. When such a host restarts, every monitored host reports as down without being affected itself.<br><br>The downtime then applies to every host configured in Checkmk, not just the ones selected above. With this option set, that is enough on its own — a link above is no longer needed.</div>
       </div>
     </div>
 
     <div class="pane" id="htUpd">
-      <div class="hint">Wiederkehrender Termin zum Installieren von Updates. Wird beim Kontakt des Agents ausgewertet — läuft der Host zum Termin nicht, greift der Nachlauf.</div>
-      <label class="check"><input type="checkbox" id="upEnabled"> Updates nach Zeitplan installieren</label>
+      <div class="hint" data-i18n="plan.update_hint">A recurring appointment for installing updates. It is evaluated when the agent makes contact — if the host is not running at that time, the grace period applies.</div>
+      <label class="check" data-i18n="plan.update_enabled"><input type="checkbox" id="upEnabled"> Install updates on a schedule</label>
       <div class="section">
-        <div class="section-title">Wochentage</div>
+        <div class="section-title" data-i18n="plan.weekdays">Weekdays</div>
         <div class="picked" id="upDays" style="gap:6px"></div>
       </div>
       <div class="row">
-        <label style="max-width:130px">Uhrzeit<input id="upTime" type="time" value="03:00"></label>
-        <label style="max-width:190px">Nachlauf (Stunden)<input id="upGrace" type="number" min="1" max="24" value="4"></label>
+        <label style="max-width:130px" data-i18n="plan.time">Time<input id="upTime" type="time" value="03:00"></label>
+        <label style="max-width:190px" data-i18n="plan.grace_hours">Grace period (hours)<input id="upGrace" type="number" min="1" max="24" value="4"></label>
       </div>
-      <div class="hint">Der Nachlauf verhindert, dass ein Host, der zum Termin ausgeschaltet war, später im Betrieb patcht. Nach Ablauf wird der Termin übersprungen.</div>
-      <label class="check"><input type="checkbox" id="upReboot"> Bei Bedarf automatisch neu starten</label>
+      <div class="hint" data-i18n="plan.grace_hint">The grace period keeps a host that was switched off at the scheduled time from patching later during working hours. Once it has passed, the appointment is skipped.</div>
+      <label class="check" data-i18n="plan.auto_reboot"><input type="checkbox" id="upReboot"> Restart automatically when required</label>
       <div class="hint" id="upRebootHint"></div>
       <div class="section">
-        <div class="vrow"><span>Nächster Termin</span><b id="upNext">—</b></div>
-        <div class="vrow"><span>Zuletzt gelaufen</span><b id="upLast">—</b></div>
+        <div class="vrow"><span data-i18n="plan.next">Next appointment</span><b id="upNext">—</b></div>
+        <div class="vrow"><span data-i18n="plan.last">Last run</span><b id="upLast">—</b></div>
       </div>
     </div>
 
     <div class="pane" id="htPlan">
-      <div class="hint">Legt einen Auftrag auf einen festen Zeitpunkt. Er wird erst dann an den Agent übergeben. Richtlinie und Wartungsfenster werden übergangen — der Termin ist ja ausdrücklich gewählt.</div>
+      <div class="hint" data-i18n="plan.once_hint">Places a job at a fixed point in time. It is handed to the agent only then. Policy and maintenance window are bypassed — the time was chosen deliberately, after all.</div>
 
       <label>Was soll passieren
         <select id="plKind">
-          <option value="patch">Updates installieren</option>
-          <option value="patch_reboot">Updates installieren und neu starten, falls nötig</option>
-          <option value="reboot">Nur neu starten</option>
-          <option value="scan">Nur auf Updates prüfen</option>
+          <option value="patch" data-i18n="plan.job.patch">Install updates</option>
+          <option value="patch_reboot" data-i18n="plan.job.patch_reboot">Install updates and restart if required</option>
+          <option value="reboot" data-i18n="plan.job.reboot">Restart only</option>
+          <option value="scan" data-i18n="plan.job.scan">Check for updates only</option>
         </select>
       </label>
 
       <div class="row">
-        <label>Datum und Uhrzeit<input id="plWhen" type="datetime-local"></label>
+        <label data-i18n="plan.when">Date and time<input id="plWhen" type="datetime-local"></label>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button id="plIn2h">In 2 Stunden</button>
-        <button id="plTonight">Heute 22:00</button>
-        <button id="plWeekend">Samstag 03:00</button>
+        <button id="plIn2h" data-i18n="plan.in_2h">In 2 hours</button>
+        <button id="plTonight" data-i18n="plan.today_2200">Today 22:00</button>
+        <button id="plWeekend" data-i18n="plan.saturday_0300">Saturday 03:00</button>
       </div>
 
-      <label class="check" id="plDtRow"><input type="checkbox" id="plDowntime" checked> Vorher Downtime in Checkmk setzen</label>
+      <label class="check" id="plDtRow" data-i18n="plan.set_downtime"><input type="checkbox" id="plDowntime" checked> Set a Checkmk downtime first</label>
       <div class="row">
-        <label style="max-width:230px">Nachlaufzeit (Minuten)<input id="plGrace" type="number" min="1" max="10080" value="120"></label>
+        <label style="max-width:230px" data-i18n="plan.grace_minutes">Grace period (minutes)<input id="plGrace" type="number" min="1" max="10080" value="120"></label>
       </div>
-      <div class="hint">Meldet sich der Host bis zum Ablauf dieser Frist nicht, wird der Neustart <b>nicht nachgeholt</b>, sondern als abgelaufen verworfen. Sonst würde ein Server, der übers Wochenende aus war, Montagfrüh im laufenden Betrieb neu starten.</div>
+      <div class="hint" data-i18n-html="plan.expiry_hint">If the host does not report in before this deadline, the restart is <b>not caught up on</b> but discarded as expired. Otherwise a server that was off over the weekend would restart on Monday morning in the middle of the working day.</div>
       <div class="hint" id="plHint"></div>
 
-      <div><button class="primary" id="plSet">Einplanen</button></div>
+      <div><button class="primary" id="plSet" data-i18n="plan.submit">Schedule</button></div>
 
       <div class="section">
-        <div class="section-title">Eingeplant</div>
+        <div class="section-title" data-i18n="plan.scheduled">Scheduled</div>
         <div id="plList" class="hint"></div>
       </div>
     </div>
 
     <div class="pane" id="htDt">
-      <div class="hint">Wirkt auf alle verknüpften Checkmk-Hosts. Aufheben trifft nur Downtimes, die von CO-37 gesetzt wurden.</div>
+      <div class="hint" data-i18n="dt.hint">Applies to every linked Checkmk host. Cancelling only affects downtimes that were set by CO-37.</div>
       <div class="row">
-        <label>Minuten ab jetzt<input id="dtMinutes" type="number" min="1" placeholder="60"></label>
+        <label data-i18n="dt.minutes_from_now">Minutes from now<input id="dtMinutes" type="number" min="1" placeholder="60"></label>
       </div>
-      <div class="hint">Oder eine feste Zeitspanne:</div>
+      <div class="hint" data-i18n="dt.or_fixed">Or a fixed period:</div>
       <div class="row">
-        <label>Von<input id="dtStart" type="datetime-local"></label>
-        <label>Bis<input id="dtEnd" type="datetime-local"></label>
+        <label data-i18n="dt.from">From<input id="dtStart" type="datetime-local"></label>
+        <label data-i18n="dt.to">To<input id="dtEnd" type="datetime-local"></label>
       </div>
-      <label>Kommentar<input id="dtComment" placeholder="CO-37: Manuelle Wartung"></label>
+      <label data-i18n="dt.comment">Comment<input id="dtComment" placeholder="CO-37: Manuelle Wartung"></label>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="primary" id="dtSet">Downtime setzen</button>
-        <button id="dtClear">Aufheben</button>
-        <button id="dtList">Aktive anzeigen</button>
+        <button class="primary" id="dtSet" data-i18n="dt.set">Set downtime</button>
+        <button id="dtClear" data-i18n="dt.cancel">Cancel</button>
+        <button id="dtList" data-i18n="dt.show_active">Show active</button>
       </div>
       <div id="dtOut" class="hint"></div>
     </div>
 
   </div>
   <div class="dlg-foot">
-    <button class="danger" id="hDelete">Host entfernen</button>
-    <button data-close>Abbrechen</button>
-    <button class="primary" id="hSave">Speichern</button>
+    <button class="danger" id="hDelete" data-i18n="host.remove">Remove host</button>
+    <button data-close data-i18n="common.cancel">Cancel</button>
+    <button class="primary" id="hSave" data-i18n="common.save">Save</button>
   </div>
 </dialog>
 
 <!-- ============ Einstellungen ============ -->
 <dialog id="dlgSettings">
-  <div class="dlg-head">Einstellungen<button data-close>Schließen</button></div>
+  <div class="dlg-head">Einstellungen<button data-close data-i18n="common.close2">Close</button></div>
   <div class="tabs" id="sTabs">
     <!-- Agents zeigt den Installationsbefehl samt Paket-Schluessel,
          Checkmk die Zugangsdaten, Update laedt Code hoch, den der Watcher
@@ -563,174 +561,166 @@ dialog#dlgSettings .hint{max-width:78ch}
   <div class="dlg-body">
 
     <div class="pane on" id="tabAgents">
-      <div class="hint">Agents melden sich nach der Installation selbst an und erscheinen in der Übersicht als <b>wartet auf Freigabe</b>. Ohne Freigabe bekommen sie keine Aufträge.</div>
+      <div class="hint" data-i18n-html="settings.agents.hint">Agents enrol by themselves after installation and appear in the overview as <b>pending approval</b>. Without approval they receive no jobs.</div>
 
       <div class="section" style="border-top:none;padding-top:0">
-        <div class="section-title">Agent herunterladen</div>
+        <div class="section-title" data-i18n="settings.agents.download">Download agent</div>
         <div class="vrow" id="rowLinux">
           <span><b>Linux</b> · .deb für Debian und Ubuntu<br>
             <span style="color:var(--muted-2)" id="infoLinux">—</span></span>
-          <button class="primary" id="dlLinux">Herunterladen</button>
+          <button class="primary" id="dlLinux" data-i18n="settings.agents.download_deb">Download</button>
         </div>
         <div class="vrow" id="rowWin">
           <span><b>Windows</b> · .msi, Python ist enthalten<br>
             <span style="color:var(--muted-2)" id="infoWin">—</span></span>
-          <button class="primary" id="dlWin">Herunterladen</button>
+          <button class="primary" id="dlWin" data-i18n="settings.agents.download_msi">Download</button>
         </div>
         <div class="hint" id="pkgWarn" style="display:none;flex-direction:column;gap:6px"></div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <button id="pkgBuild">Pakete neu bauen</button>
+          <button id="pkgBuild" data-i18n="settings.agents.rebuild">Rebuild packages</button>
           <span class="state" id="pkgBuildState"></span>
         </div>
         <div id="pkgBuildLog" style="display:none"></div>
       </div>
 
       <div class="section">
-        <div class="section-title">Linux einrichten</div>
-        <div class="hint">Auf dem Zielsystem als root ausführen. Lädt das Paket und richtet den Agent ein.<br>
-          Der Befehl enthält ein Token, das nach kurzer Zeit abläuft — was auf dem Zielsystem in der
-          Verlaufsdatei zurückbleibt, ist dann wertlos. Erst kurz vor der Einrichtung erzeugen.</div>
+        <div class="section-title" data-i18n="settings.agents.linux">Set up Linux</div>
+        <div class="hint" data-i18n-html="settings.agents.linux_hint">Run on the target system as root. Downloads the package and sets the agent up.<br> The command carries a token that expires shortly — whatever is left behind in the shell history on the target system is worthless by then. Generate it only just before setting up.</div>
         <div id="agBase" class="hint"></div>
         <div class="token" id="cmdLinux"></div>
         <div id="tokenState" class="hint" style="margin-top:-4px"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="primary" id="btnMakeToken" style="align-self:flex-start">Befehl erzeugen</button>
-          <button id="copyLinux" style="align-self:flex-start" disabled>Befehl kopieren</button>
+          <button class="primary" id="btnMakeToken" style="align-self:flex-start" data-i18n="settings.agents.make_cmd">Generate command</button>
+          <button id="copyLinux" style="align-self:flex-start" disabled data-i18n="settings.agents.copy_cmd">Copy command</button>
         </div>
       </div>
 
       <div class="section">
-        <div class="section-title">Windows einrichten</div>
-        <div class="hint">MSI herunterladen, auf das Zielsystem kopieren, dann in einer Eingabeaufforderung als Administrator:</div>
+        <div class="section-title" data-i18n="settings.agents.windows">Set up Windows</div>
+        <div class="hint" data-i18n="settings.agents.windows_hint">Download the MSI, copy it to the target system, then in a command prompt as Administrator:</div>
         <div class="token" id="cmdWin"></div>
-        <button id="copyWin" style="align-self:flex-start">Befehl kopieren</button>
+        <button id="copyWin" style="align-self:flex-start" data-i18n="settings.agents.copy_cmd2">Copy command</button>
       </div>
 
       <div class="section">
-        <div class="section-title">Agent-Updates</div>
-        <label class="check"><input type="checkbox" id="roAuto"> Nach einem Systemupdate automatisch ausrollen</label>
+        <div class="section-title" data-i18n="settings.rollout.title">Agent updates</div>
+        <label class="check" data-i18n="settings.rollout.auto"><input type="checkbox" id="roAuto"> Roll out automatically after a system update</label>
         <div class="row">
           <label>Vorgehen
             <select id="roMode">
-              <option value="staged">Gestaffelt — erst ein Host, dann der Rest</option>
-              <option value="all">Alle auf einmal</option>
+              <option value="staged" data-i18n="settings.rollout.staged">Staged — one host first, then the rest</option>
+              <option value="all" data-i18n="settings.rollout.all">All at once</option>
             </select>
           </label>
           <label id="roPilotRow">Pilot-Host
-            <select id="roPilot"><option value="">— keiner gewählt —</option></select>
+            <select id="roPilot"><option value="" data-i18n="settings.rollout.none">— none selected —</option></select>
           </label>
         </div>
         <div class="hint" id="roHint"></div>
-        <div class="vrow"><span>Zustand</span><span class="state" id="roState">—</span></div>
+        <div class="vrow"><span data-i18n="settings.rollout.state">State</span><span class="state" id="roState">—</span></div>
         <div class="hint" id="roNote"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="primary" id="roSave">Speichern</button>
-          <button id="roStart">Jetzt ausrollen</button>
+          <button class="primary" id="roSave" data-i18n="settings.rollout.save">Save</button>
+          <button id="roStart" data-i18n="settings.rollout.start">Roll out now</button>
         </div>
       </div>
 
       <div class="section">
-        <div class="section-title">Ausgerollte Agents</div>
-        <div class="vrow"><span>Aktuelle Version</span><b id="agVer">—</b></div>
-        <div class="hint">Agent und System tragen dieselbe Versionsnummer. Weicht sie auf einem Host ab, erscheint dort in der Übersicht ein Hinweis und ein Knopf <b>Agent</b> zum Aktualisieren.</div>
-        <button id="agUpdateAll" style="align-self:flex-start">Alle veralteten Agents aktualisieren</button>
+        <div class="section-title" data-i18n="settings.rollout.done">Agents rolled out</div>
+        <div class="vrow"><span data-i18n="settings.rollout.current">Current version</span><b id="agVer">—</b></div>
+        <div class="hint" data-i18n-html="settings.rollout.hint">Agent and system carry the same version number. Where it differs on a host, the overview shows a note there and an <b>Agent</b> button to update it.</div>
+        <button id="agUpdateAll" style="align-self:flex-start" data-i18n="settings.rollout.update_all">Update all outdated agents</button>
       </div>
 
     </div>
 
     <div class="pane" id="tabCmk">
       <div class="vrow" id="cmkInfo">—</div>
-      <div class="hint">Automation-Benutzer mit Recht auf Hostliste und Downtimes. In Checkmk 2.4 wird kein Benutzer <code>automation</code> mehr automatisch angelegt.</div>
-      <label>Server-URL<input id="cUrl" placeholder="https://checkmk.example.de"></label>
+      <div class="hint" data-i18n-html="settings.cmk.hint">An automation user with permission for the host list and downtimes. Checkmk 2.4 no longer creates an <code>automation</code> user automatically.</div>
+      <label data-i18n="settings.cmk.url">Server URL<input id="cUrl" placeholder="https://checkmk.example.de"></label>
       <div class="row">
-        <label>Site<input id="cSite" placeholder="cmk"></label>
-        <label>Benutzer<input id="cUser" placeholder="automation"></label>
+        <label data-i18n="settings.cmk.site">Site<input id="cSite" placeholder="cmk"></label>
+        <label data-i18n="settings.cmk.user">User<input id="cUser" placeholder="automation"></label>
       </div>
-      <label>Automation-Secret<input id="cSecret" type="password"></label>
-      <label class="check"><input type="checkbox" id="cVerify" checked> TLS-Zertifikat prüfen</label>
-      <div class="hint">Wird vor dem Speichern geprüft und verschlüsselt abgelegt. Nie wieder abrufbar.</div>
-      <div><button class="primary" id="cSave">Verbinden und speichern</button></div>
+      <label data-i18n="settings.cmk.secret">Automation secret<input id="cSecret" type="password"></label>
+      <label class="check" data-i18n="settings.cmk.verify"><input type="checkbox" id="cVerify" checked> Verify TLS certificate</label>
+      <div class="hint" data-i18n="settings.cmk.secret_hint">Checked before saving and stored encrypted. Never retrievable again.</div>
+      <div><button class="primary" id="cSave" data-i18n="settings.cmk.connect">Connect and save</button></div>
     </div>
 
     <div class="pane" id="tabLizenz">
       <div class="section">
-        <div class="section-title">Umfang</div>
+        <div class="section-title" data-i18n="settings.license.scope">Scope</div>
         <div id="lizStand" class="hint"></div>
       </div>
 
       <div class="section admin-only">
-        <div class="section-title">Lizenzschlüssel</div>
-        <div class="hint">Bis zu 10 Hosts sind ohne Schlüssel möglich, auch geschäftlich und ohne zeitliche Begrenzung. Gezählt werden freigegebene Hosts; wartende, abgelehnte und gelöschte zählen nicht.<br><br>Für mehr Hosts wird ein Schlüssel benötigt — erhältlich über <b>sales@itkub.de</b>.<br><br>Läuft ein Schlüssel ab, werden bereits freigegebene Hosts <b>weiterhin gepatcht</b>. Lediglich neue Freigaben oberhalb von 10 sind dann nicht mehr möglich.</div>
-        <label>Schlüssel
-          <input id="lizKey" placeholder="CO37-…" autocomplete="off">
-        </label>
+        <div class="section-title" data-i18n="settings.license.key_title">License key</div>
+        <div class="hint" data-i18n-html="settings.license.hint">Up to 10 hosts work without a key, commercially as well and with no time limit. Approved hosts are counted; pending, rejected and deleted ones are not.<br><br>Beyond that a key is required — available from <b>sales@itkub.de</b>.<br><br>When a key expires, hosts that are already approved <b>keep being patched</b>. Only new approvals above 10 are no longer possible.</div>
+        <label data-i18n="settings.license.key">Key<input id="lizKey" placeholder="CO37-…" autocomplete="off"></label>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="primary" id="lizSave" style="align-self:flex-start">Eintragen</button>
-          <button class="danger" id="lizClear" style="align-self:flex-start">Entfernen</button>
+          <button class="primary" id="lizSave" style="align-self:flex-start" data-i18n="settings.license.apply">Apply</button>
+          <button class="danger" id="lizClear" style="align-self:flex-start" data-i18n="settings.license.remove">Remove</button>
         </div>
       </div>
     </div>
 
     <div class="pane" id="tabProxy">
       <div class="section">
-        <div class="section-title">Reverse Proxy</div>
-        <div class="hint">Adresse des vorgeschalteten Proxy. Nur von dort werden die Kopfzeilen <code>X-Forwarded-For</code> und <code>X-Forwarded-Proto</code> ausgewertet — mehrere mit Komma trennen.<br><br><b>Verschlüsselte Anfragen werden ausschließlich von dieser Adresse angenommen.</b> Steht hier nichts oder die falsche Adresse, wird jede Anfrage abgewiesen, die HTTPS behauptet — CO-37 nimmt selbst kein TLS entgegen, die Behauptung wäre unbelegt. Unverschlüsselt bleibt erreichbar, bis unten der Haken gesetzt wird.<br><br>Ein zu weit gefasster Eintrag ist ein Risiko: wer dann die Kopfzeile selbst setzt, umgeht die Drosselung der Anmeldung mit erfundenen Absendern.<br><br>Der Weg zurück bei einem falschen Eintrag ist immer der unverschlüsselte Zugang direkt auf dem internen Port.</div>
-        <label style="max-width:320px">Vertrauenswürdiger Proxy
-          <input id="pxProxy" placeholder="z.B. 192.168.1.20">
-        </label>
+        <div class="section-title" data-i18n="settings.proxy.title">Reverse proxy</div>
+        <div class="hint" data-i18n-html="settings.proxy.hint">Address of the proxy in front. Only from there are the <code>X-Forwarded-For</code> and <code>X-Forwarded-Proto</code> headers evaluated — separate several with commas.<br><br><b>Encrypted requests are accepted from this address only.</b> If this is empty or holds the wrong address, every request claiming HTTPS is rejected — CO-37 does not terminate TLS itself, so the claim would be unproven. Unencrypted access stays available until the box below is ticked.<br><br>An entry that is too broad is a risk: anyone who can then set the header themselves bypasses the sign-in rate limit with invented senders.<br><br>The way back from a wrong entry is always unencrypted access straight to the internal port.</div>
+        <label style="max-width:320px" data-i18n="settings.proxy.trusted">Trusted proxy<input id="pxProxy" placeholder="z.B. 192.168.1.20"></label>
         <div id="pxNow" class="hint"></div>
-        <button id="pxSaveProxy" style="align-self:flex-start">Speichern</button>
+        <button id="pxSaveProxy" style="align-self:flex-start" data-i18n="settings.proxy.save">Save</button>
       </div>
 
       <div class="section">
-        <div class="section-title">Öffentliche Adresse</div>
-        <div class="hint">Adresse, unter der CO-37 <b>von den Zielsystemen aus</b> erreichbar ist. Sie landet in den Installationsbefehlen und damit in der <code>agent.conf</code> jedes neu eingerichteten Hosts.<br><br>Bleibt das Feld leer, wird die Adresse verwendet, unter der du das Dashboard gerade aufgerufen hast. Dann hängt es davon ab, wie du die Seite öffnest — richtest du nach der Umstellung einen Host über den internen Port ein, spräche dessen Agent dauerhaft unverschlüsselt.<br><br>Bestehende Agents sind davon nicht betroffen. Deren Server steht in der <code>agent.conf</code> auf dem Host und wird durch kein Update geändert.</div>
-        <label style="max-width:400px">Öffentliche Adresse
-          <input id="pxPublic" placeholder="z.B. https://co37.beispiel.com">
-        </label>
+        <div class="section-title" data-i18n="settings.proxy.public_title">Public address</div>
+        <div class="hint" data-i18n-html="settings.proxy.public_hint">The address at which CO-37 is reachable <b>from the target systems</b>. It ends up in the installation commands and therefore in the <code>agent.conf</code> of every newly set up host.<br><br>If the field is left empty, the address you are currently viewing the dashboard at is used. That makes it depend on how you open the page — set up a host over the internal port after switching, and its agent would talk unencrypted for good.<br><br>Existing agents are not affected. Their server address sits in <code>agent.conf</code> on the host and is not changed by any update.</div>
+        <label style="max-width:400px" data-i18n="settings.proxy.public">Public address<input id="pxPublic" placeholder="z.B. https://co37.beispiel.com"></label>
         <div id="pxEffective" class="hint"></div>
-        <button id="pxSavePublic" style="align-self:flex-start">Speichern</button>
+        <button id="pxSavePublic" style="align-self:flex-start" data-i18n="settings.proxy.public_save">Save</button>
       </div>
 
       <div class="section">
-        <div class="section-title">Nur über HTTPS</div>
-        <div class="hint">Ist die Option an, werden alle Anfragen abgewiesen, die nicht verschlüsselt über den eingetragenen Proxy kamen. Der direkte Zugriff auf den internen Port beantwortet dann nur noch mit einer Fehlermeldung.<br><br>Der Port selbst bleibt offen — wirklich geschlossen ist er erst mit einer Firewallregel. Die gehört zum Rechner und nicht in diese Anwendung.<br><br><b>Die Umschaltung trifft auch alle Agents.</b> Wer noch unverschlüsselt spricht, fällt sofort aus — und still, weil der Agent den Fehler nur in seine eigene Protokolldatei schreibt.<br><br><b>Fällt der Proxy dauerhaft aus,</b> kommst du über den Browser nicht mehr herein — auch nicht, um diesen Haken zu entfernen. Der Weg zurück geht dann über die Maschine selbst:<br><code>/opt/co37/venv/bin/python -c 'import sqlite3;c=sqlite3.connect("/opt/co37/data/co37.db");c.execute("UPDATE setting SET value=? WHERE key=?",("false","https_only"));c.commit()'</code><br>danach <code>systemctl restart co37-backend</code>. Ausführlich in <code>REVERSE-PROXY.md</code>.</div>
+        <div class="section-title" data-i18n="settings.proxy.https_title">HTTPS only</div>
+        <div class="hint" data-i18n-html="settings.proxy.https_hint">With this option on, every request that did not arrive encrypted through the configured proxy is rejected. Direct access to the internal port then answers with an error message and nothing else.<br><br>The port itself stays open — it is only truly closed by a firewall rule. That belongs to the machine, not to this application.<br><br><b>The switch affects every agent as well.</b> Any that still speak unencrypted drop out immediately — and silently, because the agent writes the error only to its own log file.<br><br><b>If the proxy fails for good,</b> you can no longer get in through the browser — not even to clear this box. The way back is then through the machine itself:<br><code>/opt/co37/venv/bin/python -c 'import sqlite3;c=sqlite3.connect("/opt/co37/data/co37.db");c.execute("UPDATE setting SET value=? WHERE key=?",("false","https_only"));c.commit()'</code><br>then <code>systemctl restart co37-backend</code>. In full in <code>REVERSE-PROXY.md</code>.</div>
         <div id="pxReady" class="hint"></div>
-        <label class="check"><input type="checkbox" id="pxHttps"> Zugang auf HTTPS beschränken</label>
+        <label class="check" data-i18n="settings.proxy.https_only"><input type="checkbox" id="pxHttps"> Restrict access to HTTPS</label>
         <div id="pxState" class="hint"></div>
       </div>
     </div>
 
     <div class="pane" id="tabUpd">
-      <div class="vrow"><span>Installierte Version</span><b id="uCur">—</b></div>
-      <div class="vrow"><span>Zustand</span><span class="state" id="uState">—</span></div>
-      <div class="vrow"><span>Update-Watcher</span><b id="wVer">—</b></div>
+      <div class="vrow"><span data-i18n="settings.update.installed">Installed version</span><b id="uCur">—</b></div>
+      <div class="vrow"><span data-i18n="settings.update.state">State</span><span class="state" id="uState">—</span></div>
+      <div class="vrow"><span data-i18n="settings.update.watcher">Update watcher</span><b id="wVer">—</b></div>
       <div class="hint" id="wHint" style="display:none"></div>
       <div class="drop" id="uDrop">ZIP-Paket <b>und</b> .sig-Datei hier ablegen oder klicken<br>
-        <span style="font-size:11px">co37_vX_Y_Z.zip und co37_vX_Y_Z.zip.sig, zusammen auswählen · max. 50 MB</span></div>
+        <span style="font-size:11px" data-i18n="settings.update.files">co37_vX_Y_Z.zip and co37_vX_Y_Z.zip.sig, select both · max. 50 MB</span></div>
       <input type="file" id="uFile" accept=".zip,.sig" multiple style="display:none">
-      <div class="hint">Die Signatur weist nach, dass das Paket vom Herausgeber stammt und unterwegs nicht verändert wurde. Sie wird <b>vor</b> dem Auspacken geprüft — der Watcher entpackt als root, ein untergeschobenes Paket wäre damit Codeausführung als root.<br><br>Eine Prüfsumme allein genügt dafür nicht: wer die Datei austauschen kann, kann auch die Prüfsummendatei daneben austauschen.</div>
+      <div class="hint" data-i18n-html="settings.update.sig_hint">The signature proves that the package comes from the publisher and was not altered on the way. It is checked <b>before</b> unpacking — the watcher unpacks as root, so a substituted package would amount to code execution as root.<br><br>A checksum alone is not enough for this: anyone who can swap the file can swap the checksum file next to it as well.</div>
       <div id="uPending" style="display:none">
-        <div class="vrow" style="margin-bottom:10px"><span>Bereitgestellt</span><b id="uNew">—</b></div>
-        <div class="hint" style="margin-bottom:10px">Der aktuelle Stand wird gesichert, ausgetauscht und der Dienst neu gestartet. Schlägt der Health-Check fehl, wird zurückgerollt.</div>
-        <div style="display:flex;gap:8px"><button class="primary" id="uRun">Update ausführen</button>
-        <button id="uCancel">Verwerfen</button></div>
+        <div class="vrow" style="margin-bottom:10px"><span data-i18n="settings.update.staged">Staged</span><b id="uNew">—</b></div>
+        <div class="hint" style="margin-bottom:10px" data-i18n="settings.update.run_hint">The current state is backed up, replaced, and the service restarted. If the health check fails, it is rolled back.</div>
+        <div style="display:flex;gap:8px"><button class="primary" id="uRun" data-i18n="settings.update.run">Run update</button>
+        <button id="uCancel" data-i18n="settings.update.discard">Discard</button></div>
       </div>
       <div id="uLogBox" style="display:none">
         <div id="upLog"></div>
-        <div style="margin-top:10px"><button id="uAck">Zurücksetzen</button></div>
+        <div style="margin-top:10px"><button id="uAck" data-i18n="settings.update.reset">Reset</button></div>
       </div>
     </div>
 
     <div class="pane" id="tabAccount">
-      <div class="hint">Eigenes Passwort ändern. Nach der Änderung werden alle Sitzungen dieses Zugangs beendet, auch diese.</div>
-      <div class="vrow"><span>Angemeldet als</span><b id="acName">—</b></div>
-      <div class="vrow"><span>Rolle</span><b id="acRole">—</b></div>
+      <div class="hint" data-i18n="settings.account.hint">Change your own password. Afterwards every session of this account is ended, including this one.</div>
+      <div class="vrow"><span data-i18n="settings.account.signed_in_as">Signed in as</span><b id="acName">—</b></div>
+      <div class="vrow"><span data-i18n="settings.account.role">Role</span><b id="acRole">—</b></div>
       <div class="section">
-        <label>Aktuelles Passwort<input id="acOld" type="password" autocomplete="current-password"></label>
-        <label>Neues Passwort<input id="acNew" type="password" autocomplete="new-password"></label>
-        <label>Neues Passwort wiederholen<input id="acNew2" type="password" autocomplete="new-password"></label>
-        <div style="margin-top:10px"><button class="primary" id="acSave">Passwort ändern</button></div>
+        <label data-i18n="settings.account.current_pw">Current password<input id="acOld" type="password" autocomplete="current-password"></label>
+        <label data-i18n="settings.account.new_pw">New password<input id="acNew" type="password" autocomplete="new-password"></label>
+        <label data-i18n="settings.account.new_pw2">Repeat new password<input id="acNew2" type="password" autocomplete="new-password"></label>
+        <div style="margin-top:10px"><button class="primary" id="acSave" data-i18n="settings.account.change">Change password</button></div>
       </div>
     </div>
 
@@ -758,81 +748,81 @@ dialog#dlgSettings .hint{max-width:78ch}
     </div>
 
     <div class="pane" id="tabUsers">
-      <div class="hint">Benutzer dürfen alles am Patch-Management, aber keine Benutzer verwalten. Das können nur Administratoren.</div>
+      <div class="hint" data-i18n="settings.users.hint">Users may do anything in patch management but cannot manage users. Only administrators can.</div>
       <div class="section" style="border-top:none;padding-top:0">
-        <div class="section-title">Vorhandene Benutzer</div>
+        <div class="section-title" data-i18n="settings.users.existing">Existing users</div>
         <div id="userList"></div>
       </div>
       <div class="section">
-        <div class="section-title">Neuen Benutzer anlegen</div>
-        <label>Benutzername<input id="nuName" autocomplete="off"></label>
-        <label>Passwort<input id="nuPass" type="password" autocomplete="new-password"></label>
+        <div class="section-title" data-i18n="settings.users.new">Create a new user</div>
+        <label data-i18n="settings.users.name">Username<input id="nuName" autocomplete="off"></label>
+        <label data-i18n="settings.users.password">Password<input id="nuPass" type="password" autocomplete="new-password"></label>
         <label>Rolle
           <select id="nuRole">
-            <option value="user">Benutzer</option>
-            <option value="admin">Administrator</option>
+            <option value="user" data-i18n="settings.users.role_user">User</option>
+            <option value="admin" data-i18n="settings.users.role_admin">Administrator</option>
           </select>
         </label>
-        <div style="margin-top:10px"><button class="primary" id="nuAdd">Anlegen</button></div>
+        <div style="margin-top:10px"><button class="primary" id="nuAdd" data-i18n="settings.users.create">Create</button></div>
       </div>
     </div>
 
     <div class="pane" id="tabAudit">
-      <div class="hint">Wer wann was getan hat. Wird nur angehängt — Einträge lassen sich weder ändern noch löschen.</div>
+      <div class="hint" data-i18n="settings.audit.hint">Who did what and when. Append-only — entries can neither be changed nor deleted.</div>
       <div id="auditList" style="font-size:11px"></div>
     </div>
 
   </div>
-  <div class="dlg-foot"><button data-close>Schließen</button></div>
+  <div class="dlg-foot"><button data-close data-i18n="common.close3">Close</button></div>
 </dialog>
 
 <!-- ============ Neustart auslösen ============ -->
 <dialog id="dlgReboot">
-  <div class="dlg-head"><span id="rbTitle">Neustart</span><button data-close>Schließen</button></div>
+  <div class="dlg-head"><span id="rbTitle" data-i18n="reboot.title">Restart</span><button data-close data-i18n="common.close4">Close</button></div>
   <div class="dlg-body">
     <div class="hint" id="rbInfo"></div>
-    <label class="check"><input type="checkbox" id="rbDowntime" checked> Checkmk-Downtime vorher setzen</label>
+    <label class="check" data-i18n="reboot.set_downtime"><input type="checkbox" id="rbDowntime" checked> Set a Checkmk downtime first</label>
     <div class="row">
-      <label style="max-width:210px">Downtime-Dauer (Minuten)<input id="rbDtMin" type="number" min="1" max="1440"></label>
-      <label style="max-width:210px">Nachlaufzeit (Minuten)<input id="rbGrace" type="number" min="1" max="10080" value="10"></label>
+      <label style="max-width:210px" data-i18n="reboot.downtime_minutes">Downtime (minutes)<input id="rbDtMin" type="number" min="1" max="1440"></label>
+      <label style="max-width:210px" data-i18n="reboot.grace_minutes">Grace period (minutes)<input id="rbGrace" type="number" min="1" max="10080" value="10"></label>
     </div>
-    <div class="hint">Die <b>Nachlaufzeit</b> begrenzt, wie lange der Auftrag gültig bleibt. Ist der Host jetzt nicht erreichbar und meldet sich erst danach, wird der Neustart <b>nicht mehr ausgeführt</b>, sondern als abgelaufen verworfen. Ohne diese Grenze würde ein Server, der gerade aus ist, beim nächsten Einschalten mitten im Betrieb neu starten.</div>
+    <div class="hint" data-i18n-html="reboot.grace_hint">The <b>grace period</b> limits how long the job stays valid. If the host is unreachable now and only reports in afterwards, the restart is <b>no longer carried out</b> but discarded as expired. Without that limit a server that is currently off would restart in the middle of the working day the next time it is switched on.</div>
     <div class="hint" id="rbWarn"></div>
   </div>
   <div class="dlg-foot">
-    <button data-close>Abbrechen</button>
-    <button class="primary" id="rbGo">Jetzt neu starten</button>
+    <button data-close data-i18n="reboot.cancel">Cancel</button>
+    <button class="primary" id="rbGo" data-i18n="reboot.now">Restart now</button>
   </div>
 </dialog>
 
 <!-- ============ Live-Ausgabe ============ -->
 <dialog id="dlgLive" style="width:min(900px,96vw)">
   <div class="dlg-head">
-    <span id="lvTitle">Live-Ausgabe</span>
+    <span id="lvTitle" data-i18n="live.title">Live output</span>
     <span style="display:flex;gap:10px;align-items:center">
       <span class="state" id="lvState"></span>
-      <button data-close>Schließen</button>
+      <button data-close data-i18n="common.close5">Close</button>
     </span>
   </div>
   <div class="dlg-body" style="gap:9px">
     <div class="vrow"><span id="lvProgress">—</span><span id="lvMeta" style="color:var(--muted-2)"></span></div>
     <pre id="lvLog"></pre>
-    <label class="check"><input type="checkbox" id="lvFollow" checked> Automatisch mitscrollen</label>
+    <label class="check" data-i18n="live.follow"><input type="checkbox" id="lvFollow" checked> Scroll along automatically</label>
   </div>
   <div class="dlg-foot">
-    <button id="lvCopy">Protokoll kopieren</button>
-    <button data-close>Schließen</button>
+    <button id="lvCopy" data-i18n="live.copy">Copy log</button>
+    <button data-close data-i18n="common.close6">Close</button>
   </div>
 </dialog>
 
 <!-- ============ Verlauf ============ -->
 <dialog id="dlgDetail">
-  <div class="dlg-head"><span id="dTitle">Verlauf</span><button data-close>Schließen</button></div>
+  <div class="dlg-head"><span id="dTitle" data-i18n="history.title">History</span><button data-close data-i18n="common.close7">Close</button></div>
   <div class="dlg-body">
-    <div id="log">Wird geladen…</div>
+    <div id="log" data-i18n="common.loading">Loading…</div>
     <div id="dJobs"></div>
   </div>
-  <div class="dlg-foot"><button data-close>Schließen</button></div>
+  <div class="dlg-foot"><button data-close data-i18n="common.close8">Close</button></div>
 </dialog>
 
 <!-- i18n.js vor app.js: dort steht t(), und app.js ruft es beim Aufbau

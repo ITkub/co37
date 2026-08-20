@@ -1968,16 +1968,34 @@ async function startApp(){
  * Oberflaeche, die wegen einer Spracheinstellung nicht startet, waere der
  * schlechtere Tausch.
  */
+let VORGABE_SPRACHE = SPRACHE_VORGABE;
+
 async function spracheAnwenden(benutzer){
-  let vorgabe = null;
   try {
     const h = await (await fetch(API + "/api/health", {cache: "no-store"})).json();
-    vorgabe = h.default_language || null;
+    VORGABE_SPRACHE = pruefeSprache(h.default_language) || SPRACHE_VORGABE;
   } catch(e){}
   // Beim Ermitteln nicht ins Cookie schreiben: sonst wuerde die Vorgabe der
   // Installation beim ersten Besuch als eigene Wahl festgeschrieben und
   // eine spaetere Aenderung der Vorgabe erreichte niemanden mehr.
-  setzeSprache(ermittleSprache({ benutzer, vorgabe }), { merken: false });
+  setzeSprache(ermittleSprache({ benutzer, vorgabe: VORGABE_SPRACHE }),
+               { merken: false });
+  spracheImDialogZeigen();
+}
+
+/*
+ * Setzt beide Auswahlfelder auf den tatsaechlichen Stand.
+ *
+ * Ohne das zeigte die Vorgabe der Installation immer den ersten Eintrag -
+ * unabhaengig davon, was gespeichert ist. Wer sie dann anfasst, um etwas
+ * einzustellen, setzte still Englisch. Ein Bedienelement, das ueber den
+ * eigenen Zustand luegt, ist schlimmer als keins.
+ */
+function spracheImDialogZeigen(){
+  const meine = document.getElementById("spMeine");
+  const vorgabe = document.getElementById("spVorgabe");
+  if (meine) meine.value = SPRACHE;
+  if (vorgabe) vorgabe.value = VORGABE_SPRACHE;
 }
 
 async function spracheWaehlen(code){
@@ -1990,13 +2008,20 @@ async function spracheWaehlen(code){
     // Die Oberflaeche steht bereits um. Dass der Server sie sich nicht
     // merken konnte, hat api() schon gemeldet.
   }
+  spracheImDialogZeigen();
 }
 
 async function vorgabespracheWaehlen(code){
   try {
     await api("POST", "/api/v1/settings/language", { language: code });
+    VORGABE_SPRACHE = pruefeSprache(code) || VORGABE_SPRACHE;
     toast(t("language.default.saved"));
-  } catch(e){}
+  } catch(e){
+    // Nicht uebernommen: das Feld wieder auf den Stand zurueckstellen, der
+    // wirklich gespeichert ist. Sonst bliebe die Anzeige auf einem Wert
+    // stehen, den der Server nie bekommen hat.
+  }
+  spracheImDialogZeigen();
 }
 
 document.getElementById("spMeine").onchange =
@@ -2017,7 +2042,6 @@ document.getElementById("spVorgabe").onchange =
     return;
   }
   await spracheAnwenden(ME.language);
-  document.getElementById("spMeine").value = SPRACHE;
   document.getElementById("appShell").style.display = "";
   await startApp();
 })();

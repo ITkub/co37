@@ -219,5 +219,96 @@ console.log("\n=== Reiter passen in beiden Sprachen ===");
   }
 }
 
+// ------------------------------------------- Eingabefelder ueberleben
+console.log("\n=== Umschalten laesst Kindelemente unangetastet ===");
+{
+  // Das Markup sieht an vielen Stellen so aus:
+  //     <label><input type="checkbox" id="hAuto"> Neustart ausfuehren</label>
+  // Ein schlichtes textContent haette das Kaestchen geloescht - und zwar
+  // erst beim Umschalten der Sprache, also lange nach jeder Sichtpruefung.
+  // Schlimmer noch: ein neu gebautes Kaestchen haette seinen Haken verloren.
+  const kasten = { nodeType: 1, checked: true, id: "hAuto" };
+  const text = { nodeType: 3, textContent: " Neustart eigenständig ausführen" };
+  const label = {
+    dataset: { i18n: "host.auto_reboot" },
+    childNodes: [kasten, text],
+    set textContent(v) { this._ersetzt = v; this.childNodes = []; },
+    get textContent() { return this._ersetzt; },
+  };
+  ELEMENTE.length = 0;
+  ELEMENTE.push(label);
+
+  i18n.setzeSprache("en");
+  check("Text wurde ersetzt",
+        text.textContent === "Restart on its own when required", text.textContent);
+  check("das Kaestchen ist noch da", label.childNodes.includes(kasten));
+  check("und hat seinen Haken behalten", kasten.checked === true);
+  ELEMENTE.length = 0;
+}
+
+// ------------------------------------------------- Nichts bleibt uebersetzt
+console.log("\n=== Kein sichtbarer Text ohne Schluessel ===");
+{
+  // Die eigentliche Absicherung dieser Umstellung. Ohne sie bliebe ein
+  // vergessener Text still deutsch - und faellt erst einem Kunden auf, der
+  // die Oberflaeche auf Englisch benutzt. Gilt auch fuer jede kuenftige
+  // Aenderung am Markup: wer etwas hinzufuegt, ohne es zu verschluesseln,
+  // bricht hier ab.
+  const maske = html.replace(/<style[\s\S]*?<\/style>/g, m => " ".repeat(m.length))
+                    .replace(/<script[\s\S]*?<\/script>/g, m => " ".repeat(m.length))
+                    .replace(/<!--[\s\S]*?-->/g, m => " ".repeat(m.length));
+  const tags = "div|label|button|option|span|h1|h2|h3|td|th|p|summary|legend";
+  const re = new RegExp("<(" + tags + ")\\b([^>]*)>((?:(?!<\\/?(?:" + tags
+                        + ")\\b)[\\s\\S])*?)<\\/\\1>", "g");
+  // Sprachneutral: Zahlen, Zeichen, Eigennamen, Dateinamen. Bewusst als
+  // vollstaendiger Vergleich verankert und nicht als Teiltreffer - sonst
+  // rutschte jeder Satz durch, in dem 'Agent' vorkommt.
+  const neutral = /^(|[\s—–.,:;·-]*|CO-?37|Checkmk|Agent|Agents|TLS|HTTPS|MSI|SHA-256|JSON|\d+[\d\s.,:%]*|…)$/i;
+
+  const offen = [];
+  for (const m of maske.matchAll(re)) {
+    const inner = m[3].trim();
+    const nurText = inner.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    if (!nurText || neutral.test(nurText)) continue;
+    if (/data-i18n/.test(m[2])) continue;
+    // Ein Element, dessen Text vollstaendig in verschluesselten Kindern
+    // steckt, ist selbst in Ordnung.
+    if (/data-i18n/.test(inner)
+        && !inner.replace(/<[^>]*data-i18n[^>]*>[\s\S]*?<\/\w+>/g, " ")
+                 .replace(/<[^>]*>/g, " ").trim()) continue;
+    offen.push(`${m[1]}: ${nurText.slice(0, 55)}`);
+  }
+  check("jeder sichtbare Text hat einen Schluessel", offen.length === 0,
+        offen.slice(0, 5).join(" | "));
+
+  const benutzt = [...html.matchAll(/data-i18n(?:-html)?="([^"]+)"/g)].map(m => m[1]);
+  check("es sind tatsaechlich viele", benutzt.length > 150, benutzt.length);
+}
+
+// ------------------------------------------------- Nur harmlose Auszeichnung
+console.log("\n=== data-i18n-html enthaelt nur Auszeichnung ===");
+{
+  // data-i18n-html setzt innerHTML. Der Inhalt stammt aus dem eigenen
+  // Woerterbuch, nicht von Benutzern - trotzdem festgenagelt, damit dort
+  // nie etwas Ausfuehrbares hineinwaechst. Die Regel script-src ohne
+  // 'unsafe-inline' waere sonst an dieser Stelle unterlaufen.
+  const erlaubt = /^(b|\/b|code|\/code|br|i|\/i|strong|\/strong)$/i;
+  const schluessel = [...html.matchAll(/data-i18n-html="([^"]+)"/g)].map(m => m[1]);
+  const boese = [];
+  for (const s of schluessel) {
+    for (const sprache of i18n.SPRACHEN) {
+      const wert = String(i18n.I18N[sprache][s] || "");
+      for (const tag of wert.matchAll(/<\s*([^\s>\/]+|\/[^\s>]+)/g)) {
+        if (!erlaubt.test(tag[1])) boese.push(`${sprache}/${s}: <${tag[1]}`);
+      }
+      if (/on\w+\s*=/i.test(wert)) boese.push(`${sprache}/${s}: Ereignis-Attribut`);
+    }
+  }
+  check("keine unerlaubten Elemente in Uebersetzungen", boese.length === 0,
+        boese.slice(0, 4).join(" | "));
+  check("es gibt ueberhaupt welche mit Auszeichnung", schluessel.length > 0,
+        schluessel.length);
+}
+
 console.log(`\nFehler: ${fails}`);
 process.exit(fails ? 1 : 0);

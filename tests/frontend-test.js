@@ -170,6 +170,8 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "checkVersion, setPageVersion: (v) => { PAGE_VERSION = v; }, "
   + "apiCall: api, offlineSeit: () => OFFLINE_SEIT, "
   + "setOfflineSeit: (t) => { OFFLINE_SEIT = t; }, "
+  + "spracheImDialogZeigen, setzeSprache, "
+  + "setVorgabeSprache: (s) => { VORGABE_SPRACHE = s; }, "
   + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
   + "loadRollout, loadUsers, loadAudit, loadAccount, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); } };";
@@ -407,6 +409,29 @@ global.setTimeout = origSetTimeout;
     check("i18n.js steht vor app.js",
           skripte.indexOf("i18n.js") < skripte.indexOf("app.js"),
           skripte.join(", "));
+  }
+
+  console.log("\n=== Sprachfelder zeigen den echten Stand ===");
+  {
+    // Ein Auswahlfeld, das nie gefuellt wird, zeigt immer den ersten
+    // Eintrag - also 'English', egal was gespeichert ist. Wer es dann
+    // anfasst, setzt still Englisch statt dessen, was er sieht.
+    api.setzeSprache("de");
+    api.setVorgabeSprache("en");
+    api.spracheImDialogZeigen();
+    check("eigene Sprache steht im Feld", el("spMeine").value === "de",
+          el("spMeine").value);
+    check("Vorgabe der Installation steht im Feld",
+          el("spVorgabe").value === "en", el("spVorgabe").value);
+
+    // Der Fall, der den Fehler ausgemacht hat: beide unterschiedlich, und
+    // die Vorgabe ist nicht der erste Eintrag der Liste.
+    api.setzeSprache("en");
+    api.setVorgabeSprache("de");
+    api.spracheImDialogZeigen();
+    check("beide Felder folgen unabhaengig voneinander",
+          el("spMeine").value === "en" && el("spVorgabe").value === "de",
+          `${el("spMeine").value} / ${el("spVorgabe").value}`);
   }
 
   console.log("\n=== Server nicht erreichbar ===");
