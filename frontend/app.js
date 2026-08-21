@@ -294,7 +294,7 @@ async function copy(text, label){
   if (navigator.clipboard && window.isSecureContext){
     try {
       await navigator.clipboard.writeText(text);
-      toast(label + " kopiert");
+      toast(t("msg.copied", { was: label }));
       return;
     } catch(e){ /* Rueckfallweg unten */ }
   }
@@ -765,15 +765,15 @@ async function scanAll(){
 async function detail(id){
   const h = HOSTS.find(x => x.id === id);
   document.getElementById("dTitle").textContent = h.display_name || h.hostname;
-  document.getElementById("log").textContent = "Wird geladen…";
+  document.getElementById("log").textContent = t("common.loading");
   document.getElementById("dlgDetail").showModal();
   const jobs = await api("GET", `/api/v1/jobs?host_id=${id}&limit=25`);
   const ups  = await api("GET", `/api/v1/hosts/${id}/updates`);
   const L = [];
-  L.push(`SYSTEM: ${h.os_version || "?"} · Agent ${h.agent_version || "?"} · ${h.ip_address || "?"}`);
-  L.push(`ANGEMELDET: ${fmtTime(h.enrolled_at)}${h.enrolled_from_ip ? " von " + h.enrolled_from_ip : ""}`);
-  L.push("", `OFFENE UPDATES (${ups.length})`);
-  ups.slice(0,80).forEach(u => L.push(`  ${u.is_security?"[SIC]":"     "} ${u.package_id}  ${u.new_version||""}`));
+  L.push(t("history.system", { os: h.os_version || "?", agent: h.agent_version || "?", ip: h.ip_address || "?" }));
+  L.push(t("history.enrolled", { when: fmtTime(h.enrolled_at) }) + (h.enrolled_from_ip ? t("history.enrolled_from", { ip: h.enrolled_from_ip }) : ""));
+  L.push("", t("history.open_updates", { anzahl: ups.length }));
+  ups.slice(0,80).forEach(u => L.push(`  ${u.is_security?t("history.security_marker"):"     "} ${u.package_id}  ${u.new_version||""}`));
   document.getElementById("log").textContent = L.join("\n");
 
   // Auftragsliste anklickbar, damit das Protokoll abrufbar ist
@@ -783,15 +783,15 @@ async function detail(id){
               : j.state === "done" ? "ok" : "";
     return `<div class="vrow" style="margin-bottom:5px">
       <span>#${j.id} · ${esc(j.job_type)}<br>
-        <span style="color:var(--muted-2)">${when}${j.scheduled_at ? " · geplant" : ""}${j.error ? " · " + esc(j.error.slice(0,60)) : ""}</span></span>
+        <span style="color:var(--muted-2)">${when}${j.scheduled_at ? t("history.scheduled_suffix") : ""}${j.error ? " · " + esc(j.error.slice(0,60)) : ""}</span></span>
       <span style="display:flex;gap:8px;align-items:center">
-        <span class="state ${cls}">${(LV_STATE[j.state]||[j.state])[0]}</span>
-        <button data-act="live" data-id="${j.id}" data-title="#${j.id} ${esc(j.job_type)}">Protokoll</button>
+        <span class="state ${cls}">${esc(t((LV_STATE[j.state]||[j.state])[0]))}</span>
+        <button data-act="live" data-id="${j.id}" data-title="#${j.id} ${esc(j.job_type)}">${t("act.log")}</button>
       </span></div>`;
   }).join("");
   document.getElementById("dJobs").innerHTML =
-    `<div class="section-title" style="margin-bottom:8px">Aufträge (${jobs.length})</div>`
-    + (rows || '<span style="color:var(--muted-2)">keine</span>');
+    `<div class="section-title" style="margin-bottom:8px">${esc(t("history.jobs_title", { anzahl: jobs.length }))}</div>`
+    + (rows || `<span style="color:var(--muted-2)">${t("history.none")}</span>`);
 }
 
 /* ---------- Live-Ausgabe ---------- */
@@ -800,9 +800,9 @@ let LIVE = {jobId:null, offset:0, timer:null};
 async function showLive(jobId, title){
   clearInterval(LIVE.timer);
   LIVE = {jobId, offset:0, timer:null};
-  document.getElementById("lvTitle").textContent = title || `Auftrag #${jobId}`;
+  document.getElementById("lvTitle").textContent = title || t("job.number", { id: jobId });
   document.getElementById("lvLog").textContent = "";
-  document.getElementById("lvProgress").textContent = "Wird geladen…";
+  document.getElementById("lvProgress").textContent = t("common.loading");
   document.getElementById("lvMeta").textContent = "";
   document.getElementById("lvState").textContent = "";
   document.getElementById("dlgLive").showModal();
@@ -811,8 +811,8 @@ async function showLive(jobId, title){
 }
 
 const LV_STATE = {
-  pending:["wartet",""], running:["läuft","run"], done:["fertig","ok"],
-  failed:["fehlgeschlagen","err"], cancelled:["abgebrochen","warn"]
+  pending:["job.pending",""], running:["job.running","run"], done:["job.done","ok"],
+  failed:["job.failed","err"], cancelled:["job.cancelled","warn"]
 };
 
 async function tickLive(){
@@ -832,12 +832,12 @@ async function tickLive(){
       box.scrollTop = box.scrollHeight;
   }
 
-  const [txt, cls] = LV_STATE[d.state] || [d.state, ""];
+  const [schluessel, cls] = LV_STATE[d.state] || [d.state, ""];
   const st = document.getElementById("lvState");
-  st.textContent = txt; st.className = "state " + cls;
+  st.textContent = t(schluessel); st.className = "state " + cls;
 
   document.getElementById("lvProgress").textContent =
-    d.progress || (d.running ? "läuft…" : d.error ? `Fehler: ${d.error}` : "—");
+    d.progress || (d.running ? t("live.running") : d.error ? t("live.error", { fehler: d.error }) : "—");
   document.getElementById("lvMeta").textContent =
     `${(d.size/1024).toFixed(1)} KB` + (d.job_type ? ` · ${d.job_type}` : "");
 
@@ -847,12 +847,11 @@ async function tickLive(){
   if (!box.textContent && !d.exists && !d.running){
     box.textContent =
       d.state === "pending"
-        ? "Der Auftrag wartet auf den nächsten Kontakt des Agents.\n\n"
-          + "Eine laufende Ausgabe entsteht erst, wenn er ihn abholt."
+        ? t("live.pending_hint")
       : d.state === "cancelled"
-        ? "Der Auftrag wurde verworfen, bevor er lief."
+        ? t("live.cancelled_hint")
           + (d.error ? `\n\n${d.error}` : "")
-        : "Für diesen Auftrag liegt keine Ausgabe vor.";
+        : t("live.no_output");
   }
 
   // Nach Abschluss noch zwei Runden nachladen, dann aufhören
@@ -873,7 +872,7 @@ document.getElementById("dlgLive").addEventListener("close", () => {
   clearInterval(LIVE.timer); LIVE = {jobId:null, offset:0, timer:null};
 });
 document.getElementById("lvCopy").onclick = () =>
-  copy(document.getElementById("lvLog").textContent, "Protokoll");
+  copy(document.getElementById("lvLog").textContent, t("act.log"));
 
 /* ---------- Host bearbeiten ---------- */
 function renderPicker(){
@@ -884,13 +883,13 @@ function renderPicker(){
     ? list.slice(0,300).map(c => `<div data-act="pick" data-name="${esc(c.name)}">
         <input type="checkbox" ${PICKED.has(c.name)?"checked":""} data-act="pick" data-name="${esc(c.name)}">
         <span>${esc(c.name)}</span></div>`).join("")
-    : `<div style="color:var(--muted-2)">${CMK_HOSTS.length ? "Kein Treffer." : "Keine Checkmk-Hosts geladen. Verbindung prüfen."}</div>`;
+    : `<div style="color:var(--muted-2)">${CMK_HOSTS.length ? t("host.cmk_no_match") : t("host.cmk_none_loaded")}</div>`;
 
   // Bereits verknüpfte Namen, die Checkmk nicht kennt, trotzdem zeigen
   const extra = [...PICKED].filter(n => !CMK_HOSTS.some(c => c.name === n));
   document.getElementById("hCmkPicked").innerHTML = [...PICKED].length
-    ? [...PICKED].map(n => `<span>${esc(n)}${extra.includes(n) ? " (unbekannt)" : ""}</span>`).join("")
-    : '<span style="border-color:var(--rail);color:var(--muted-2)">keine ausgewählt</span>';
+    ? [...PICKED].map(n => `<span>${esc(n)}${extra.includes(n) ? t("host.cmk_unknown_suffix") : ""}</span>`).join("")
+    : `<span style="border-color:var(--rail);color:var(--muted-2)">${t("host.cmk_none_picked")}</span>`;
 }
 function togglePick(name){
   PICKED.has(name) ? PICKED.delete(name) : PICKED.add(name);
@@ -959,7 +958,7 @@ function hasDt(h){
 }
 function dtTargetText(h){
   return h.checkmk_downtime_all
-    ? "alle in Checkmk konfigurierten Hosts"
+    ? t("dt.all_cmk_hosts")
     : (h.checkmk_hosts || []).join(", ");
 }
 
@@ -983,8 +982,10 @@ function editHost(id){
   dtComment.value = ""; document.getElementById("dtOut").textContent = "";
 
   document.getElementById("hInfo").innerHTML =
-    `${esc(h.os_version || "?")}<br>Agent ${esc(h.agent_version || "?")} · ${esc(h.ip_address || "?")}<br>`
-    + `Angemeldet ${fmtTime(h.enrolled_at)}`;
+    t("host.info", {
+      os: esc(h.os_version || "?"), agent: esc(h.agent_version || "?"),
+      ip: esc(h.ip_address || "?"), when: fmtTime(h.enrolled_at)
+    });
 
   // Planung vorbelegen
   plWhen.value = "";
@@ -992,8 +993,8 @@ function editHost(id){
   plGrace.value = 120;
   const linked = hasDt(h);
   document.getElementById("plHint").innerHTML = linked
-    ? `Downtime von ${h.downtime_minutes} Minuten auf: ${esc(dtTargetText(h))}`
-    : '<span style="color:var(--led-pending)">Kein Checkmk-Host verknüpft — es kann keine Downtime gesetzt werden. Das Monitoring wird beim Neustart Alarm schlagen.</span>';
+    ? t("plan.downtime_summary", { minuten: h.downtime_minutes, ziel: esc(dtTargetText(h)) })
+    : `<span style="color:var(--led-pending)">${t("plan.no_link_hint")}</span>`;
 
   // Erster Reiter beim Öffnen
   document.querySelectorAll("#hTabs button").forEach((x,i) => x.classList.toggle("on", i === 0));
@@ -1008,15 +1009,15 @@ function editHost(id){
   document.getElementById("upNext").textContent = h.next_patch_run
     ? fmtTime(h.next_patch_run) : "—";
   document.getElementById("upLast").textContent = h.last_patch_run
-    ? fmtTime(h.last_patch_run) : "noch nie";
+    ? fmtTime(h.last_patch_run) : t("plan.never");
   document.getElementById("upRebootHint").innerHTML = (linked
-    ? `Vor dem Neustart wird eine Downtime von ${h.downtime_minutes} Minuten gesetzt. Scheitert sie, unterbleibt der Neustart.`
-    : '<span style="color:var(--led-pending)">Ohne Checkmk-Verknüpfung wird keine Downtime gesetzt und der Neustart unterbleibt. Erst unter Checkmk verknüpfen.</span>')
+    ? t("plan.reboot_downtime_hint", { minuten: h.downtime_minutes })
+    : `<span style="color:var(--led-pending)">${t("plan.reboot_no_link_hint")}</span>`)
     // Das Wartungsfenster aus dem Reiter Allgemein greift auch hier. Ohne
     // diesen Hinweis wundert man sich, warum der Neustart trotz Haken
     // ausbleibt.
     + (h.maintenance_window
-      ? `<br>Zusätzlich gilt das Wartungsfenster <b>${esc(h.maintenance_window)}</b> aus dem Reiter Allgemein. Fällt der Termin nicht hinein, unterbleibt der Neustart.`
+      ? t("plan.reboot_window_hint", { fenster: esc(h.maintenance_window) })
       : "");
   renderDays();
 
@@ -1034,14 +1035,14 @@ async function loadPlanned(){
     box.innerHTML = open.length
       ? open.map(j => {
           const when = fmtTime(j.scheduled_at);
-          const dt = j.params?.skip_downtime ? "ohne Downtime" : "mit Downtime";
+          const dt = j.params?.skip_downtime ? t("plan.without_downtime") : t("plan.with_downtime");
           return `<div class="vrow" style="margin-bottom:5px">
-            <span>Neustart am ${when}<br><span style="color:var(--muted-2)">${dt} · Auftrag #${j.id}</span></span>
-            <button class="danger" data-act="canceljob" data-id="${j.id}">Abbrechen</button>
+            <span>${esc(t("plan.reboot_on", { when }))}<br><span style="color:var(--muted-2)">${dt}${esc(t("plan.job_ref", { id: j.id }))}</span></span>
+            <button class="danger" data-act="canceljob" data-id="${j.id}">${t("common.cancel")}</button>
           </div>`;
         }).join("")
-      : "Nichts eingeplant.";
-  } catch(e){ box.textContent = "Konnte nicht geladen werden."; }
+      : t("plan.none");
+  } catch(e){ box.textContent = t("msg.load_failed"); }
 }
 
 async function cancelJob(id){
@@ -1084,7 +1085,7 @@ document.getElementById("plSet").onclick = async () => {
     msg += t("ask.downtime_wanted_no_link");
   else
     msg += t("ask.no_downtime");
-  msg += `\n\nNachlaufzeit ${parseInt(plGrace.value)||120} Minuten: meldet sich der Host bis dahin nicht, wird der Neustart verworfen statt nachgeholt.`;
+  msg += t("ask.grace_hint", { minuten: parseInt(plGrace.value)||120 });
 
   if (!confirm(msg)) return;
 
@@ -1120,16 +1121,12 @@ document.getElementById("hSave").onclick = async () => {
   });
   document.getElementById("dlgHost").close();
   await load();
-  toast("Gespeichert");
+  toast(t("msg.saved"));
 };
 
 document.getElementById("hResetToken").onclick = async () => {
   const h = HOSTS.find(x => x.id === EDIT_ID);
-  if (!confirm(t("ask.revoke_token", { host: h.hostname }) + "\n\n"
-    + `Der Agent meldet sich beim nächsten Kontakt neu an und wartet dann `
-    + `auf Freigabe. Zeitplan und Verknüpfungen bleiben erhalten.\n\n`
-    + `Bis zur erneuten Anmeldung kann sich jedes Gerät im Netz unter `
-    + `diesem Namen melden — die Freigabe also nicht blind erteilen.`)) return;
+  if (!confirm(t("ask.revoke_token", { host: h.hostname }) + t("ask.revoke_token_detail"))) return;
   await api("POST", `/api/v1/hosts/${EDIT_ID}/reset-token`);
   document.getElementById("dlgHost").close();
   await load();
@@ -1147,7 +1144,7 @@ document.getElementById("hDelete").onclick = async () => {
 
 /* ---------- Downtime von Hand ---------- */
 document.getElementById("dtSet").onclick = async () => {
-  const body = {comment: dtComment.value.trim() || "CO-37: Manuelle Wartung"};
+  const body = {comment: dtComment.value.trim() || t("dt.comment_example")};
   if (dtStart.value && dtEnd.value){
     body.start = new Date(dtStart.value).toISOString();
     body.end = new Date(dtEnd.value).toISOString();
@@ -1158,15 +1155,15 @@ document.getElementById("dtSet").onclick = async () => {
   }
   const res = await api("POST", `/api/v1/hosts/${EDIT_ID}/downtime`, body);
   const out = document.getElementById("dtOut");
-  out.textContent = `Gesetzt (${res.minutes} min): ${res.ok.join(", ") || "—"}`
-    + (Object.keys(res.failed||{}).length ? `\nFehlgeschlagen: ${Object.keys(res.failed).join(", ")}` : "");
+  out.textContent = t("dt.result_set", { minuten: res.minutes, liste: res.ok.join(", ") || "—" })
+    + (Object.keys(res.failed||{}).length ? t("dt.result_failed", { liste: Object.keys(res.failed).join(", ") }) : "");
   toast(t("msg.downtime_set"));
 };
 document.getElementById("dtClear").onclick = async () => {
   if (!confirm(t("ask.cancel_downtimes"))) return;
   const res = await api("DELETE", `/api/v1/hosts/${EDIT_ID}/downtime`);
   document.getElementById("dtOut").textContent =
-    "Aufgehoben: " + Object.entries(res.removed||{}).map(([k,v]) => `${k} (${v})`).join(", ");
+    t("dt.result_cleared") + Object.entries(res.removed||{}).map(([k,v]) => `${k} (${v})`).join(", ");
   toast(t("msg.downtime_cancelled"));
 };
 document.getElementById("dtList").onclick = async () => {
@@ -1175,7 +1172,7 @@ document.getElementById("dtList").onclick = async () => {
   if (res.reason){ out.textContent = res.reason; return; }
   out.textContent = res.downtimes.length
     ? res.downtimes.map(d => `${d.host_name}${d.service_description ? " / "+d.service_description : ""} — ${d.comment}`).join("\n")
-    : "Keine aktiven Downtimes.";
+    : t("dt.none_active");
 };
 
 /* ---------- Einstellungen ---------- */
@@ -1245,14 +1242,14 @@ async function downloadPkg(name){
   try {
     const res = await fetch(`${API}/api/v1/packages/${encodeURIComponent(name)}`,
                             {credentials: "same-origin"});
-    if (!res.ok){ toast("Download fehlgeschlagen", true); return; }
+    if (!res.ok){ toast(t("msg.download_failed"), true); return; }
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = name;
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-  } catch(e){ toast("Download fehlgeschlagen", true); }
+  } catch(e){ toast(t("msg.download_failed"), true); }
 }
 
 async function loadAgentsTab(){
@@ -1269,7 +1266,7 @@ async function loadAgentsTab(){
   try { renderAgentsTab(data, loadError); }
   catch(e){
     console.error(e);
-    toast("Anzeige der Agents fehlgeschlagen: " + (e.message || e), true);
+    toast(t("msg.agents_display_failed", { fehler: e.message || e }), true);
   }
 }
 
@@ -1287,15 +1284,13 @@ function renderAgentsTab(data, loadError){
   const want = data?.agent_version || "";
   AGENT_VER = want;
   document.getElementById("agVer").textContent =
-    want || (loadError ? "nicht abrufbar" : "—");
+    want || (loadError ? t("msg.unavailable") : "—");
 
   document.getElementById("agBase").innerHTML =
-    `Die Befehle tragen <b>${esc(base)}</b> ein.`
+    t("settings.agents.cmd_base", { base: esc(base) })
     + (PUBLIC_URL
-        ? ` Fest eingetragen unter Einstellungen / Zugang.`
-        : ` Das ist die Adresse, unter der du dieses Dashboard gerade aufgerufen `
-          + `hast. Unter <b>Zugang</b> lässt sich eine feste Adresse hinterlegen — `
-          + `sonst hängt es davon ab, wie du die Seite öffnest.`);
+        ? t("settings.agents.cmd_base_fixed")
+        : t("settings.agents.cmd_base_dynamic"));
 
   const debName = `co37-agent_${want}_all.deb`;
   const msiName = `co37-agent-${want}.msi`;
@@ -1304,8 +1299,7 @@ function renderAgentsTab(data, loadError){
   const warnBox = document.getElementById("pkgWarn");
   const problems = (data?.mismatch || []).slice();
   if (data?.older?.length)
-    problems.push(`Ältere Dateien liegen noch im Ordner: ${data.older.join(", ")}. `
-      + `Sie stören nicht — verwendet wird jeweils das zuletzt gebaute.`);
+    problems.push(t("settings.agents.older_files", { liste: data.older.join(", ") }));
   warnBox.innerHTML = problems.length
     ? problems.map(t => `<div style="color:var(--led-pending)">${esc(t)}</div>`).join("")
     : "";
@@ -1315,22 +1309,22 @@ function renderAgentsTab(data, loadError){
   const lin = data?.linux;
   document.getElementById("infoLinux").textContent = lin
     ? `${lin.name} · ${fmtSize(lin.size)} · ${fmtTime(lin.built_at)}`
-      + (lin.matches ? "" : "  ⚠ Version weicht ab")
-    : loadError ? "nicht abrufbar" : "noch nicht gebaut";
+      + (lin.matches ? "" : t("settings.agents.version_mismatch"))
+    : loadError ? t("msg.unavailable") : t("settings.agents.not_built");
   const dlL = document.getElementById("dlLinux");
   dlL.disabled = !lin;
-  dlL.textContent = lin ? "Herunterladen" : "nicht vorhanden";
+  dlL.textContent = lin ? t("settings.agents.download_deb") : t("settings.agents.not_available");
   dlL.onclick = lin ? () => downloadPkg(lin.name) : null;
 
   // ---- Windows ----
   const win = data?.windows;
   document.getElementById("infoWin").textContent = win
     ? `${win.name} · ${fmtSize(win.size)} · ${fmtTime(win.built_at)}`
-      + (win.matches ? "" : "  ⚠ Version weicht ab")
-    : loadError ? "nicht abrufbar" : "noch nicht gebaut";
+      + (win.matches ? "" : t("settings.agents.version_mismatch"))
+    : loadError ? t("msg.unavailable") : t("settings.agents.not_built");
   const dlW = document.getElementById("dlWin");
   dlW.disabled = !win;
-  dlW.textContent = win ? "Herunterladen" : "nicht vorhanden";
+  dlW.textContent = win ? t("settings.agents.download_msi") : t("settings.agents.not_available");
   dlW.onclick = win ? () => downloadPkg(win.name) : null;
 
   // Der Linux-Befehl braucht ein Token und wird erst auf Knopfdruck
@@ -1355,7 +1349,7 @@ function renderLinuxCmd(){
   const box = document.getElementById("cmdLinux");
   const copyBtn = document.getElementById("copyLinux");
   if (!INSTALL_TOKEN){
-    box.textContent = "Noch kein Token erzeugt.";
+    box.textContent = t("settings.agents.no_token");
     copyBtn.disabled = true;
     document.getElementById("tokenState").textContent = "";
     return;
@@ -1377,11 +1371,11 @@ function tickToken(){
     INSTALL_TOKEN = null;
     clearInterval(TOKEN_TIMER); TOKEN_TIMER = null;
     renderLinuxCmd();
-    st.textContent = "Token abgelaufen. Für die nächste Einrichtung neu erzeugen.";
+    st.textContent = t("settings.agents.token_expired");
     return;
   }
   const m = Math.floor(left / 60), sec = String(left % 60).padStart(2, "0");
-  st.textContent = `Gültig noch ${m}:${sec} · bis zu ${INSTALL_TOKEN.max_uses} Abrufe`;
+  st.textContent = t("settings.agents.token_valid", { min: m, sec, max: INSTALL_TOKEN.max_uses });
 }
 
 async function makeInstallToken(){
@@ -1400,16 +1394,16 @@ async function makeInstallToken(){
 /* ---------- Pakete bauen ---------- */
 let BUILD_TIMER = null;
 const BUILD_TEXT = {
-  idle:["",""], requested:["angefordert","run"], running:["wird gebaut","run"],
-  success:["fertig","ok"], error:["fehlgeschlagen","err"]
+  idle:["",""], requested:["build.requested","run"], running:["build.running","run"],
+  success:["build.success","ok"], error:["build.error","err"]
 };
 
 async function loadBuildStatus(){
   let st;
   try { st = await api("GET", "/api/v1/packages/build-status"); } catch(e){ return; }
-  const [txt, cls] = BUILD_TEXT[st.state] || [st.state, ""];
+  const [schluessel, cls] = BUILD_TEXT[st.state] || [st.state, ""];
   const el = document.getElementById("pkgBuildState");
-  el.textContent = txt; el.className = "state " + cls;
+  el.textContent = t(schluessel); el.className = "state " + cls;
 
   const box = document.getElementById("pkgBuildLog");
   const busy = st.state === "requested" || st.state === "running";
@@ -1437,8 +1431,8 @@ document.getElementById("pkgBuild").onclick = async () => {
 
 /* ---------- Agent-Updates ---------- */
 const RO_STATE = {
-  idle:["Bereit",""], pilot:["Pilot läuft","run"], rest:["Wird ausgerollt","run"],
-  done:["Abgeschlossen","ok"], failed:["Abgebrochen","err"]
+  idle:["settings.rollout.state_idle",""], pilot:["settings.rollout.state_pilot","run"], rest:["settings.rollout.state_rest","run"],
+  done:["settings.rollout.state_done","ok"], failed:["settings.rollout.state_failed","err"]
 };
 
 async function loadRollout(){
@@ -1449,7 +1443,7 @@ async function loadRollout(){
   roMode.value = r.mode || "staged";
 
   const sel = document.getElementById("roPilot");
-  sel.innerHTML = '<option value="">— keiner gewählt —</option>'
+  sel.innerHTML = `<option value="">${t("settings.rollout.none")}</option>`
     + (r.candidates || []).map(h =>
         `<option value="${h.id}" ${h.id === r.pilot_host_id ? "selected" : ""}>`
         + `${esc(h.hostname)}${h.agent_version ? " · " + esc(h.agent_version) : ""}</option>`).join("");
@@ -1458,12 +1452,13 @@ async function loadRollout(){
     roMode.value === "staged" ? "flex" : "none";
 
   document.getElementById("roHint").innerHTML = roMode.value === "staged"
-    ? "Der Pilot wird zuerst aktualisiert. Erst wenn er sich mit der neuen Version zurückmeldet, folgen die übrigen. Wähl dafür ein unkritisches System. Meldet er sich 30 Minuten nicht oder schlägt fehl, wird nicht weiter ausgerollt."
-    : "Alle Hosts werden gleichzeitig aktualisiert. Ein fehlerhafter Agent trifft damit die gesamte Flotte auf einmal.";
+    ? t("settings.rollout.hint_staged")
+    : t("settings.rollout.hint_all");
 
-  const [txt, cls] = RO_STATE[r.state] || [r.state, ""];
+  const [schluessel, cls] = RO_STATE[r.state] || [r.state, ""];
   const st = document.getElementById("roState");
-  st.textContent = r.stale_count ? `${txt} · ${r.stale_count} veraltet` : txt;
+  const txt = t(schluessel);
+  st.textContent = r.stale_count ? txt + t("settings.rollout.stale_suffix", { anzahl: r.stale_count }) : txt;
   st.className = "state " + cls;
   document.getElementById("roNote").textContent = r.note || "";
 }
@@ -1472,8 +1467,8 @@ document.getElementById("roMode").onchange = () => {
   document.getElementById("roPilotRow").style.display =
     roMode.value === "staged" ? "flex" : "none";
   document.getElementById("roHint").innerHTML = roMode.value === "staged"
-    ? "Der Pilot wird zuerst aktualisiert. Erst wenn er sich mit der neuen Version zurückmeldet, folgen die übrigen. Wähl dafür ein unkritisches System."
-    : "Alle Hosts werden gleichzeitig aktualisiert. Ein fehlerhafter Agent trifft damit die gesamte Flotte auf einmal.";
+    ? t("settings.rollout.hint_staged_short")
+    : t("settings.rollout.hint_all");
 };
 
 document.getElementById("roSave").onclick = async () => {
@@ -1486,7 +1481,7 @@ document.getElementById("roSave").onclick = async () => {
     pilot_host_id: roPilot.value ? parseInt(roPilot.value) : 0
   });
   await loadRollout();
-  toast("Gespeichert");
+  toast(t("msg.saved"));
 };
 
 document.getElementById("roStart").onclick = async () => {
@@ -1494,15 +1489,15 @@ document.getElementById("roStart").onclick = async () => {
   await loadRollout();
   await load();
   toast(r.started
-    ? (r.mode === "staged" ? `Pilot ${r.pilot} wird aktualisiert` : `${r.count} Agents werden aktualisiert`)
+    ? (r.mode === "staged" ? t("settings.rollout.pilot_updating", { pilot: r.pilot }) : t("settings.rollout.agents_updating", { anzahl: r.count }))
     : r.reason);
 };
 
 document.getElementById("btnMakeToken").onclick = makeInstallToken;
 document.getElementById("copyLinux").onclick = () =>
-  copy(document.getElementById("cmdLinux").textContent, "Linux-Befehl");
+  copy(document.getElementById("cmdLinux").textContent, t("settings.agents.linux_cmd_label"));
 document.getElementById("copyWin").onclick = () =>
-  copy(document.getElementById("cmdWin").textContent, "Windows-Befehl");
+  copy(document.getElementById("cmdWin").textContent, t("settings.agents.win_cmd_label"));
 
 document.getElementById("agUpdateAll").onclick = async () => {
   const stale = HOSTS.filter(h => h.approval_state === "approved"
@@ -1544,22 +1539,22 @@ async function loadCmkForm(){
   cVerify.checked = sd.verify_ssl !== false;
   cSecret.value = "";
   cSecret.placeholder = sd.secret_set
-    ? "hinterlegt — leer lassen, um es zu behalten"
+    ? t("settings.cmk.secret_placeholder")
     : "";
 
   const box = document.getElementById("cmkInfo");
   if (st.key_missing){
-    box.innerHTML = '<span style="color:var(--led-reboot)">CO37_SECRET_KEY ist nicht gesetzt. Ohne den Schlüssel wird kein Secret gespeichert.</span>';
+    box.innerHTML = `<span style="color:var(--led-reboot)">${t("settings.cmk.key_missing")}</span>`;
   } else if (st.ok === false){
-    box.innerHTML = `<span style="color:var(--led-reboot)">Verbindung fehlgeschlagen: ${esc(st.error || "")}</span>`;
+    box.innerHTML = `<span style="color:var(--led-reboot)">${t("settings.cmk.conn_failed", { fehler: esc(st.error || "") })}</span>`;
   } else if (st.configured){
     const v = (st.versions || {}).checkmk || "";
-    box.innerHTML = `<span style="color:var(--led-ok)">Verbunden</span> · Checkmk ${esc(v)}`
+    box.innerHTML = `<span style="color:var(--led-ok)">${t("settings.cmk.connected")}</span>` + t("settings.cmk.version_suffix", { version: esc(v) })
       + (st.edition ? ` ${esc(st.edition)}` : "")
-      + ` · Site ${esc(st.site || sd.site || "")}`
-      + ` · ${CMK_HOSTS.length} Hosts abrufbar`;
+      + t("settings.cmk.site_suffix", { site: esc(st.site || sd.site || "") })
+      + t("settings.cmk.hosts_suffix", { anzahl: CMK_HOSTS.length });
   } else {
-    box.innerHTML = '<span style="color:var(--muted-2)">Noch nicht verbunden.</span>';
+    box.innerHTML = `<span style="color:var(--muted-2)">${t("settings.cmk.not_connected")}</span>`;
   }
 }
 
@@ -1575,16 +1570,13 @@ async function loadWatcher(){
   try { w = await api("GET", "/api/v1/watcher"); } catch(e){ return; }
   const el = document.getElementById("wVer");
   const hint = document.getElementById("wHint");
-  el.textContent = w.version || "meldet sich nicht";
+  el.textContent = w.version || t("settings.watcher.silent");
   el.style.color = w.ok && w.current ? "var(--led-ok)"
                  : w.ok ? "var(--led-pending)" : "var(--led-reboot)";
   if (w.hint){
     hint.style.display = "block";
     hint.innerHTML = `<span style="color:${w.ok ? "var(--led-pending)" : "var(--led-reboot)"}">${esc(w.hint)}</span>`
-      + (!w.ok ? `<br><br>Einmalig auf dem Server:<br>
-        <code>systemctl stop co37-watcher</code><br>
-        <code>cd /opt/co37 &amp;&amp; unzip -o -j /tmp/co37_vX_Y_Z.zip update_watcher.py build_packages.sh build_release.sh setup.sh -d /opt/co37</code><br>
-        <code>chmod +x /opt/co37/*.sh &amp;&amp; systemctl start co37-watcher</code>` : "");
+      + (!w.ok ? t("settings.watcher.manual_hint") : "");
   } else {
     hint.style.display = "none";
   }
@@ -1609,25 +1601,26 @@ async function loadLizenz(){
 
   let zeilen = [];
   if (d.vorhanden){
-    zeilen.push(`Lizenziert für <b>${esc(d.kunde)}</b>`
-                + (d.nummer ? ` · Schlüssel Nr. ${d.nummer}` : ""));
+    zeilen.push(t("settings.license.licensed_for", { kunde: esc(d.kunde) })
+                + (d.nummer ? t("settings.license.key_number", { nummer: d.nummer }) : ""));
     zeilen.push(d.unbefristet
-      ? "Unbefristet"
-      : `Gültig bis <b>${fmtTime(d.gueltig_bis, {year:"numeric",month:"2-digit",day:"2-digit"})}</b>`
-        + (d.abgelaufen ? " — <b>abgelaufen</b>"
-                        : ` (noch ${d.tage_uebrig} Tage)`));
+      ? t("settings.license.unlimited")
+      : t("settings.license.valid_until", { datum: fmtTime(d.gueltig_bis, {year:"numeric",month:"2-digit",day:"2-digit"}) })
+        + (d.abgelaufen ? t("settings.license.expired_suffix")
+                        : t("settings.license.days_left", { tage: d.tage_uebrig })));
   } else {
-    zeilen.push("Kein Lizenzschlüssel eingetragen — freie Nutzung.");
+    zeilen.push(t("settings.license.none"));
   }
 
-  zeilen.push(`<b style="color:${farbe}">${belegt} von `
-              + `${grenze === null ? "unbegrenzt" : grenze}</b> Hosts freigegeben`);
+  zeilen.push(`<b style="color:${farbe}">`
+              + t("settings.license.hosts_approved",
+                  { belegt, grenze: grenze === null ? t("settings.license.unlimited_count") : grenze })
+              + `</b>`);
 
   if (d.hinweis)
     zeilen.push(`<b style="color:var(--led-pending)">${esc(d.hinweis)}</b>`);
   if (eng)
-    zeilen.push("Weitere Hosts lassen sich erst freigeben, wenn Platz frei "
-                + "wird oder ein größerer Schlüssel eingetragen ist.");
+    zeilen.push(t("settings.license.limit_hint"));
 
   box.innerHTML = zeilen.join("<br>");
 }
@@ -1650,9 +1643,7 @@ document.getElementById("lizSave").onclick = async () => {
 };
 
 document.getElementById("lizClear").onclick = async () => {
-  if (!confirm("Lizenzschlüssel entfernen?\n\n"
-    + "Danach gelten wieder 10 Hosts für neue Freigaben. Bereits "
-    + "freigegebene Hosts bleiben unberührt und werden weiter gepatcht."))
+  if (!confirm(t("ask.remove_license")))
     return;
   await api("POST", "/api/v1/license", { key: "" });
   await loadLizenz();
@@ -1673,28 +1664,24 @@ async function loadProxy(){
   PUBLIC_URL = d.public_url || "";
 
   document.getElementById("pxEffective").innerHTML =
-    `Erzeugte Befehle tragen derzeit <b>${esc(d.effective_url || "?")}</b> ein.`
-    + (d.public_url ? "" : " (aus dem aktuellen Aufruf abgeleitet)");
+    t("settings.proxy.effective", { url: esc(d.effective_url || "?") })
+    + (d.public_url ? "" : t("settings.proxy.effective_derived"));
 
   // Womit die eigene Anfrage hereinkam. Ohne das raet man beim Eintragen
   // der Proxy-Adresse, statt es zu sehen.
   document.getElementById("pxNow").innerHTML =
-    `Diese Sitzung kommt von <b>${esc(d.this_request_from || "?")}</b> und gilt als `
+    t("settings.proxy.session_from", { ip: esc(d.this_request_from || "?") })
     + (d.this_request_https
-        ? `<b style="color:var(--led-ok)">verschlüsselt</b>.`
-        : `<b style="color:var(--led-reboot)">unverschlüsselt</b>. Rufst du über den `
-          + `Proxy auf und steht hier trotzdem unverschlüsselt, ist entweder die `
-          + `Adresse oben falsch oder der Proxy setzt <code>X-Forwarded-Proto</code> `
-          + `nicht. Solange das so ist, würde der Haken unten diese Sitzung aussperren.`);
+        ? t("settings.proxy.encrypted")
+        : t("settings.proxy.unencrypted_hint"));
 
   // Bereitschaft der Agents - der Grund, warum es diese Anzeige gibt.
   const n = d.agents_secure, total = d.agents_total;
   const ready = total > 0 && n === total;
   document.getElementById("pxReady").innerHTML =
-    `<b style="color:${ready ? "var(--led-ok)" : "var(--led-pending)"}">`
-    + `${n} von ${total} Agents</b> melden sich verschlüsselt.`
+    t("settings.proxy.agents_ready", { farbe: ready ? "var(--led-ok)" : "var(--led-pending)", n, total })
     + (d.agents_insecure.length
-        ? `<br>Noch unverschlüsselt: ${esc(d.agents_insecure.join(", "))}`
+        ? t("settings.proxy.agents_insecure_list", { liste: esc(d.agents_insecure.join(", ")) })
         : "");
 
   renderProxyState(d);
@@ -1706,8 +1693,7 @@ function renderProxyState(d){
 
   if (!d.https_only){ box.textContent = ""; return; }
   if (!d.confirm_deadline){
-    box.innerHTML = `<b style="color:var(--led-ok)">Bestätigt.</b> Der Zugang `
-      + `bleibt auf HTTPS beschränkt.`;
+    box.innerHTML = t("settings.proxy.confirmed");
     return;
   }
 
@@ -1717,14 +1703,12 @@ function renderProxyState(d){
     const left = Math.round((new Date(d.confirm_deadline) - Date.now()) / 1000);
     if (left <= 0){
       clearInterval(PROXY_TIMER); PROXY_TIMER = null;
-      box.textContent = "Frist abgelaufen — wird beim nächsten Zugriff zurückgestellt.";
+      box.textContent = t("settings.proxy.deadline_expired");
       loadProxy();
       return;
     }
     const m = Math.floor(left / 60), sec = String(left % 60).padStart(2, "0");
-    box.innerHTML = `<b style="color:var(--led-pending)">Noch nicht bestätigt.</b> `
-      + `Innerhalb von <b>${m}:${sec}</b> über HTTPS neu anmelden, sonst wird der `
-      + `Zwang automatisch zurückgenommen.`;
+    box.innerHTML = t("settings.proxy.not_confirmed", { m, sec });
   };
   tick();
   PROXY_TIMER = setInterval(tick, 1000);
@@ -1737,14 +1721,14 @@ document.getElementById("pxSavePublic").onclick = async () => {
   }
   await api("POST", "/api/v1/proxy-settings", { public_url: v });
   await loadProxy();
-  toast("Gespeichert");
+  toast(t("msg.saved"));
 };
 
 document.getElementById("pxSaveProxy").onclick = async () => {
   await api("POST", "/api/v1/proxy-settings",
             { trusted_proxy: document.getElementById("pxProxy").value.trim() });
   await loadProxy();
-  toast("Gespeichert");
+  toast(t("msg.saved"));
 };
 
 document.getElementById("pxHttps").onchange = async (e) => {
@@ -1753,21 +1737,17 @@ document.getElementById("pxHttps").onchange = async (e) => {
     const d = await api("GET", "/api/v1/proxy-settings");
     const offen = d.agents_insecure.length;
     const warn = offen
-      ? `\n\nAchtung: ${offen} Agent(s) sprechen noch unverschlüsselt und `
-        + `fallen sofort aus:\n${d.agents_insecure.join(", ")}`
+      ? t("settings.proxy.confirm_warn_agents", { offen, liste: d.agents_insecure.join(", ") })
       : "";
-    const self = d.this_request_https ? "" :
-      `\n\nAchtung: diese Sitzung gilt als unverschlüsselt und wird `
-      + `ausgesperrt. Prüfe zuerst den Eintrag oben.`;
-    if (!confirm(`Zugang auf HTTPS beschränken?${self}${warn}\n\n`
-      + `Meldet sich innerhalb von ${d.confirm_minutes} Minuten niemand über `
-      + `HTTPS an, wird die Einschränkung automatisch zurückgenommen.`)){
+    const self = d.this_request_https ? "" : t("settings.proxy.confirm_warn_self");
+    if (!confirm(t("settings.proxy.confirm_restrict_intro") + self + warn
+      + t("settings.proxy.confirm_restrict_outro", { minuten: d.confirm_minutes }))){
       e.target.checked = false; return;
     }
   }
   await api("POST", "/api/v1/proxy-settings", { https_only: on });
   await loadProxy();
-  toast(on ? "Eingeschränkt — jetzt über HTTPS neu anmelden" : "Einschränkung aufgehoben");
+  toast(on ? t("settings.proxy.restricted") : t("settings.proxy.unrestricted"));
 };
 
 async function loadUpdate(){
@@ -1819,7 +1799,7 @@ async function uploadZip(dateien){
   const fd = new FormData();
   fd.append("file", zip);
   if (sig) fd.append("sigfile", sig);
-  toast(sig ? "Paket und Signatur werden geprüft…" : "Paket wird geprüft…");
+  toast(sig ? t("msg.checking_pkg_sig") : t("msg.checking_pkg"));
   const res = await fetch(API + "/api/v1/update/upload",
     {method:"POST", credentials: "same-origin", body:fd});
   if (!res.ok){
@@ -1862,7 +1842,7 @@ document.getElementById("fState").onchange = render;
 function loadAccount(){
   document.getElementById("acName").textContent = ME ? ME.username : "—";
   document.getElementById("acRole").textContent =
-    ME ? (ME.is_admin ? "Administrator" : "Benutzer") : "—";
+    ME ? (ME.is_admin ? t("settings.users.role_admin") : t("settings.users.role_user")) : "—";
 }
 
 document.getElementById("acSave").onclick = async () => {
@@ -1885,13 +1865,13 @@ async function loadUsers(){
   const me = ME ? ME.username : "";
   document.getElementById("userList").innerHTML = users.map(u => `
     <div class="vrow" style="margin-bottom:5px">
-      <span>${esc(u.username)}${u.username === me ? " (Sie)" : ""}<br>
-        <span style="color:var(--muted-2)">${u.role === "admin" ? "Administrator" : "Benutzer"}
-        · ${u.last_login ? "zuletzt " + fmtTime(u.last_login) : "noch nie angemeldet"}</span></span>
+      <span>${esc(u.username)}${u.username === me ? t("settings.users.you_suffix") : ""}<br>
+        <span style="color:var(--muted-2)">${u.role === "admin" ? t("settings.users.role_admin") : t("settings.users.role_user")}
+        · ${u.last_login ? t("settings.users.last_login", { when: fmtTime(u.last_login) }) : t("settings.users.never_logged_in")}</span></span>
       <span style="display:flex;gap:8px">
-        <button data-act="resetpw" data-id="${u.id}" data-username="${esc(u.username)}">Passwort setzen</button>
+        <button data-act="resetpw" data-id="${u.id}" data-username="${esc(u.username)}">${t("settings.users.set_password")}</button>
         <button class="danger" data-act="deluser" data-id="${u.id}" data-username="${esc(u.username)}"
-          ${u.username === me ? "disabled" : ""}>Entfernen</button>
+          ${u.username === me ? "disabled" : ""}>${t("settings.users.remove")}</button>
       </span></div>`).join("");
 }
 
@@ -1934,7 +1914,7 @@ async function loadAudit(){
           ${e.detail ? "<br><span style=\"color:var(--muted-2)\">" + esc(e.detail) + "</span>" : ""}</span>
         <span style="color:var(--muted-2);white-space:nowrap">${fmtTime(e.at)}${e.from_ip ? " · " + esc(e.from_ip) : ""}</span>
       </div>`).join("")
-    : '<span style="color:var(--muted-2)">noch keine Einträge</span>';
+    : `<span style="color:var(--muted-2)">${t("settings.audit.none")}</span>`;
 }
 
 /* ---------- Start ---------- */
@@ -1947,7 +1927,7 @@ document.getElementById("btnLogout").onclick = doLogout;
 async function startApp(){
   try { ME = await api("GET", "/api/v1/me"); } catch(e){ return; }
   document.getElementById("whoami").textContent =
-    ME.username + (ME.is_admin ? " · Administrator" : "");
+    ME.username + (ME.is_admin ? " · " + t("settings.users.role_admin") : "");
   // Reiter, die nur Administratoren sehen sollen
   document.querySelectorAll(".admin-only").forEach(el => {
     el.style.display = ME.is_admin ? "" : "none";
