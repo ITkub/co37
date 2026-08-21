@@ -174,7 +174,8 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "setVorgabeSprache: (s) => { VORGABE_SPRACHE = s; }, "
   + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
   + "loadRollout, loadUsers, loadAudit, loadAccount, "
-  + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); } };";
+  + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
+  + "render, setAreas: (a) => { AREAS = a; }, applyDrop };";
 const wrapped = new Function(script + EXPORTS);
 let api;
 try {
@@ -690,6 +691,141 @@ global.setTimeout = origSetTimeout;
 
     check("keine auto-Spalte (verschiebt die Ausrichtung)",
           !cols.includes("auto"), cols.join(" "));
+  }
+
+  console.log("\n=== Bereiche in der Liste ===");
+  {
+    // Rein synthetische Hosts/Bereiche statt echter Daten vom Backend -
+    // die Gruppierung soll unabhaengig vom sonstigen Bestand geprueft
+    // werden, und ohne angelegte Bereiche wuerde dieser Test nichts zu
+    // pruefen finden.
+    const mkHost = (id, overrides) => Object.assign({
+      id, hostname: `H${id}`, display_name: null,
+      approval_state: "approved", status: "online",
+      os_type: "linux", updates_available: 0, security_updates: 0,
+      checkmk_downtime_all: false, checkmk_hosts: [], downtime_minutes: 30,
+      reboot_required: false, patch_enabled: false, patch_followup_left: 0,
+      updates_require_reboot: false, area_id: null,
+    }, overrides);
+
+    const areaA = { id: 90501, name: "Buero-A", sort_order: 1, host_count: 0 };
+    const areaB = { id: 90502, name: "Leerer-Bereich", sort_order: 2, host_count: 0 };
+    const h1 = mkHost(90001, { area_id: areaA.id });
+    const h2 = mkHost(90002, { area_id: areaA.id });
+    const h3 = mkHost(90003, {});   // ohne Bereich - bleibt wie bisher
+
+    api.setAreas([areaA, areaB]);
+    api.setHosts([h1, h2, h3]);
+    el("filter").value = "";
+    el("fState").value = "";
+    api.render();
+
+    const out = el("units").innerHTML;
+    const posArea = out.indexOf(`data-area-id="${areaA.id}"`);
+    const posEmptyArea = out.indexOf(`data-area-id="${areaB.id}"`);
+    const posH1 = out.indexOf(`data-id="${h1.id}"`);
+    const posH2 = out.indexOf(`data-id="${h2.id}"`);
+    const posH3 = out.indexOf(`data-id="${h3.id}"`);
+
+    check("Bereichs-Kopf gefunden", posArea >= 0, posArea);
+    check("Bereichsname erscheint im Kopf",
+          out.slice(posArea, posArea + 200).includes(areaA.name));
+    check("Bereichs-Kopf steht vor seinen Hosts",
+          posArea >= 0 && posArea < posH1 && posH1 < posH2, { posArea, posH1, posH2 });
+    check("beide Hosts im Bereich sind als solche markiert",
+          out.slice(Math.max(0, posH1 - 40), posH1).includes('data-in-area="1"')
+          && out.slice(Math.max(0, posH2 - 40), posH2).includes('data-in-area="1"'));
+    check("Host ohne Bereich bleibt unmarkiert",
+          !out.slice(Math.max(0, posH3 - 40), posH3).includes('data-in-area="1"'));
+    check("Host ohne Bereich steht nach den Bereichs-Hosts",
+          posH3 > posH2, { posH2, posH3 });
+    check("leerer Bereich bleibt sichtbar (Ablageziel) ohne aktiven Filter",
+          posEmptyArea >= 0, posEmptyArea);
+
+    // Aktiver Filter, der nur H1 trifft: der leere Bereich ist jetzt eine
+    // Karteileiche und soll nicht erscheinen - sonst zeigt die Suche einen
+    // Bereich, zu dem gerade kein Treffer gehoert.
+    el("filter").value = "h" + h1.id;
+    api.render();
+    const outGefiltert = el("units").innerHTML;
+    check("gefiltert: leerer Bereich verschwindet",
+          !outGefiltert.includes(`data-area-id="${areaB.id}"`));
+    check("gefiltert: der treffende Bereich mit seinem Treffer bleibt",
+          outGefiltert.includes(`data-area-id="${areaA.id}"`)
+          && outGefiltert.includes(`data-id="${h1.id}"`));
+    check("gefiltert: der nicht treffende zweite Host im selben Bereich fehlt",
+          !outGefiltert.includes(`data-id="${h2.id}"`));
+    el("filter").value = "";
+
+    // Ohne jeden Bereich muss die Anzeige unveraendert bleiben - das war
+    // die ausdrueckliche Bedingung: wer keine Bereiche will, braucht auch
+    // keine anzulegen.
+    api.setAreas([]);
+    api.render();
+    const outOhne = el("units").innerHTML;
+    check("ohne Bereiche: keine Kopfzeile im Markup", !outOhne.includes("areahead"));
+    check("ohne Bereiche: kein Host als eingerueckt markiert",
+          !outOhne.includes("data-in-area"));
+  }
+
+  console.log("\n=== Bereiche: Ablegen berechnen (applyDrop) ===");
+  {
+    // Reine Rechenfunktion, keine DOM - direkt gegen synthetische Listen
+    // geprueft, wie patch_due() im Backend gegen synthetische Hosts.
+    const liste = () => [
+      { id: 1, area_id: null },
+      { id: 2, area_id: 777 },
+      { id: 3, area_id: 777 },
+      { id: 4, area_id: null },
+    ];
+
+    {
+      const r = api.applyDrop(liste(), 1, { kind: "unit", id: 2, after: false });
+      check("Ablegen vor einem Host im Bereich uebernimmt dessen Bereich",
+            r && r.hosts.find(h => h.id === 1).area_id === 777, r && r.newAreaId);
+      check("Bereichswechsel wird gemeldet", r && r.areaChanged === true);
+      check("Reihenfolge: Host 1 steht jetzt vor Host 2",
+            r && r.hosts.findIndex(h => h.id === 1) < r.hosts.findIndex(h => h.id === 2),
+            r && r.hosts.map(h => h.id));
+    }
+    {
+      const r = api.applyDrop(liste(), 2, { kind: "unit", id: 4, after: true });
+      check("Ablegen bei einem Host ohne Bereich entfernt aus dem Bereich",
+            r && r.hosts.find(h => h.id === 2).area_id === null);
+      check("Bereichswechsel wird auch beim Entfernen gemeldet", r && r.areaChanged === true);
+    }
+    {
+      const r = api.applyDrop(liste(), 2, { kind: "unit", id: 3, after: true });
+      check("reine Umsortierung im selben Bereich meldet KEINE Aenderung",
+            r && r.areaChanged === false, r);
+      check("Reihenfolge trotzdem angepasst",
+            r && r.hosts.findIndex(h => h.id === 2) > r.hosts.findIndex(h => h.id === 3));
+    }
+    {
+      const r = api.applyDrop(liste(), 4, { kind: "areahead", areaId: 777 });
+      check("Ablegen auf dem Bereichs-Kopf setzt den Bereich",
+            r && r.hosts.find(h => h.id === 4).area_id === 777);
+      check("... und haengt hinter die vorhandenen Hosts des Bereichs an",
+            r && r.hosts[r.hosts.length - 1].id === 4, r && r.hosts.map(h => h.id));
+    }
+    {
+      // Bereich 888 hat in dieser Liste noch keinen einzigen Host - der
+      // Zweig ohne "letzten Host des Bereichs" (lastIdx bleibt -1).
+      const r = api.applyDrop(liste(), 1, { kind: "areahead", areaId: 888 });
+      check("Ablegen auf dem Kopf eines LEEREN Bereichs setzt den Bereich trotzdem",
+            r && r.hosts.find(h => h.id === 1).area_id === 888);
+      check("... und haengt einfach hinten an, mangels vorhandener Hosts dort",
+            r && r.hosts[r.hosts.length - 1].id === 1, r && r.hosts.map(h => h.id));
+    }
+    {
+      const r = api.applyDrop(liste(), 9, { kind: "unit", id: 2, after: false });
+      check("Ziehen eines nicht (mehr) vorhandenen Hosts liefert kein Ergebnis",
+            r === null, "unbekannte dragId - kein Ergebnis erwartet");
+    }
+    {
+      const r = api.applyDrop(liste(), 2, { kind: "unit", id: 2, after: false });
+      check("Ablegen auf sich selbst liefert kein Ergebnis", r === null);
+    }
   }
 
   console.log("\n=== Versionswechsel bemerken ===");

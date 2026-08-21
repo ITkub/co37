@@ -73,7 +73,7 @@ async function doLogout(){
   location.reload();
 }
 
-let HOSTS = [], CMK_HOSTS = [], AGENT_VER = "";
+let HOSTS = [], AREAS = [], CMK_HOSTS = [], AGENT_VER = "";
 // Verschieben der Uebersicht: nur bei ungefilterter Liste erlaubt.
 let SORTABLE = true, DRAG_ID = null;
 let EDIT_ID = null, PICKED = new Set();
@@ -405,45 +405,91 @@ function render(){
   // Einmal ausgewertet statt in jeder Zeile. Rein zur Anzeige - die
   // Berechtigung durchsetzen tut die API, nicht diese Abfrage.
   const admin = !!(ME && ME.is_admin);
-  box.innerHTML = list.map((h,i) => {
-    const s = stateOf(h);
-    const upd = h.updates_available||0, sec = h.security_updates||0;
-    const waiting = h.approval_state === "pending";
-    const stale = AGENT_VER && h.agent_version && h.agent_version !== AGENT_VER;
 
-    const act = ACTIVE[h.id];
-    const notes = [];
-    if (act) notes.push(act.progress ? `${act.job_type}: ${act.progress}`
-                                      : t("note.job_running", { auftrag: act.job_type }));
-    // Auftrag steht auf laufend, der Host meldet aber nicht mehr. Ohne
-    // diesen Hinweis sieht die Zeile aus wie normale Arbeit.
-    if (act && h.status !== "online") notes.push(t("note.silent"));
-    if (waiting) notes.push(t("note.pending_approval"));
-    if (h.approval_state === "rejected") notes.push(t("note.rejected"));
-    // Ein Host, der sich angemeldet, aber nie gemeldet hat. Kann ein
-    // abgebrochenes Aufsetzen sein - oder jemand, der den Namen eines noch
-    // nicht eingerichteten Systems belegt hat, damit dieses sich spaeter
-    // nicht anmelden kann.
-    if (h.approval_state === "pending" && !h.last_seen)
-      notes.push(t("note.never_reported"));
-    if (h.reboot_required) notes.push(rebootNote(h));
-    // Vorschau, kein Zustand: die gefundenen Updates ziehen einen Neustart
-    // nach sich. Nur zeigen, solange noch keiner aussteht - sonst stuenden
-    // zwei Meldungen zum selben Thema nebeneinander.
-    else if (h.updates_require_reboot && h.updates_available > 0)
-      notes.push(t("note.updates_need_reboot"));
-    if (stale) notes.push(t("note.agent_outdated", { version: h.agent_version }));
-    if (PLANNED[h.id]) notes.push(t("note.reboot_planned", {
-      zeit: PLANNED[h.id].toLocaleString(zeitSprache(),
-        {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) }));
-    if (h.patch_enabled && h.next_patch_run) notes.push(t("note.updates_at", {
-      zeit: fmtTime(h.next_patch_run,{weekday:"short",hour:"2-digit",minute:"2-digit"}) }));
-    // Windows legt nach einem Neustart kumulativ nach. Der Nachschlag ist
-    // vorgemerkt und laeuft an, sobald der Host wieder meldet.
-    if (h.patch_followup_left > 0)
-      notes.push(t("note.followup", { anzahl: h.patch_followup_left }));
+  // Bereiche zuerst, jeder mit seinen zugeordneten Hosts direkt darunter
+  // (eingerueckt) - danach der Rest wie bisher, unveraendert. Ganz ohne
+  // angelegte Bereiche ist AREAS leer und hier passiert nichts anderes als
+  // vorher: freiwillig, wie verlangt.
+  const byArea = new Map();
+  const rest = [];
+  list.forEach(h => {
+    if (hostAreaGiltig(h)){
+      if (!byArea.has(h.area_id)) byArea.set(h.area_id, []);
+      byArea.get(h.area_id).push(h);
+    } else rest.push(h);
+  });
 
-    return `<div class="unit" data-id="${h.id}">
+  let i = 0;
+  let html = "";
+  for (const area of AREAS){
+    const inArea = byArea.get(area.id) || [];
+    // Ein leerer Bereich bleibt nur sichtbar (als Ablageziel zum
+    // Hineinziehen), solange nichts herausgefiltert ist - sonst taucht
+    // beim Suchen ein Bereich auf, zu dem gerade kein Treffer gehoert.
+    if (!inArea.length && !SORTABLE) continue;
+    html += renderAreaHead(area, inArea.length);
+    html += inArea.map(h => renderUnit(h, i++, admin)).join("");
+  }
+  html += rest.map(h => renderUnit(h, i++, admin)).join("");
+  box.innerHTML = html;
+}
+
+// Ob dieser Host tatsaechlich einem noch vorhandenen Bereich angehoert.
+// Eigene Funktion statt der blossen Pruefung auf area_id, damit render()
+// und renderUnit() nicht auseinanderlaufen koennen: ein area_id, dessen
+// Bereich es nicht mehr gibt (etwa der Rand eines gerade geloeschten
+// Bereichs, bevor der naechste Abruf das nachzieht), soll weder gruppiert
+// noch eingerueckt dargestellt werden.
+function hostAreaGiltig(h){
+  return !!(h.area_id && AREAS.some(a => a.id === h.area_id));
+}
+
+function renderAreaHead(area, count){
+  return `<div class="areahead" data-area-id="${area.id}">
+    <div class="areahead-name">${esc(area.name)}</div>
+    <div class="areahead-count">${t("area.host_count", { anzahl: count })}</div>
+  </div>`;
+}
+
+function renderUnit(h, i, admin){
+  const s = stateOf(h);
+  const upd = h.updates_available||0, sec = h.security_updates||0;
+  const waiting = h.approval_state === "pending";
+  const stale = AGENT_VER && h.agent_version && h.agent_version !== AGENT_VER;
+
+  const act = ACTIVE[h.id];
+  const notes = [];
+  if (act) notes.push(act.progress ? `${act.job_type}: ${act.progress}`
+                                    : t("note.job_running", { auftrag: act.job_type }));
+  // Auftrag steht auf laufend, der Host meldet aber nicht mehr. Ohne
+  // diesen Hinweis sieht die Zeile aus wie normale Arbeit.
+  if (act && h.status !== "online") notes.push(t("note.silent"));
+  if (waiting) notes.push(t("note.pending_approval"));
+  if (h.approval_state === "rejected") notes.push(t("note.rejected"));
+  // Ein Host, der sich angemeldet, aber nie gemeldet hat. Kann ein
+  // abgebrochenes Aufsetzen sein - oder jemand, der den Namen eines noch
+  // nicht eingerichteten Systems belegt hat, damit dieses sich spaeter
+  // nicht anmelden kann.
+  if (h.approval_state === "pending" && !h.last_seen)
+    notes.push(t("note.never_reported"));
+  if (h.reboot_required) notes.push(rebootNote(h));
+  // Vorschau, kein Zustand: die gefundenen Updates ziehen einen Neustart
+  // nach sich. Nur zeigen, solange noch keiner aussteht - sonst stuenden
+  // zwei Meldungen zum selben Thema nebeneinander.
+  else if (h.updates_require_reboot && h.updates_available > 0)
+    notes.push(t("note.updates_need_reboot"));
+  if (stale) notes.push(t("note.agent_outdated", { version: h.agent_version }));
+  if (PLANNED[h.id]) notes.push(t("note.reboot_planned", {
+    zeit: PLANNED[h.id].toLocaleString(zeitSprache(),
+      {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) }));
+  if (h.patch_enabled && h.next_patch_run) notes.push(t("note.updates_at", {
+    zeit: fmtTime(h.next_patch_run,{weekday:"short",hour:"2-digit",minute:"2-digit"}) }));
+  // Windows legt nach einem Neustart kumulativ nach. Der Nachschlag ist
+  // vorgemerkt und laeuft an, sobald der Host wieder meldet.
+  if (h.patch_followup_left > 0)
+    notes.push(t("note.followup", { anzahl: h.patch_followup_left }));
+
+  return `<div class="unit"${hostAreaGiltig(h) ? ` data-in-area="1"` : ""} data-id="${h.id}">
       <div class="slot${SORTABLE ? " grab" : ""}"${SORTABLE ? ` draggable="true" title="${esc(t("list.drag"))}"` : ` title="${esc(t("list.drag_blocked"))}"`}>${String(i+1).padStart(2,"0")}</div>
       <div class="led ${LED[s]}"></div>
       <div class="hostcell">
@@ -474,15 +520,17 @@ function render(){
         ${admin ? `<button data-act="edithost" data-id="${h.id}">…</button>` : ""}
       </div>
     </div>`;
-  }).join("");
 }
 
 /* ---------- Reihenfolge per Drag and Drop ---------- */
 /*
- * Verschiebt ausschliesslich die Anzeige. Auf Zeitplaene, Wartungsfenster
- * oder die Ausfuehrung von Auftraegen hat die Folge keinen Einfluss - es
- * gibt keine Abarbeitung in Reihe, jeder Host wertet beim eigenen Kontakt
- * fuer sich aus.
+ * Verschiebt in erster Linie die Anzeige. Auf Zeitplaene, Wartungsfenster
+ * oder die Ausfuehrung von Auftraegen hat die reine Reihenfolge keinen
+ * Einfluss - es gibt keine Abarbeitung in Reihe, jeder Host wertet beim
+ * eigenen Kontakt fuer sich aus. Landet ein Host dabei in einem anderen
+ * Bereich (oder verlaesst seinen), ist das die Ausnahme: das speichert
+ * moveHostArea() eigens, denn das WIRKT sich auf den Zeitplan aus - der
+ * Bereich hat ja unter Umstaenden einen eigenen.
  *
  * Angefasst wird nur die Platznummer, nicht die ganze Zeile: sonst startet
  * jeder Zug an einer Schaltflaeche oder an markiertem Text einen Drag.
@@ -493,6 +541,7 @@ function clearDropMarks(){
   unitsBox().querySelectorAll(".unit").forEach(u => {
     u.classList.remove("dropbefore", "dropafter");
   });
+  unitsBox().querySelectorAll(".areahead").forEach(a => a.classList.remove("over"));
 }
 
 async function saveOrder(){
@@ -504,6 +553,69 @@ async function saveOrder(){
     // lassen, die es auf dem Server nicht gibt.
     load().catch(() => {});
   }
+}
+
+async function moveHostArea(hostId, areaId){
+  try {
+    await api("POST", `/api/v1/hosts/${hostId}/area`, { area_id: areaId });
+    toast(t("msg.area_saved"));
+  } catch(e){
+    toast(t("msg.area_not_saved"), true);
+    // Wie bei saveOrder(): den echten Stand zurueckholen statt einer
+    // Anzeige, die es auf dem Server so nicht gibt - etwa weil ein
+    // nicht-administrativer Zugang das Verschieben zwischen Bereichen
+    // nicht darf.
+    load().catch(() => {});
+  }
+}
+
+/**
+ * Reine Rechenfunktion ohne DOM-Zugriff: aus der bisherigen Reihenfolge,
+ * dem gezogenen Host und dem Ablageziel die neue Reihenfolge bestimmen -
+ * und, falls das Ziel zu einem anderen Bereich gehoert (oder gar keinem),
+ * das gleich mit.
+ *
+ * target ist entweder
+ *   { kind: "unit", id, after }     - abgelegt auf einem anderen Host
+ *   { kind: "areahead", areaId }    - abgelegt auf einem Bereichs-Kopf
+ *
+ * Eigene Funktion statt Logik im Ereignis-Handler, damit sich das ohne
+ * eine nachgebaute DOM prüfen laesst - wie _schedule_due() im Backend.
+ */
+function applyDrop(hosts, dragId, target){
+  const from = hosts.findIndex(h => h.id === dragId);
+  if (from < 0) return null;
+  if (target.kind === "unit" && target.id === dragId) return null;
+
+  const list = hosts.slice();
+  const [moved] = list.splice(from, 1);
+  const oldAreaId = moved.area_id || null;
+
+  if (target.kind === "areahead"){
+    const newAreaId = target.areaId;
+    // Ans Ende der bisherigen Reihenfolge dieses Bereichs - oder, ist er
+    // leer, einfach ganz hinten anhaengen.
+    let lastIdx = -1;
+    list.forEach((h, idx) => { if ((h.area_id || null) === newAreaId) lastIdx = idx; });
+    list.splice(lastIdx >= 0 ? lastIdx + 1 : list.length, 0, moved);
+    moved.area_id = newAreaId;
+    return { hosts: list, areaChanged: oldAreaId !== newAreaId, newAreaId };
+  }
+
+  // Zielposition erst nach dem Herausnehmen bestimmen, sonst verschiebt
+  // sich der Index um eins, wenn nach unten gezogen wird.
+  const to = list.findIndex(h => h.id === target.id);
+  if (to < 0){
+    list.splice(from, 0, moved);
+    return { hosts: list, areaChanged: false, newAreaId: oldAreaId };
+  }
+  // Der Bereich des Ziel-Hosts gilt auch fuer den gezogenen - so entsteht
+  // "herausziehen" (Ziel ohne Bereich) und "hineinziehen" (Ziel in einem
+  // Bereich) von selbst, ohne eigene Bedienelemente dafuer.
+  const newAreaId = list[to].area_id || null;
+  list.splice(target.after ? to + 1 : to, 0, moved);
+  moved.area_id = newAreaId;
+  return { hosts: list, areaChanged: oldAreaId !== newAreaId, newAreaId };
 }
 
 function initSorting(){
@@ -522,6 +634,14 @@ function initSorting(){
 
   box.addEventListener("dragover", e => {
     if (DRAG_ID === null) return;
+    const areaHead = e.target.closest(".areahead");
+    if (areaHead){
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      clearDropMarks();
+      areaHead.classList.add("over");
+      return;
+    }
     const unit = e.target.closest(".unit");
     if (!unit || parseInt(unit.dataset.id) === DRAG_ID) return;
     e.preventDefault();
@@ -534,28 +654,30 @@ function initSorting(){
 
   box.addEventListener("drop", e => {
     if (DRAG_ID === null) return;
+    const areaHead = e.target.closest(".areahead");
     const unit = e.target.closest(".unit");
-    if (!unit) return;
+    if (!areaHead && !unit) return;
     e.preventDefault();
-    const targetId = parseInt(unit.dataset.id);
-    if (targetId === DRAG_ID) return;
 
-    const rect = unit.getBoundingClientRect();
-    const after = e.clientY > rect.top + rect.height / 2;
+    const draggedId = DRAG_ID;
+    let target;
+    if (areaHead){
+      target = { kind: "areahead", areaId: parseInt(areaHead.dataset.areaId) };
+    } else {
+      const rect = unit.getBoundingClientRect();
+      target = { kind: "unit", id: parseInt(unit.dataset.id),
+                 after: e.clientY > rect.top + rect.height / 2 };
+    }
 
-    const from = HOSTS.findIndex(h => h.id === DRAG_ID);
-    if (from < 0) return;
-    const [moved] = HOSTS.splice(from, 1);
-    // Zielposition erst nach dem Herausnehmen bestimmen, sonst verschiebt
-    // sich der Index um eins, wenn nach unten gezogen wird.
-    let to = HOSTS.findIndex(h => h.id === targetId);
-    if (to < 0){ HOSTS.splice(from, 0, moved); return; }
-    HOSTS.splice(after ? to + 1 : to, 0, moved);
-
+    const result = applyDrop(HOSTS, draggedId, target);
     DRAG_ID = null;
     clearDropMarks();
+    if (!result) return;
+
+    HOSTS = result.hosts;
     render();
     saveOrder();
+    if (result.areaChanged) moveHostArea(draggedId, result.newAreaId);
   });
 
   box.addEventListener("dragend", () => {
@@ -645,6 +767,11 @@ async function load(){
   checkVersion();
   const wasBusy = Object.keys(ACTIVE);
   HOSTS = await api("GET", "/api/v1/hosts");
+  // Freiwillig: ohne angelegte Bereiche bleibt die Liste wie bisher.
+  // Scheitert der Abruf, wird schlicht so getan, als gaebe es keine -
+  // wie bei CMK_HOSTS und PLANNED unten, kein Grund, die ganze
+  // Uebersicht scheitern zu lassen.
+  try { AREAS = await api("GET", "/api/v1/areas"); } catch(e){ AREAS = []; }
   try {
     ACTIVE = {};
     (await api("GET", "/api/v1/jobs/active")).forEach(j => { ACTIVE[j.host_id] = j; });
