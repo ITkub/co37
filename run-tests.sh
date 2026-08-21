@@ -111,6 +111,7 @@ REIHEN=(
   "proxy-https     $PY tests/proxy-https-test.py"
   "agent-api       $PY tests/agent-api-test.py"
   "area            $PY tests/area-test.py"
+  "host-patch      $PY tests/host-patch-test.py"
   "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
   "roles           $PY tests/roles-test.py"
 )

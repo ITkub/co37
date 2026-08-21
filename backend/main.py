@@ -2386,7 +2386,11 @@ def update_host(
         setattr(host, field, value)
     if host.downtime_minutes < 1:
         host.downtime_minutes = 30
-    if host.patch_grace_hours and host.patch_grace_hours < 1:
+    # "and" statt "is not None" wertete bei genau 0 nicht aus - 0 ist in
+    # Python selbst schon falsch, der Vergleich "< 1" kam nie zum Zug. Eine
+    # Kulanzzeit von 0 Stunden blieb dadurch stehen, statt auf die Vorgabe
+    # zurueckgesetzt zu werden. Gefunden bei derselben Zeile im Bereichs-Code.
+    if host.patch_grace_hours is not None and host.patch_grace_hours < 1:
         host.patch_grace_hours = 4
     session.add(host)
     session.commit()
