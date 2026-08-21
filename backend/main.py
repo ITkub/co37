@@ -875,22 +875,27 @@ def get_checkmk(session: Session) -> Optional[CheckmkClient]:
     )
 
 
-async def downtime_targets(host: Host, cmk: CheckmkClient) -> list[str]:
+async def downtime_targets(quelle: "Host | Area", cmk: CheckmkClient) -> list[str]:
     """
     Welche Checkmk-Hosts eine Downtime bekommen.
 
-    Normalfall sind es die verknuepften. Ist checkmk_downtime_all gesetzt,
-    sind es alle in Checkmk konfigurierten Hosts: der Host traegt dann das
-    Monitoring selbst, und ein Neustart nimmt jedem anderen Host die
-    Ueberwachung, ohne dass diesen etwas fehlt.
+    quelle ist meist der betroffene Host, bei einem aus dem Zeitplan eines
+    Bereichs ausgeloesten Neustart dessen Bereich - beide tragen dieselben
+    Feldnamen (checkmk_hosts, checkmk_downtime_all), gelesen wird hier nur
+    das.
+
+    Normalfall sind die verknuepften Namen. Ist checkmk_downtime_all
+    gesetzt, sind es alle in Checkmk konfigurierten Hosts: die Quelle
+    traegt dann das Monitoring selbst, und ein Neustart nimmt jedem
+    anderen Host die Ueberwachung, ohne dass diesen etwas fehlt.
 
     Die verknuepften Namen bleiben in jedem Fall enthalten. Ein Name kann
     in der Auflistung fehlen, etwa weil er als Cluster oder in einem nicht
     lesbaren Ordner liegt - er waere dann trotz gesetztem Flag ohne
     Downtime, was das Gegenteil der Absicht ist.
     """
-    linked = list(host.checkmk_hosts or [])
-    if not host.checkmk_downtime_all:
+    linked = list(quelle.checkmk_hosts or [])
+    if not quelle.checkmk_downtime_all:
         return linked
 
     names = [h["name"] for h in await cmk.list_hosts() if h.get("name")]
@@ -900,12 +905,14 @@ async def downtime_targets(host: Host, cmk: CheckmkClient) -> list[str]:
     return names
 
 
-def has_downtime_target(host: Host) -> bool:
+def has_downtime_target(quelle: "Host | Area") -> bool:
     """
     Ob ueberhaupt eine Downtime gesetzt werden kann. Bei gesetztem Flag
     reicht die Checkmk-Verbindung, eine Verknuepfung ist nicht noetig.
+
+    quelle: siehe downtime_targets().
     """
-    return bool(host.checkmk_hosts) or bool(host.checkmk_downtime_all)
+    return bool(quelle.checkmk_hosts) or bool(quelle.checkmk_downtime_all)
 
 
 # ======================================================================
@@ -1344,32 +1351,47 @@ JOB_MAX_RUNTIME = {
 }
 
 
-def patch_due(
+def _schedule_due(
+    enabled: bool,
+    days: list[str],
+    time_str: Optional[str],
+    grace_hours: int,
+    last_run: Optional[datetime],
     host: Host,
+    session: Optional[Session],
     now: Optional[datetime] = None,
-    session: Optional[Session] = None,
 ) -> tuple[bool, str]:
     """
-    Prueft, ob jetzt ein geplanter Patch-Lauf faellig ist.
+    Kern von patch_due() und area_patch_due(): prueft, ob ein durch Tage,
+    Uhrzeit und Kulanz beschriebener Termin jetzt faellig ist - unabhaengig
+    davon, ob der Zeitplan vom Host selbst oder von seinem Bereich stammt.
 
     Wird beim Heartbeat aufgerufen, es gibt also keinen Hintergrunddienst.
     War der Host zum Termin ausgeschaltet, greift der Nachlauf
-    (patch_grace_hours) - danach wird der Termin uebersprungen, damit nicht
+    (grace_hours) - danach wird der Termin uebersprungen, damit nicht
     Montagmorgen im Betrieb gepatcht wird.
+
+    last_run ist die Bezugsgroesse fuer genau diesen Zeitplan:
+    host.last_patch_run fuer den eigenen, host.area_patch_last_run fuer den
+    des Bereichs. Getrennte Felder, weil beide Zeitplaene unabhaengig
+    nebeneinander laufen koennen. host bleibt in jedem Fall der Host, fuer
+    den geprueft wird - der Nachschlag (_followup_due) ist grundsaetzlich
+    host-eigen, unabhaengig davon, welcher Zeitplan den urspruenglichen
+    Lauf ausgeloest hat.
     """
-    if not host.patch_enabled or not host.patch_days or not host.patch_time:
+    if not enabled or not days or not time_str:
         return False, "nicht eingeplant"
     try:
-        hh, mm = (int(x) for x in host.patch_time.split(":"))
+        hh, mm = (int(x) for x in time_str.split(":"))
     except ValueError:
-        return False, f"Uhrzeit nicht lesbar: {host.patch_time}"
+        return False, f"Uhrzeit nicht lesbar: {time_str}"
 
-    wanted = {DAYS[d] for d in host.patch_days if d in DAYS}
+    wanted = {DAYS[d] for d in days if d in DAYS}
     if not wanted:
         return False, "kein gueltiger Wochentag"
 
     now = now or localnow()
-    grace = timedelta(hours=max(1, host.patch_grace_hours or 4))
+    grace = timedelta(hours=max(1, grace_hours or 4))
 
     # Den zuletzt vergangenen passenden Termin suchen
     for offset in range(8):
@@ -1382,15 +1404,49 @@ def patch_due(
         if now - slot > grace:
             return False, "Termin liegt zu lange zurueck (Nachlauf abgelaufen)"
 
-        # last_patch_run steht in UTC, der Termin in Ortszeit. Ohne
-        # Umrechnung waere der Vergleich um den Zeitzonenversatz daneben -
-        # der Lauf koennte doppelt ausloesen oder ganz ausfallen.
+        # last_run steht in UTC, der Termin in Ortszeit. Ohne Umrechnung
+        # waere der Vergleich um den Zeitzonenversatz daneben - der Lauf
+        # koennte doppelt ausloesen oder ganz ausfallen.
         slot_utc = slot.astimezone(UTC)
-        if host.last_patch_run and host.last_patch_run >= slot_utc:
+        if last_run and last_run >= slot_utc:
             return _followup_due(host, slot_utc, session)
         return True, f"Termin {slot:%d.%m. %H:%M} faellig"
 
     return False, "kein vergangener Termin gefunden"
+
+
+def patch_due(
+    host: Host,
+    now: Optional[datetime] = None,
+    session: Optional[Session] = None,
+) -> tuple[bool, str]:
+    """Prueft, ob jetzt der eigene Patch-Zeitplan des Hosts faellig ist."""
+    return _schedule_due(
+        host.patch_enabled, host.patch_days, host.patch_time,
+        host.patch_grace_hours, host.last_patch_run, host, session, now,
+    )
+
+
+def area_patch_due(
+    host: Host,
+    area: Area,
+    now: Optional[datetime] = None,
+    session: Optional[Session] = None,
+) -> tuple[bool, str]:
+    """
+    Prueft, ob jetzt der Patch-Zeitplan des Bereichs faellig ist, fuer
+    genau diesen Host.
+
+    Absichtlich pro Host statt einmal pro Bereich: Hosts melden sich
+    zeitversetzt per Heartbeat. Ein einzelnes last_run am Bereich wuerde
+    beim ersten meldenden Host schon auf "erledigt" stehen, und jeder
+    andere Host im selben Bereich bekaeme seinen Auftrag fuer diesen
+    Termin nie - er wurde ja nie gefragt.
+    """
+    return _schedule_due(
+        area.patch_enabled, area.patch_days, area.patch_time,
+        area.patch_grace_hours, host.area_patch_last_run, host, session, now,
+    )
 
 
 # ======================================================================
@@ -1577,6 +1633,32 @@ def agent_heartbeat(
             ))
             host.last_patch_run = utcnow()
             session.add(host)
+
+    # Zeitplan des Bereichs pruefen, unabhaengig vom eigenen Zeitplan oben -
+    # beide koennen nebeneinander laufen, das wird beim Speichern des
+    # Bereichs nur angezeigt, nicht verhindert. patch_job_open() sorgt
+    # dafuer, dass nie zwei Patch-Auftraege gleichzeitig fuer denselben
+    # Host entstehen: trifft der Bereichs-Termin auf einen schon laufenden
+    # Lauf (gleich welcher Herkunft), wird er uebersprungen und beim
+    # naechsten Termin neu geprueft - kein doppeltes Patchen, aber auch
+    # keine Sonderbehandlung noetig.
+    if host.area_id and not payload.reboot_pending:
+        area = session.get(Area, host.area_id)
+        if area:
+            area_due, area_reason = area_patch_due(host, area, session=session)
+            if area_due and not patch_job_open():
+                session.add(Job(
+                    host_id=host.id,
+                    job_type=JobType.patch,
+                    params={
+                        "scheduled": True,
+                        "source_area_id": area.id,
+                        "reboot_if_needed": area.patch_auto_reboot,
+                        "downtime_minutes": area.downtime_minutes,
+                    },
+                ))
+                host.area_patch_last_run = utcnow()
+                session.add(host)
 
     now = utcnow()
 
@@ -1830,6 +1912,18 @@ async def agent_pre_reboot(
     if not job or job.host_id != host.id:
         raise HTTPException(404, "Job nicht gefunden")
 
+    # Kam der Patch-Lauf aus dem Zeitplan eines Bereichs, gilt fuer die
+    # Downtime dessen Checkmk-Verknuepfung statt der des Hosts - deshalb
+    # hat der Bereich seine eigene. Area und Host tragen dieselben
+    # Feldnamen (checkmk_hosts, checkmk_downtime_all), has_downtime_target()
+    # und downtime_targets() lesen nur diese, unabhaengig vom Typ.
+    dt_source = host
+    area_id = job.params.get("source_area_id")
+    if area_id:
+        area = session.get(Area, area_id)
+        if area:
+            dt_source = area
+
     def deny(reason: str):
         job.log = (job.log or "") + f"\nNeustart nicht freigegeben: {reason}"
         session.add(job)
@@ -1856,7 +1950,7 @@ async def agent_pre_reboot(
 
     minutes = int(job.params.get("downtime_minutes", host.downtime_minutes))
 
-    if not has_downtime_target(host):
+    if not has_downtime_target(dt_source):
         if not job.params.get("allow_without_downtime", False):
             return deny("Keine Checkmk-Hosts verknuepft - Neustart unterbunden")
         job.log = (job.log or "") + "\nNeustart ohne Downtime (ausdruecklich erlaubt)"
@@ -1876,7 +1970,7 @@ async def agent_pre_reboot(
     # es wird nicht neu gestartet. Ohne diesen Zweig endet der Aufruf in
     # einem 500, und der Agent bekaeme gar keine Antwort.
     try:
-        targets = await downtime_targets(host, cmk)
+        targets = await downtime_targets(dt_source, cmk)
     except CheckmkError as exc:
         if not job.params.get("allow_without_downtime", False):
             return deny(f"Checkmk-Hosts nicht abrufbar - Neustart unterbunden: {exc}")

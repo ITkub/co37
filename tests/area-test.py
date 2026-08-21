@@ -13,6 +13,13 @@ nicht die Oberflaeche:
     enthaltener Host schon einen eigenen hat - nicht blockierend, nur ein
     Hinweis, dass sich beide in die Quere kommen koennen
 
+Am Ende, ueber den echten Heartbeat statt nur direkt gegen area_patch_due():
+  - Jeder Host in einem faelligen Bereich bekommt seinen eigenen Auftrag -
+    nicht nur der zuerst meldende
+  - Faellt der eigene Zeitplan eines Hosts UND der seines Bereichs auf
+    denselben Heartbeat, entsteht trotzdem nur ein Auftrag
+    (patch_job_open() als gemeinsame Bremse, keine Sonderbehandlung)
+
 Braucht ein laufendes Backend mit eigener Testdatenbank.
 
     python3 tests/area-test.py
@@ -21,6 +28,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
 ADMIN_KEY = os.getenv("CO37_TEST_KEY", "t")
@@ -65,6 +73,32 @@ def enroll_host(hostname):
     hid = next(h["id"] for h in hosts if h["hostname"] == hostname)
     call(f"/api/v1/hosts/{hid}/approve", {}, hdr=ADM)
     return hid
+
+
+def enroll_token(hostname):
+    """Wie enroll_host(), liefert zusaetzlich den agent_token fuer den
+    Heartbeat - enroll_host() verwirft ihn, den brauchen die Tests unten."""
+    code, res = call("/api/v1/agent/enroll", {
+        "hostname": hostname, "os_type": "linux",
+        "os_version": "Debian 13", "agent_version": "0.35.4",
+    })
+    check(f"Testhost {hostname} angemeldet", code == 200, code)
+    token = res.get("agent_token")
+    hosts = call("/api/v1/hosts", hdr=ADM)[1]
+    hid = next(h["id"] for h in hosts if h["hostname"] == hostname)
+    call(f"/api/v1/hosts/{hid}/approve", {}, hdr=ADM)
+    return hid, token
+
+
+def heartbeat(token, hostname="TEST"):
+    return call("/api/v1/agent/heartbeat", {
+        "hostname": hostname, "os_type": "linux", "os_version": "Debian 13",
+        "agent_version": "0.35.4",
+    }, hdr={"X-Agent-Token": token})
+
+
+def jobs_for(hid):
+    return call(f"/api/v1/jobs?host_id={hid}", hdr=ADM)[1]
 
 
 # --------------------------------------------------------- Anlegen, Lesen
@@ -168,6 +202,65 @@ check("Umbenennen auf Leerraum abgewiesen", code == 400, code)
 
 code, res = call("/api/v1/areas/999999", {"name": "x"}, method="PATCH", hdr=ADM)
 check("Bearbeiten eines unbekannten Bereichs meldet 404", code == 404, code)
+
+# --------------------------------------- Zeitplan des Bereichs im Heartbeat
+# Ab hier ueber die echte Route /api/v1/agent/heartbeat statt nur gegen
+# area_patch_due() direkt (das deckt schon tests/area-schedule-test.py ab).
+# Hier geht es um das Zusammenspiel im Heartbeat selbst: entsteht wirklich
+# fuer jeden Host im Bereich ein eigener Auftrag, und blockiert
+# patch_job_open() zuverlaessig den doppelten Auftrag, wenn eigener und
+# Bereichs-Zeitplan gleichzeitig faellig sind.
+DAY_KEYS = ["MO", "DI", "MI", "DO", "FR", "SA", "SO"]
+slot = datetime.now() - timedelta(minutes=5)
+faelliger_tag = [DAY_KEYS[slot.weekday()]]
+faellige_zeit = f"{slot.hour:02d}:{slot.minute:02d}"
+
+code, res = call("/api/v1/areas", {"name": "Heartbeat-Bereich"}, hdr=ADM)
+check("Bereich fuer den Heartbeat-Test angelegt", code == 200, (code, res))
+area_c = res["id"]
+code, res = call(f"/api/v1/areas/{area_c}", {
+    "patch_enabled": True, "patch_days": faelliger_tag, "patch_time": faellige_zeit,
+}, method="PATCH", hdr=ADM)
+check("Bereichs-Zeitplan gesetzt, faellig seit 5 Minuten", code == 200, (code, res))
+
+h3, tok3 = enroll_token("AREA-HB-01")
+h4, tok4 = enroll_token("AREA-HB-02")
+call(f"/api/v1/hosts/{h3}/area", {"area_id": area_c}, hdr=ADM)
+call(f"/api/v1/hosts/{h4}/area", {"area_id": area_c}, hdr=ADM)
+
+code, res = heartbeat(tok3, "AREA-HB-01")
+check("Heartbeat des ersten Hosts im faelligen Bereich ok", code == 200, (code, res))
+j3 = jobs_for(h3)
+check("erster Host bekommt genau einen Auftrag", len(j3) == 1, j3)
+check("Auftrag traegt die Herkunft des Bereichs",
+      len(j3) == 1 and j3[0]["params"].get("source_area_id") == area_c,
+      j3[0]["params"] if j3 else None)
+
+code, res = heartbeat(tok4, "AREA-HB-02")
+check("Heartbeat des zweiten Hosts im selben Bereich ok", code == 200, (code, res))
+j4 = jobs_for(h4)
+check("zweiter Host bekommt seinen EIGENEN Auftrag - nicht vom ersten "
+      "'verbraucht'", len(j4) == 1, j4)
+check("auch dessen Auftrag traegt die Herkunft des Bereichs",
+      len(j4) == 1 and j4[0]["params"].get("source_area_id") == area_c,
+      j4[0]["params"] if j4 else None)
+
+# --------- Kollision: eigener Zeitplan UND Bereichs-Zeitplan gleichzeitig
+# faellig - patch_job_open() muss den zweiten verhindern, ohne dass hier
+# irgendeine Sonderbehandlung noetig war.
+h5, tok5 = enroll_token("AREA-HB-03")
+call(f"/api/v1/hosts/{h5}/area", {"area_id": area_c}, hdr=ADM)
+code, res = call(f"/api/v1/hosts/{h5}", {
+    "patch_enabled": True, "patch_days": faelliger_tag, "patch_time": faellige_zeit,
+}, method="PATCH", hdr=ADM)
+check("dritter Host hat zusaetzlich einen eigenen, ebenfalls faelligen "
+      "Zeitplan", code == 200, (code, res))
+
+code, res = heartbeat(tok5, "AREA-HB-03")
+check("Heartbeat mit doppelt faelligem Zeitplan ok", code == 200, (code, res))
+j5 = jobs_for(h5)
+check("trotz zweier gleichzeitig faelliger Zeitplaene nur EIN Auftrag",
+      len(j5) == 1, j5)
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)
