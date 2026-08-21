@@ -99,6 +99,7 @@ REIHEN=(
   "release-sig    $PY tests/release-sig-test.py"
   "keyguard       $PY tests/keyguard-test.py"
   "patchdue        $PY tests/patchdue-test.py"
+  "area-migrate    $PY tests/area-migrate-test.py"
   "login-throttle  $PY tests/login-throttle-test.py"
   "agent-selfheal  $PY tests/agent-selfheal-test.py"
   "reboot-report   $PY tests/reboot-report-test.py"
@@ -109,6 +110,7 @@ REIHEN=(
   "i18n-guard      node tests/i18n-guard-test.js frontend/app.js"
   "proxy-https     $PY tests/proxy-https-test.py"
   "agent-api       $PY tests/agent-api-test.py"
+  "area            $PY tests/area-test.py"
   "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
   "roles           $PY tests/roles-test.py"
 )

@@ -103,6 +103,13 @@ VERBOTEN = [
     ("GET",    "/api/v1/diagnostics", None),
     ("GET",    "/api/v1/watcher", None),
     ("GET",    "/api/v1/schema", None),
+    # Bereiche tragen eine Checkmk-Verknuepfung und einen Update-Zeitplan -
+    # genauso schuetzenswert wie die entsprechenden Host-Felder oben.
+    ("POST",   "/api/v1/areas", {"name": "x"}),
+    ("PATCH",  "/api/v1/areas/1", {"name": "y"}),
+    ("DELETE", "/api/v1/areas/1", None),
+    ("POST",   "/api/v1/areas/order", {"ids": [1]}),
+    ("POST",   "/api/v1/hosts/1/area", {"area_id": None}),
 ]
 for method, path, body in VERBOTEN:
     code, res = call(path, body, method=method, hdr=usr)
@@ -114,6 +121,9 @@ ERLAUBT = [
     ("GET", "/api/v1/jobs", None),
     ("GET", "/api/v1/jobs/active", None),
     ("GET", "/api/v1/me", None),
+    # Nur lesen darf jeder - die gruppierte Ansicht ist reine Anzeige,
+    # bearbeiten bleibt oben in VERBOTEN dem Administrator vorbehalten.
+    ("GET", "/api/v1/areas", None),
     # Die eigene Sprache ist eine Anzeigeeinstellung. Sie einem Benutzer zu
     # verwehren waere schikanoes und truege nichts zur Sicherheit bei.
     ("POST", "/api/v1/me/language", {"language": "de"}),

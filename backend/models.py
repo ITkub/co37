@@ -138,6 +138,47 @@ class Host(SQLModel, table=True):
     # Neue Hosts werden hinten angehaengt.
     sort_order: int = Field(default=0, index=True)
 
+    # Bereich, in dem der Host in der Uebersicht steht. None heisst "ohne
+    # Bereich" - genau wie bisher, ganz oben in der flachen Liste.
+    area_id: Optional[int] = Field(default=None, foreign_key="area.id", index=True)
+
+    # Eigene Merkstelle fuer den Zeitplan des Bereichs, getrennt von
+    # last_patch_run. Ein einzelnes Feld am Bereich wuerde nicht reichen:
+    # Hosts melden sich zeitversetzt per Heartbeat, und der zuerst meldende
+    # Host wuerde den Termin fuer alle anderen im selben Bereich als
+    # erledigt markieren, bevor sie ueberhaupt gefragt wurden.
+    area_patch_last_run: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
+
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+
+
+class Area(SQLModel, table=True):
+    """
+    Gruppiert Hosts in der Uebersicht. Rein optional - ohne Bereiche
+    verhaelt sich CO-37 genau wie bisher.
+
+    Traegt dieselben Felder wie ein Host fuer Checkmk-Verknuepfung und
+    Update-Zeitplan, mit derselben Bedeutung. Der Zeitplan hier laeuft
+    unabhaengig neben einem etwaigen eigenen Zeitplan der enthaltenen
+    Hosts her - beide koennen sich ueberschneiden, das wird beim Speichern
+    nur angezeigt, nicht verhindert.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+
+    # Eigene Reihenfolge der Bereiche, getrennt von Host.sort_order.
+    sort_order: int = Field(default=0, index=True)
+
+    checkmk_hosts: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    checkmk_downtime_all: bool = Field(default=False)
+    downtime_minutes: int = Field(default=30)
+
+    patch_enabled: bool = Field(default=False)
+    patch_days: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    patch_time: Optional[str] = None
+    patch_auto_reboot: bool = Field(default=False)
+    patch_grace_hours: int = Field(default=4)
+
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
 
 

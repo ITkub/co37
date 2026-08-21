@@ -41,8 +41,9 @@ from utctime import (
     UTC, as_local, ensure_utc, from_timestamp, local_wall_to_utc, localnow, utcnow,
 )
 from models import (
-    ApprovalState, AuditEntry, Host, HostStatus, InstallToken, Job, JobState,
-    JobType, LoginSession, OSType, Role, Setting, UpdatePackage, User,
+    Area, ApprovalState, AuditEntry, Host, HostStatus, InstallToken, Job,
+    JobState, JobType, LoginSession, OSType, Role, Setting, UpdatePackage,
+    User,
 )
 
 DB_URL = os.getenv("CO37_DB", "sqlite:///./co37.db")
@@ -940,6 +941,51 @@ class HostOrder(BaseModel):
     ids: list[int]
 
 
+class HostArea(BaseModel):
+    area_id: Optional[int] = None
+
+
+class AreaCreate(BaseModel):
+    name: str
+
+
+class AreaPatch(BaseModel):
+    name: Optional[str] = None
+    checkmk_hosts: Optional[list[str]] = None
+    checkmk_downtime_all: Optional[bool] = None
+    downtime_minutes: Optional[int] = None
+    patch_enabled: Optional[bool] = None
+    patch_days: Optional[list[str]] = None
+    patch_time: Optional[str] = None
+    patch_auto_reboot: Optional[bool] = None
+    patch_grace_hours: Optional[int] = None
+
+
+class AreaOrder(BaseModel):
+    ids: list[int]
+
+
+class AreaRead(BaseModel):
+    id: int
+    name: str
+    sort_order: int = 0
+    checkmk_hosts: list[str] = []
+    checkmk_downtime_all: bool = False
+    downtime_minutes: int = 30
+    patch_enabled: bool = False
+    patch_days: list[str] = []
+    patch_time: Optional[str] = None
+    patch_auto_reboot: bool = False
+    patch_grace_hours: int = 4
+    host_count: int = 0
+    # Hostnamen, die beim Speichern schon einen eigenen Zeitplan hatten -
+    # nicht blockierend, nur ein Hinweis, dass sich beide Zeitplaene fuer
+    # denselben Host in die Quere kommen koennen.
+    patch_conflicts: list[str] = []
+
+    model_config = {"from_attributes": True}
+
+
 class HostRead(BaseModel):
     """Ausgabeschema. Enthaelt bewusst kein Token."""
     id: int
@@ -975,6 +1021,7 @@ class HostRead(BaseModel):
     next_patch_run: Optional[UtcDT] = None
     patch_followup_left: int = 0
     sort_order: int = 0
+    area_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -2434,6 +2481,150 @@ def reject_host(host_id: int, request: Request,
     session.commit()
     session.refresh(host)
     return host
+
+
+def _area_conflicts(session: Session, area_id: int) -> list[str]:
+    """
+    Hostnamen im Bereich, die schon einen eigenen Update-Zeitplan haben.
+
+    Nur ein Hinweis fuer die Anzeige beim Speichern - der Bereichs-Zeitplan
+    laeuft unabhaengig neben einem etwaigen eigenen Zeitplan des Hosts her,
+    beide koennen sich also ueberschneiden. Verhindert wird das bewusst
+    nicht, nur sichtbar gemacht.
+    """
+    hosts = session.exec(
+        select(Host).where(Host.area_id == area_id, Host.patch_enabled == True)  # noqa: E712
+    ).all()
+    return [h.display_name or h.hostname for h in hosts]
+
+
+@app.get("/api/v1/areas", response_model=list[AreaRead],
+         dependencies=[Depends(require_login)])
+def list_areas(session: Session = Depends(get_session)):
+    areas = session.exec(select(Area).order_by(Area.sort_order, Area.name)).all()
+    counts: dict[int, int] = {}
+    for area_id in session.exec(select(Host.area_id)).all():
+        if area_id is not None:
+            counts[area_id] = counts.get(area_id, 0) + 1
+    out = []
+    for a in areas:
+        data = AreaRead.model_validate(a)
+        data.host_count = counts.get(a.id, 0)
+        out.append(data)
+    return out
+
+
+@app.post("/api/v1/areas", response_model=AreaRead)
+def create_area(payload: AreaCreate, request: Request,
+                who: Principal = Depends(require_admin),
+                session: Session = Depends(get_session)):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Name fehlt")
+    # Neuer Bereich ans Ende, wie ein neu angemeldeter Host.
+    last = session.exec(
+        select(Area.sort_order).order_by(Area.sort_order.desc()).limit(1)
+    ).first()
+    area = Area(name=name, sort_order=(last or 0) + 1)
+    session.add(area)
+    audit(session, who.name, "area.create", name, request)
+    session.commit()
+    session.refresh(area)
+    data = AreaRead.model_validate(area)
+    data.host_count = 0
+    return data
+
+
+@app.patch("/api/v1/areas/{area_id}", response_model=AreaRead)
+def update_area(area_id: int, payload: AreaPatch, request: Request,
+                who: Principal = Depends(require_admin),
+                session: Session = Depends(get_session)):
+    area = session.get(Area, area_id)
+    if not area:
+        raise HTTPException(404, "Bereich nicht gefunden")
+    if payload.name is not None and not payload.name.strip():
+        raise HTTPException(400, "Name fehlt")
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(area, field, value.strip() if field == "name" else value)
+    if area.downtime_minutes < 1:
+        area.downtime_minutes = 30
+    if area.patch_grace_hours is not None and area.patch_grace_hours < 1:
+        area.patch_grace_hours = 4
+    session.add(area)
+    audit(session, who.name, "area.update", area.name, request)
+    session.commit()
+    session.refresh(area)
+
+    data = AreaRead.model_validate(area)
+    data.host_count = len(session.exec(
+        select(Host.id).where(Host.area_id == area.id)
+    ).all())
+    # Nur pruefen, wenn der Bereich selbst gerade einen Zeitplan hat -
+    # sonst gibt es nichts, das sich mit dem Host-eigenen ueberschneiden
+    # koennte.
+    if area.patch_enabled:
+        data.patch_conflicts = _area_conflicts(session, area.id)
+    return data
+
+
+@app.delete("/api/v1/areas/{area_id}")
+def delete_area(area_id: int, request: Request,
+                who: Principal = Depends(require_admin),
+                session: Session = Depends(get_session)):
+    area = session.get(Area, area_id)
+    if not area:
+        raise HTTPException(404, "Bereich nicht gefunden")
+    in_use = session.exec(
+        select(Host.id).where(Host.area_id == area_id)
+    ).first()
+    if in_use:
+        raise HTTPException(409, "Bereich enthaelt noch Hosts - erst herausziehen")
+    name = area.name
+    session.delete(area)
+    audit(session, who.name, "area.delete", name, request)
+    session.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/areas/order", dependencies=[Depends(require_admin)])
+def set_area_order(payload: AreaOrder, session: Session = Depends(get_session)):
+    known = {a.id: a for a in session.exec(select(Area)).all()}
+    pos = 0
+    for area_id in payload.ids:
+        area = known.pop(area_id, None)
+        if not area:
+            continue
+        pos += 1
+        area.sort_order = pos
+        session.add(area)
+    for area in sorted(known.values(), key=lambda a: (a.sort_order, a.name)):
+        pos += 1
+        area.sort_order = pos
+        session.add(area)
+    session.commit()
+    return {"ok": True, "count": pos}
+
+
+@app.post("/api/v1/hosts/{host_id}/area", response_model=HostRead)
+def set_host_area(host_id: int, payload: HostArea, request: Request,
+                  who: Principal = Depends(require_admin),
+                  session: Session = Depends(get_session)):
+    host = session.get(Host, host_id)
+    if not host:
+        raise HTTPException(404, "Host nicht gefunden")
+    if payload.area_id is not None and not session.get(Area, payload.area_id):
+        raise HTTPException(404, "Bereich nicht gefunden")
+    host.area_id = payload.area_id
+    session.add(host)
+    audit(session, who.name, "host.area",
+          f"{host.hostname} -> {payload.area_id if payload.area_id else 'ohne Bereich'}",
+          request)
+    session.commit()
+    session.refresh(host)
+    data = HostRead.model_validate(host)
+    data.next_patch_run = next_patch_run(host)
+    return data
 
 
 @app.get("/api/v1/hosts/{host_id}/updates", response_model=list[UpdateRead],

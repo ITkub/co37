@@ -47,7 +47,14 @@ logger = logging.getLogger(__name__)
 #    Umschalten auf HTTPS-Zwang.
 # 16: user.language - Sprache der Oberflaeche je Konto. Ohne Vorgabewert:
 #    NULL heisst "nie gewaehlt", dann gilt die Vorgabe der Installation.
-SCHEMA_VERSION = 16
+# 17: Tabelle area - Bereiche zum Gruppieren von Hosts in der Uebersicht,
+#    mit eigener Checkmk-Verknuepfung und eigenem Update-Zeitplan. Legt
+#    create_all() an, hier steht nur die Nummer. host.area_id verweist auf
+#    den Bereich (None = ohne Bereich, wie bisher). host.area_patch_last_run
+#    haelt den Bereichs-Zeitplan pro Host fest, getrennt von last_patch_run -
+#    sonst wuerde der zuerst meldende Host im Bereich den Termin fuer alle
+#    anderen als erledigt markieren.
+SCHEMA_VERSION = 17
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -73,6 +80,8 @@ EXPECTED_COLUMNS = {
         "patch_auto_reboot": "BOOLEAN DEFAULT 0",
         "patch_grace_hours": "INTEGER DEFAULT 4",
         "last_patch_run": "DATETIME",
+        "area_id": "INTEGER",
+        "area_patch_last_run": "DATETIME",
     },
     "job": {
         "delivered": "INTEGER DEFAULT 0",
