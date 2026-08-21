@@ -209,3 +209,29 @@ Update **ohne Signatur** durch. Ohne Meldung, ohne Spur.
 genuegte ein untergeschobenes Paket mit eigenem Schluessel, und ab dann
 waere jedes weitere Paket desselben Absenders gueltig. Ein Wechsel bleibt
 moeglich, aber von Hand und bewusst.
+
+## Absicherung der Textbausteine (i18n-guard)
+
+```
+node tests/i18n-guard-test.js frontend/app.js
+```
+
+Braucht kein Backend. Anlass: nach der Uebersetzung von `app.js` in 0.35.4
+blieb eine Luecke offen — nichts hinderte `toast(` oder `confirm(` daran,
+wieder festen Text statt `t(...)` zu bekommen. Alle 464 damaligen Pruefungen
+blieben gruen, als das gezielt nachgestellt wurde.
+
+Ein Muster-Abgleich reicht dafuer nicht, weil der Text oft nicht direkt im
+Aufruf steht, sondern ueber eine Variable hineinwaechst (`msg += "..."`,
+danach `confirm(msg)`). Der Test parst `app.js` deshalb mit einem echten
+Parser (acorn, vendored in `tests/vendor/`, kein npm-Install noetig) und
+verfolgt jeden `toast()`/`confirm()`-Aufruf bis zu seinen Argumenten und
+jeden Bezeichner darin bis zu seinen Zuweisungen in der umschliessenden
+Funktion. `t(...)`-Aufrufe werden uebersprungen, ihr Inhalt sind Schluessel
+und Platzhalternamen. Ein Fund zaehlt nur, wenn die Zeichenkette einen
+Buchstaben enthaelt — Trennzeichen wie `"\n\n"` oder Statuswerte wie
+`r.mode === "staged"` sind kein uebersetzungspflichtiger Text.
+
+Grenze, bewusst nicht geschlossen: Text, der ueber ein Funktions-Argument,
+einen Rueckgabewert oder eine andere Datei hereinkommt, sieht dieser Test
+nicht. Das waere eine vollstaendige Datenflussanalyse.
