@@ -553,6 +553,57 @@ dialog#dlgSettings .hint{max-width:78ch}
   </div>
 </dialog>
 
+<!-- ============ Bereich bearbeiten ============ -->
+<!-- Absichtlich ein einziges, durchlaufendes Formular statt eigener Reiter
+     wie beim Host-Dialog - drei Abschnitte sind ueberschaubar genug, und
+     ein Bereich hat weder Neustart-Planung noch Agent-Token noch eine
+     eigene Downtime-Seite fuer sich. -->
+<dialog id="dlgArea">
+  <div class="dlg-head"><span id="aTitle" data-i18n="area.title">Area</span><button data-close data-i18n="common.close">Close</button></div>
+  <div class="dlg-body">
+    <label data-i18n="area.name">Name<input id="aName"></label>
+
+    <div class="section">
+      <div class="section-title" data-i18n="area.schedule_title">Collective update schedule</div>
+      <div class="hint" data-i18n="area.schedule_hint">Evaluated independently from any schedule a host in this area has of its own — saving does not touch those, it only warns if they might collide.</div>
+      <label class="check" data-i18n="plan.update_enabled"><input type="checkbox" id="aUpEnabled"> Install updates on a schedule</label>
+      <div class="section">
+        <div class="section-title" data-i18n="plan.weekdays">Weekdays</div>
+        <div class="picked" id="aUpDays" style="gap:6px"></div>
+      </div>
+      <div class="row">
+        <label style="max-width:130px" data-i18n="plan.time">Time<input id="aUpTime" type="time" value="03:00"></label>
+        <label style="max-width:190px" data-i18n="plan.grace_hours">Grace period (hours)<input id="aUpGrace" type="number" min="1" max="24" value="4"></label>
+      </div>
+      <label class="check" data-i18n="plan.auto_reboot"><input type="checkbox" id="aUpReboot"> Restart automatically when required</label>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="area.cmk_title">Checkmk link for the collective run</div>
+      <div class="hint" data-i18n="host.cmk_hint">More than one host can be selected. When this host goes down, other objects are often affected too — cluster resources, services, dependent applications. All selected ones get the same downtime.</div>
+      <input id="aCmkSearch" placeholder="Search Checkmk hosts" data-i18n-placeholder="host.cmk_search">
+      <div class="picker" id="aCmkPicker"></div>
+      <div class="picked" id="aCmkPicked"></div>
+      <label style="max-width:240px" data-i18n="host.downtime_minutes">Downtime for a restart (minutes)<input id="aDowntime" type="number" min="1" max="1440" value="30"></label>
+      <label class="check"><input type="checkbox" id="aDtAll"> <span data-i18n="host.downtime_all">Set downtime on all Checkmk hosts</span></label>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="area.manual_title">Manual, right now</div>
+      <div class="hint" data-i18n="area.manual_hint">Runs for every approved host currently in this area — same as the buttons in the overview, just for all of them at once.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="aScan" data-i18n="act.scan">Check</button>
+        <button id="aPatch" data-i18n="act.patch">Patch</button>
+      </div>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <button class="danger" id="aDelete" data-i18n="area.remove">Remove area</button>
+    <button data-close data-i18n="common.cancel">Cancel</button>
+    <button class="primary" id="aSave" data-i18n="common.save">Save</button>
+  </div>
+</dialog>
+
 <!-- ============ Einstellungen ============ -->
 <dialog id="dlgSettings">
   <div class="dlg-head" data-i18n="settings.title">Settings<button data-close data-i18n="common.close2">Close</button></div>
@@ -568,6 +619,7 @@ dialog#dlgSettings .hint{max-width:78ch}
     <button class="admin-only" data-tab="tabCmk" data-i18n="settings.tab.checkmk">Checkmk</button>
     <button class="admin-only" data-tab="tabUpd" data-i18n="settings.tab.update">Update</button>
     <button class="admin-only" data-tab="tabProxy" data-i18n="settings.tab.access">Access</button>
+    <button class="admin-only" data-tab="tabAreas" data-i18n="settings.tab.areas">Areas</button>
     <button data-tab="tabLizenz" data-i18n="settings.tab.license">License</button>
     <button data-tab="tabAccount" data-i18n="settings.tab.account">Account</button>
     <button data-tab="tabUsers" class="admin-only" data-i18n="settings.tab.users">Users</button>
@@ -705,6 +757,15 @@ dialog#dlgSettings .hint{max-width:78ch}
         <label class="check" data-i18n="settings.proxy.https_only"><input type="checkbox" id="pxHttps"> Restrict access to HTTPS</label>
         <div id="pxState" class="hint"></div>
       </div>
+    </div>
+
+    <div class="pane" id="tabAreas">
+      <div class="hint" data-i18n="settings.areas.hint">Entirely optional: without an area, a host behaves exactly as it always did. An area groups hosts in the overview and, once configured, can additionally patch and check for updates on all of them together — its own schedule, separate from any a host has of its own.</div>
+      <div class="row">
+        <label data-i18n="settings.areas.new_name">New area<input id="naName" placeholder="e.g. Office" data-i18n-placeholder="settings.areas.name_example"></label>
+        <button class="primary" id="naAdd" style="align-self:flex-end" data-i18n="settings.areas.add">Add</button>
+      </div>
+      <div id="areaList"></div>
     </div>
 
     <div class="pane" id="tabUpd">

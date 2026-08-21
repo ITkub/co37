@@ -175,7 +175,9 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
   + "loadRollout, loadUsers, loadAudit, loadAccount, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
-  + "render, setAreas: (a) => { AREAS = a; }, applyDrop };";
+  + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
+  + "loadAreasTab, editArea, moveArea, scanArea, patchArea, "
+  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS };";
 const wrapped = new Function(script + EXPORTS);
 let api;
 try {
@@ -904,6 +906,125 @@ global.setTimeout = origSetTimeout;
   check("Token ist nicht leer",
         !/X-Install-Token:\s+["']?\s*(http|$)/.test(cmd), cmd.slice(0, 70));
   check("Kopieren jetzt moeglich", el("copyLinux").disabled === false);
+
+  console.log("\n=== Bereiche in den Einstellungen ===");
+  {
+    // Eigener HTTP-Helfer statt api.apiCall(): der laeuft ueber Cookie und
+    // Anmeldesitzung, hier reicht wie im Rest der Suite der X-API-Key.
+    const adminCall = async (path, opts = {}) => {
+      const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+        headers: {"X-API-Key": KEY, "Content-Type": "application/json"},
+        method: opts.method || (opts.body ? "POST" : "GET"),
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      });
+      const text = await r.text();
+      let json = {};
+      try { json = text ? JSON.parse(text) : {}; } catch(e){}
+      return [r.status, json];
+    };
+    // Eigener Suffix je Lauf: die Testdatenbank traegt zu diesem Zeitpunkt
+    // schon Bereiche aus der eigenstaendigen 'area'-Reihe. Diese hier
+    // muessen sich nur eindeutig finden lassen, nicht allein sein.
+    const suffix = Date.now();
+
+    const [c1, areaA] = await adminCall("/api/v1/areas", { body: { name: `ST-Buero-${suffix}` } });
+    const [c2, areaB] = await adminCall("/api/v1/areas", { body: { name: `ST-Lager-${suffix}` } });
+    check("zwei Testbereiche angelegt", c1 === 200 && c2 === 200, [c1, c2]);
+
+    await api.loadAreasTab();
+    const list = el("areaList").innerHTML;
+    check("beide im Reiter sichtbar",
+          list.includes(`ST-Buero-${suffix}`) && list.includes(`ST-Lager-${suffix}`));
+
+    const areasNachLaden = api.getAreas();
+    const idxA0 = areasNachLaden.findIndex(a => a.id === areaA.id);
+    const idxB0 = areasNachLaden.findIndex(a => a.id === areaB.id);
+    check("frisch angelegt: B steht direkt hinter A", idxB0 === idxA0 + 1, { idxA0, idxB0 });
+
+    const ersteId = areasNachLaden[0].id, letzteId = areasNachLaden[areasNachLaden.length-1].id;
+    check("Auf-Knopf der ersten Zeile gesperrt",
+          new RegExp(`data-act="areaup" data-id="${ersteId}"[^>]*disabled`).test(list));
+    check("Ab-Knopf der letzten Zeile gesperrt",
+          new RegExp(`data-act="areadown" data-id="${letzteId}"[^>]*disabled`).test(list));
+
+    // 'Nach oben' fuer B - vertauscht A und B, auch serverseitig, nicht
+    // nur in der lokalen Anzeige.
+    await api.moveArea(areaB.id, -1);
+    const [, geladenNachVerschieben] = await adminCall("/api/v1/areas");
+    const idxA1 = geladenNachVerschieben.findIndex(a => a.id === areaA.id);
+    const idxB1 = geladenNachVerschieben.findIndex(a => a.id === areaB.id);
+    check("nach 'nach oben' stehen A und B vertauscht - auch auf dem Server",
+          idxB1 === idxA1 - 1, { idxA1, idxB1 });
+
+    // Bearbeiten-Dialog: Vorbelegung aus dem echten Bereich.
+    await adminCall(`/api/v1/areas/${areaA.id}`, { method: "PATCH", body: {
+      patch_enabled: true, patch_days: ["MO","MI"], patch_time: "04:30",
+      patch_grace_hours: 6, downtime_minutes: 45,
+    }});
+    await api.loadAreasTab();
+    api.editArea(areaA.id);
+    check("Name vorbelegt", el("aName").value === `ST-Buero-${suffix}`, el("aName").value);
+    check("editArea() merkt sich die bearbeitete Id", api.getEditAreaId() === areaA.id);
+    check("Zeitplan-Haken vorbelegt", el("aUpEnabled").checked === true);
+    check("Uhrzeit vorbelegt", el("aUpTime").value === "04:30", el("aUpTime").value);
+    check("Kulanz vorbelegt", Number(el("aUpGrace").value) === 6, el("aUpGrace").value);
+    check("Downtime vorbelegt", Number(el("aDowntime").value) === 45, el("aDowntime").value);
+    check("Wochentage gezeichnet (mindestens ein hervorgehobener Tag)",
+          el("aUpDays").innerHTML.includes("var(--accent)"));
+
+    // Manuell pruefen/updaten - ein echter Host im Bereich, ueber die
+    // Agent-API auf offene Updates gebracht wie ein wirklicher Agent es
+    // taete, nicht am Datensatz vorbei.
+    const [ce, enrollRes] = await adminCall("/api/v1/agent/enroll", { body: {
+      hostname: `ST-AREA-HOST-${suffix}`, os_type: "linux",
+      os_version: "Debian 13", agent_version: "0.35.4",
+    }});
+    check("Testhost fuer den Reiter angemeldet", ce === 200, ce);
+    const token = enrollRes.agent_token;
+    const [, hostsNow] = await adminCall("/api/v1/hosts");
+    const hid = hostsNow.find(h => h.hostname === `ST-AREA-HOST-${suffix}`).id;
+    await adminCall(`/api/v1/hosts/${hid}/approve`, { body: {} });
+    await adminCall(`/api/v1/hosts/${hid}/area`, { body: { area_id: areaA.id } });
+
+    const holeHosts = async () => {
+      const [, hs] = await adminCall("/api/v1/hosts");
+      api.setHosts(hs);
+    };
+    await holeHosts();
+
+    // Noch ohne offene Updates: der Updaten-Knopf darf nichts anlegen.
+    const jobsVorher = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    await api.patchArea(areaA.id);
+    const jobsOhneUpdates = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    check("Updaten ohne offene Updates legt keinen Auftrag an",
+          jobsOhneUpdates.length === jobsVorher.length,
+          { vorher: jobsVorher.length, nachher: jobsOhneUpdates.length });
+
+    // Jetzt einen offenen Update melden - wie ein Agent nach einem Scan.
+    await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/scan-result`, {
+      method: "POST",
+      headers: {"X-Agent-Token": token, "Content-Type": "application/json"},
+      body: JSON.stringify({ updates: [{id: "pkg1", title: "Testpaket"}] }),
+    });
+    await holeHosts();
+
+    await api.scanArea(areaA.id);
+    const jobsNachPruefen = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    check("Pruefen legt einen scan-Auftrag fuer den Host im Bereich an",
+          jobsNachPruefen.some(j => j.job_type === "scan"),
+          jobsNachPruefen.map(j => j.job_type));
+
+    await api.patchArea(areaA.id);
+    const jobsNachUpdaten = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    const patchAuftrag = jobsNachUpdaten.find(j => j.job_type === "patch");
+    check("Updaten legt jetzt einen patch-Auftrag an", !!patchAuftrag,
+          jobsNachUpdaten.map(j => j.job_type));
+    check("... mit der Herkunft des Bereichs in den Parametern - fuer die "
+          + "Downtime bei einem spaeteren Neustart (Schritt 2)",
+          patchAuftrag && patchAuftrag.params
+          && patchAuftrag.params.source_area_id === areaA.id,
+          patchAuftrag && patchAuftrag.params);
+  }
 
   console.log(`\nFehler: ${fails}`);
   process.exit(fails ? 1 : 0);

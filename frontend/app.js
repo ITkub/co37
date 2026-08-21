@@ -719,6 +719,11 @@ const ACTIONS = {
   day:        (d) => toggleDay(d.day),
   resetpw:    (d) => resetPw(+d.id, d.username),
   deluser:    (d) => delUser(+d.id, d.username),
+  areaedit:   (d) => editArea(+d.id),
+  areaup:     (d) => moveArea(+d.id, -1),
+  areadown:   (d) => moveArea(+d.id, 1),
+  areapick:   (d) => toggleAreaPick(d.name),
+  areaday:    (d) => toggleAreaDay(d.day),
 };
 
 document.addEventListener("click", (e) => {
@@ -1338,7 +1343,7 @@ document.getElementById("btnSettings").onclick = () => {
   // aufrufen wuerde nur 403 erzeugen und den Dialog mit Fehlern fuellen.
   if (isAdmin){
     loadAgentsTab(); loadUpdate(); loadCmkForm(); loadRollout(); loadBuildStatus();
-    loadUsers(); loadAudit(); loadProxy();
+    loadUsers(); loadAudit(); loadProxy(); loadAreasTab();
   }
 };
 document.getElementById("dlgSettings").addEventListener("close", () => {
@@ -2043,6 +2048,203 @@ async function loadAudit(){
       </div>`).join("")
     : `<span style="color:var(--muted-2)">${t("settings.audit.none")}</span>`;
 }
+
+/* ---------- Bereiche (Einstellungen) ---------- */
+/*
+ * Eigene Bedienung statt der Hostliste zu erweitern - Anlegen, Reihenfolge
+ * und die eigentliche Konfiguration eines Bereichs gehoeren hierher, nicht
+ * in die Uebersicht, die nur noch zieht und gruppiert (Schritt 3).
+ *
+ * AREAS ist dasselbe globale Feld, das auch render() fuer die Gruppierung
+ * in der Hostliste benutzt - ein Neuladen hier zieht die Hauptliste
+ * automatisch mit nach, ohne eigene Abstimmung zwischen beiden Stellen.
+ *
+ * Reihenfolge per Auf/Ab statt Ziehen wie bei den Hosts: bei der
+ * ueberschaubaren Zahl an Bereichen in einer Einstellungsliste waere ein
+ * zweites Drag-Geruest neben dem der Hostliste unnoetiger Aufwand fuer
+ * denselben Nutzen.
+ */
+async function loadAreasTab(){
+  try { AREAS = await api("GET", "/api/v1/areas"); } catch(e){ return; }
+  renderAreaList();
+}
+
+function renderAreaList(){
+  const box = document.getElementById("areaList");
+  box.innerHTML = AREAS.length
+    ? AREAS.map((a,i) => `
+      <div class="vrow" style="margin-bottom:5px">
+        <span>${esc(a.name)}<br>
+          <span style="color:var(--muted-2)">${t("area.host_count", { anzahl: a.host_count })}</span></span>
+        <span style="display:flex;gap:6px">
+          <button data-act="areaup" data-id="${a.id}" ${i===0?"disabled":""} title="${esc(t("area.move_up"))}">↑</button>
+          <button data-act="areadown" data-id="${a.id}" ${i===AREAS.length-1?"disabled":""} title="${esc(t("area.move_down"))}">↓</button>
+          <button data-act="areaedit" data-id="${a.id}">${t("common.edit")}</button>
+        </span></div>`).join("")
+    : `<span style="color:var(--muted-2)">${t("area.none")}</span>`;
+}
+
+async function moveArea(id, richtung){
+  const idx = AREAS.findIndex(a => a.id === id);
+  if (idx < 0) return;
+  const ziel = idx + richtung;
+  if (ziel < 0 || ziel >= AREAS.length) return;
+  [AREAS[idx], AREAS[ziel]] = [AREAS[ziel], AREAS[idx]];
+  renderAreaList();
+  try {
+    await api("POST", "/api/v1/areas/order", { ids: AREAS.map(a => a.id) });
+  } catch(e){
+    // Wie saveOrder() bei den Hosts: echten Stand zurueckholen statt einer
+    // Anzeige, die es serverseitig so nicht gibt.
+    loadAreasTab();
+  }
+  render();
+}
+
+document.getElementById("naAdd").onclick = async () => {
+  const name = document.getElementById("naName").value.trim();
+  if (!name){ toast(t("msg.need_area_name"), true); return; }
+  try { await api("POST", "/api/v1/areas", { name }); } catch(e){ return; }
+  document.getElementById("naName").value = "";
+  toast(t("msg.created", { name }));
+  await loadAreasTab();
+  render();
+};
+
+/* ---------- Bereich bearbeiten ---------- */
+let EDIT_AREA_ID = null;
+let AREA_PICKED = new Set();
+let AREA_PATCH_DAYS = new Set();
+
+function editArea(id){
+  const a = AREAS.find(x => x.id === id);
+  if (!a) return;
+  EDIT_AREA_ID = id;
+  document.getElementById("aTitle").textContent = a.name;
+  document.getElementById("aName").value = a.name;
+
+  document.getElementById("aUpEnabled").checked = !!a.patch_enabled;
+  AREA_PATCH_DAYS = new Set(a.patch_days || []);
+  document.getElementById("aUpTime").value = a.patch_time || "03:00";
+  document.getElementById("aUpGrace").value = a.patch_grace_hours || 4;
+  document.getElementById("aUpReboot").checked = !!a.patch_auto_reboot;
+  renderAreaDays();
+
+  AREA_PICKED = new Set(a.checkmk_hosts || []);
+  document.getElementById("aCmkSearch").value = "";
+  renderAreaPicker();
+  document.getElementById("aDtAll").checked = !!a.checkmk_downtime_all;
+  document.getElementById("aDowntime").value = a.downtime_minutes || 30;
+
+  document.getElementById("dlgArea").showModal();
+}
+
+function renderAreaPicker(){
+  const q = document.getElementById("aCmkSearch").value.toLowerCase();
+  const list = CMK_HOSTS.filter(c => !q || c.name.toLowerCase().includes(q));
+  const box = document.getElementById("aCmkPicker");
+  box.innerHTML = list.length
+    ? list.slice(0,300).map(c => `<div data-act="areapick" data-name="${esc(c.name)}">
+        <input type="checkbox" ${AREA_PICKED.has(c.name)?"checked":""} data-act="areapick" data-name="${esc(c.name)}">
+        <span>${esc(c.name)}</span></div>`).join("")
+    : `<div style="color:var(--muted-2)">${CMK_HOSTS.length ? t("host.cmk_no_match") : t("host.cmk_none_loaded")}</div>`;
+
+  const extra = [...AREA_PICKED].filter(n => !CMK_HOSTS.some(c => c.name === n));
+  document.getElementById("aCmkPicked").innerHTML = [...AREA_PICKED].length
+    ? [...AREA_PICKED].map(n => `<span>${esc(n)}${extra.includes(n) ? t("host.cmk_unknown_suffix") : ""}</span>`).join("")
+    : `<span style="border-color:var(--rail);color:var(--muted-2)">${t("host.cmk_none_picked")}</span>`;
+}
+function toggleAreaPick(name){
+  AREA_PICKED.has(name) ? AREA_PICKED.delete(name) : AREA_PICKED.add(name);
+  renderAreaPicker();
+}
+document.getElementById("aCmkSearch").oninput = renderAreaPicker;
+
+function renderAreaDays(){
+  document.getElementById("aUpDays").innerHTML = WDAYS.map(([k,l]) =>
+    `<span data-act="areaday" data-day="${k}" style="cursor:pointer;user-select:none;padding:5px 11px;
+      ${AREA_PATCH_DAYS.has(k)
+        ? "border-color:var(--accent);color:var(--accent);background:var(--accent-bg)"
+        : "border-color:var(--rail);color:var(--muted-2)"}">${l}</span>`).join("");
+}
+function toggleAreaDay(k){
+  AREA_PATCH_DAYS.has(k) ? AREA_PATCH_DAYS.delete(k) : AREA_PATCH_DAYS.add(k);
+  renderAreaDays();
+}
+
+document.getElementById("aSave").onclick = async () => {
+  const name = document.getElementById("aName").value.trim();
+  if (!name){ toast(t("msg.need_area_name"), true); return; }
+  if (document.getElementById("aUpEnabled").checked
+      && (!AREA_PATCH_DAYS.size || !document.getElementById("aUpTime").value)){
+    toast(t("msg.need_day_time"), true); return;
+  }
+  let res;
+  try {
+    res = await api("PATCH", `/api/v1/areas/${EDIT_AREA_ID}`, {
+      name,
+      patch_enabled: document.getElementById("aUpEnabled").checked,
+      patch_days: [...AREA_PATCH_DAYS],
+      patch_time: document.getElementById("aUpTime").value || null,
+      patch_grace_hours: parseInt(document.getElementById("aUpGrace").value) || 4,
+      patch_auto_reboot: document.getElementById("aUpReboot").checked,
+      checkmk_hosts: [...AREA_PICKED],
+      checkmk_downtime_all: document.getElementById("aDtAll").checked,
+      downtime_minutes: parseInt(document.getElementById("aDowntime").value) || 30,
+    });
+  } catch(e){ return; }
+  document.getElementById("dlgArea").close();
+  toast(t("msg.saved"));
+  // Nicht blockierend, wie schon beim Speichern in der Route entschieden -
+  // nur ein Hinweis, dass sich der Bereichs-Zeitplan mit dem eines
+  // enthaltenen Hosts in die Quere kommen koennte.
+  if (res.patch_conflicts && res.patch_conflicts.length)
+    toast(t("area.conflict_toast", { hosts: res.patch_conflicts.join(", ") }), true);
+  await loadAreasTab();
+  render();
+};
+
+document.getElementById("aDelete").onclick = async () => {
+  const a = AREAS.find(x => x.id === EDIT_AREA_ID);
+  if (!confirm(t("ask.remove_area", { name: a ? a.name : "" }))) return;
+  try { await api("DELETE", `/api/v1/areas/${EDIT_AREA_ID}`); } catch(e){ return; }
+  document.getElementById("dlgArea").close();
+  toast(t("msg.removed", { name: a ? a.name : "" }));
+  await loadAreasTab();
+  render();
+};
+
+async function scanArea(areaId){
+  const hosts = HOSTS.filter(h => h.area_id === areaId && h.approval_state === "approved");
+  for (const h of hosts){
+    try { await api("POST", `/api/v1/hosts/${h.id}/jobs`, {job_type:"scan", params:{}}); } catch(e){}
+  }
+  toast(t("msg.scan_many", { anzahl: hosts.length }));
+  afterAction();
+}
+
+async function patchArea(areaId){
+  const a = AREAS.find(x => x.id === areaId);
+  const hosts = HOSTS.filter(h => h.area_id === areaId && h.approval_state === "approved"
+                                    && (h.updates_available||0) > 0);
+  if (!hosts.length){ toast(t("area.nothing_to_patch"), true); return; }
+  if (!confirm(t("ask.patch_area", { anzahl: hosts.length, bereich: a ? a.name : "" }))) return;
+  for (const h of hosts){
+    try {
+      // source_area_id genau wie beim automatisch ausgeloesten Auftrag
+      // (Schritt 2) - ein spaeter daraus genehmigter Neustart nutzt dann
+      // die Downtime des Bereichs, nicht die des einzelnen Hosts.
+      await api("POST", `/api/v1/hosts/${h.id}/jobs`, {
+        job_type: "patch", params: { source_area_id: areaId },
+      });
+    } catch(e){}
+  }
+  toast(t("msg.patch_many", { anzahl: hosts.length }));
+  afterAction();
+}
+
+document.getElementById("aScan").onclick = () => scanArea(EDIT_AREA_ID);
+document.getElementById("aPatch").onclick = () => patchArea(EDIT_AREA_ID);
 
 /* ---------- Start ---------- */
 document.getElementById("loginGo").onclick = doLogin;
