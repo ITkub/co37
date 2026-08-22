@@ -176,8 +176,8 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "loadRollout, loadUsers, loadAudit, loadAccount, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
   + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
-  + "loadAreasTab, editArea, moveArea, scanArea, patchArea, "
-  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS };";
+  + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
+  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead };";
 const wrapped = new Function(script + EXPORTS);
 let api;
 try {
@@ -732,15 +732,17 @@ global.setTimeout = origSetTimeout;
     check("Bereichs-Kopf gefunden", posArea >= 0, posArea);
     check("Bereichsname erscheint im Kopf",
           out.slice(posArea, posArea + 200).includes(areaA.name));
-    check("Bereichs-Kopf steht vor seinen Hosts",
+    check("Bereichs-Kopf steht vor seinen eigenen Hosts",
           posArea >= 0 && posArea < posH1 && posH1 < posH2, { posArea, posH1, posH2 });
     check("beide Hosts im Bereich sind als solche markiert",
           out.slice(Math.max(0, posH1 - 40), posH1).includes('data-in-area="1"')
           && out.slice(Math.max(0, posH2 - 40), posH2).includes('data-in-area="1"'));
     check("Host ohne Bereich bleibt unmarkiert",
           !out.slice(Math.max(0, posH3 - 40), posH3).includes('data-in-area="1"'));
-    check("Host ohne Bereich steht nach den Bereichs-Hosts",
-          posH3 > posH2, { posH2, posH3 });
+    // Seit der Rueckmeldung zu Schritt 5: bereichslose Hosts stehen ganz
+    // oben, vor jedem Bereichs-Kopf - nicht mehr danach.
+    check("Host ohne Bereich steht VOR dem ersten Bereichs-Kopf",
+          posH3 >= 0 && posH3 < posArea, { posH3, posArea });
     check("leerer Bereich bleibt sichtbar (Ablageziel) ohne aktiven Filter",
           posEmptyArea >= 0, posEmptyArea);
 
@@ -827,6 +829,24 @@ global.setTimeout = origSetTimeout;
     {
       const r = api.applyDrop(liste(), 2, { kind: "unit", id: 2, after: false });
       check("Ablegen auf sich selbst liefert kein Ergebnis", r === null);
+    }
+    {
+      // Ablagezone vor dem ersten Bereichs-Kopf (Rueckmeldung Schritt 5,
+      // Punkt 1): setzt den Bereich auf "keiner", unabhaengig davon, wo der
+      // Host vorher stand.
+      const r = api.applyDrop(liste(), 2, { kind: "beforeFirstArea" });
+      check("Ablegen vor dem ersten Bereich entfernt aus dem Bereich",
+            r && r.hosts.find(h => h.id === 2).area_id === null);
+      check("... und meldet die Aenderung", r && r.areaChanged === true);
+      check("... Host landet ganz vorn in der Liste",
+            r && r.hosts[0].id === 2, r && r.hosts.map(h => h.id));
+    }
+    {
+      // Schon bereichslos: keine Bereichsaenderung zu melden, auch wenn
+      // die Position sich verschiebt.
+      const r = api.applyDrop(liste(), 1, { kind: "beforeFirstArea" });
+      check("Ablegen eines schon bereichslosen Hosts meldet keine Aenderung",
+            r && r.areaChanged === false, r);
     }
   }
 
@@ -1024,6 +1044,134 @@ global.setTimeout = origSetTimeout;
           patchAuftrag && patchAuftrag.params
           && patchAuftrag.params.source_area_id === areaA.id,
           patchAuftrag && patchAuftrag.params);
+  }
+
+  console.log("\n=== Rueckmeldung nach der Vorschau (Schritt 5) ===");
+  {
+    const mkHost = (id, overrides) => Object.assign({
+      id, hostname: `S5-${id}`, display_name: null,
+      approval_state: "approved", status: "online",
+      os_type: "linux", updates_available: 0, security_updates: 0,
+      checkmk_downtime_all: false, checkmk_hosts: [], downtime_minutes: 30,
+      reboot_required: false, patch_enabled: false, patch_followup_left: 0,
+      updates_require_reboot: false, area_id: null,
+    }, overrides);
+
+    // --- Punkt 1: bereichslose Hosts ganz oben, eigene Ablagezone nur bei
+    // Bedarf. Rein im Speicher, wie bei "Bereiche in der Liste" oben. ---
+    const areaX = { id: 90601, name: "S5-Bereich", sort_order: 1, host_count: 0 };
+    const hostFrei = mkHost(90011, {});
+    const hostInArea = mkHost(90012, { area_id: areaX.id });
+
+    api.setAreas([areaX]);
+    api.setHosts([hostInArea, hostFrei]);   // absichtlich "falsch herum" im Array
+    el("filter").value = ""; el("fState").value = "";
+    api.render();
+    let out = el("units").innerHTML;
+    const posFrei = out.indexOf(`data-id="${hostFrei.id}"`);
+    const posArea = out.indexOf(`data-area-id="${areaX.id}"`);
+    check("bereichsloser Host steht vor dem Bereichs-Kopf",
+          posFrei >= 0 && posArea >= 0 && posFrei < posArea, { posFrei, posArea });
+    check("keine eigene Ablagezone noetig - es gibt ja schon einen bereichslosen Host",
+          !out.includes("areadrop-top"));
+
+    api.setHosts([hostInArea]);   // jetzt gehoert ausnahmslos jeder Host einem Bereich an
+    api.render();
+    check("Ablagezone vor dem ersten Bereich erscheint, sobald kein Host mehr bereichslos ist",
+          el("units").innerHTML.includes("areadrop-top"));
+    api.setHosts([hostInArea, hostFrei]);   // Ausgangslage fuer den Rest wiederherstellen
+
+    // --- Punkt 2: Aktionen direkt am Bereichs-Kopf ---
+    const headAdmin = api.renderAreaHead(areaX, 3, true);
+    check("Check-Knopf am Bereichs-Kopf",
+          headAdmin.includes(`data-act="areascan" data-id="${areaX.id}"`));
+    check("Patch-Knopf am Bereichs-Kopf",
+          headAdmin.includes(`data-act="areapatch" data-id="${areaX.id}"`));
+    check("Restart-Knopf am Bereichs-Kopf",
+          headAdmin.includes(`data-act="areareboot" data-id="${areaX.id}"`));
+    check("kein History-Knopf am Bereichs-Kopf - den gibt es nur pro Host",
+          !headAdmin.includes('data-act="detail"'));
+    check("'...'-Knopf fuer einen Administrator vorhanden",
+          headAdmin.includes(`data-act="areaedit" data-id="${areaX.id}"`));
+    const headUser = api.renderAreaHead(areaX, 3, false);
+    check("'...'-Knopf OHNE Administratorrechte nicht vorhanden",
+          !headUser.includes('data-act="areaedit"'));
+    check("Check/Patch/Restart aber auch ohne Administratorrechte da",
+          headUser.includes('data-act="areascan"') && headUser.includes('data-act="areapatch"')
+          && headUser.includes('data-act="areareboot"'));
+
+    // Der Edit-Knopf in Settings -> Bereiche ist weg - Bearbeiten laeuft
+    // jetzt ausschliesslich ueber den Bereichs-Kopf auf der Hauptseite.
+    await api.loadAreasTab();
+    check("Settings-Liste der Bereiche hat KEINEN Edit-Knopf mehr",
+          !el("areaList").innerHTML.includes('data-act="areaedit"'),
+          el("areaList").innerHTML.replace(/<[^>]+>/g, " ").slice(0, 120));
+
+    // --- Punkt 3: Bereichs-Kopf farblich abgehoben. Quelltextpruefung -
+    // die DOM-Attrappe wertet kein CSS aus. ---
+    check("Bereichs-Kopf nutzt die Akzentfarbe statt der Flaeche von Kopfleiste/Spaltenkopf",
+          /\.areahead\{[^}]*background:var\(--accent-bg\)/.test(html));
+
+    // --- rebootArea(): echter Host ueber den Server, wie beim scan/patch-
+    // Test oben. Nur Hosts mit tatsaechlichem Neustartbedarf werden erfasst. ---
+    const adminCall = async (path, opts = {}) => {
+      const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+        headers: {"X-API-Key": KEY, "Content-Type": "application/json"},
+        method: opts.method || (opts.body ? "POST" : "GET"),
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      });
+      const text = await r.text();
+      let json = {};
+      try { json = text ? JSON.parse(text) : {}; } catch(e){}
+      return [r.status, json];
+    };
+    const suffix = Date.now();
+    const [, areaR] = await adminCall("/api/v1/areas", { body: { name: `S5-Reboot-${suffix}` } });
+    const [ce, enrollRes] = await adminCall("/api/v1/agent/enroll", { body: {
+      hostname: `S5-REBOOT-HOST-${suffix}`, os_type: "linux",
+      os_version: "Debian 13", agent_version: "0.36.0",
+    }});
+    check("Testhost fuer rebootArea() angemeldet", ce === 200, ce);
+    const token = enrollRes.agent_token;
+    const [, hostsNow] = await adminCall("/api/v1/hosts");
+    const hid = hostsNow.find(h => h.hostname === `S5-REBOOT-HOST-${suffix}`).id;
+    await adminCall(`/api/v1/hosts/${hid}/approve`, { body: {} });
+    await adminCall(`/api/v1/hosts/${hid}/area`, { body: { area_id: areaR.id } });
+
+    const holeHosts = async () => {
+      const [, hs] = await adminCall("/api/v1/hosts");
+      api.setHosts(hs);
+    };
+    await holeHosts();
+
+    const jobsVorher = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    await api.rebootArea(areaR.id);
+    const jobsOhneBedarf = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    check("Restart ohne Neustartbedarf legt keinen Auftrag an",
+          jobsOhneBedarf.length === jobsVorher.length,
+          { vorher: jobsVorher.length, nachher: jobsOhneBedarf.length });
+
+    // Neustartbedarf wie ein echter Agent melden, ueber den Heartbeat.
+    await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/heartbeat`, {
+      method: "POST",
+      headers: {"X-Agent-Token": token, "Content-Type": "application/json"},
+      body: JSON.stringify({
+        hostname: `S5-REBOOT-HOST-${suffix}`, os_type: "linux",
+        os_version: "Debian 13", agent_version: "0.36.0",
+        reboot_required: true, reboot_reasons: ["kernel"],
+      }),
+    });
+    await holeHosts();
+
+    await api.rebootArea(areaR.id);
+    const jobsNachReboot = (await adminCall(`/api/v1/jobs?host_id=${hid}`))[1];
+    const rebootAuftrag = jobsNachReboot.find(j => j.job_type === "reboot");
+    check("Restart legt jetzt einen reboot-Auftrag an", !!rebootAuftrag,
+          jobsNachReboot.map(j => j.job_type));
+    check("... mit der Herkunft des Bereichs in den Parametern, wie bei patchArea()",
+          rebootAuftrag && rebootAuftrag.params
+          && rebootAuftrag.params.source_area_id === areaR.id,
+          rebootAuftrag && rebootAuftrag.params);
   }
 
   console.log(`\nFehler: ${fails}`);

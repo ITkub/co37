@@ -406,10 +406,10 @@ function render(){
   // Berechtigung durchsetzen tut die API, nicht diese Abfrage.
   const admin = !!(ME && ME.is_admin);
 
-  // Bereiche zuerst, jeder mit seinen zugeordneten Hosts direkt darunter
-  // (eingerueckt) - danach der Rest wie bisher, unveraendert. Ganz ohne
-  // angelegte Bereiche ist AREAS leer und hier passiert nichts anderes als
-  // vorher: freiwillig, wie verlangt.
+  // Bereichslose Hosts zuerst, ganz oben - danach jeder Bereich mit seinen
+  // zugeordneten Hosts direkt darunter (eingerueckt). Ganz ohne angelegte
+  // Bereiche ist AREAS leer und hier passiert nichts anderes als vorher:
+  // freiwillig, wie verlangt.
   const byArea = new Map();
   const rest = [];
   list.forEach(h => {
@@ -421,16 +421,21 @@ function render(){
 
   let i = 0;
   let html = "";
+  html += rest.map(h => renderUnit(h, i++, admin)).join("");
+  // Ohne einen einzigen bereichslosen Host gibt es nichts, worauf man zum
+  // Herausziehen ablegen koennte - dafuer diese schmale Zone direkt vor dem
+  // ersten Bereich. Mit mindestens einem bereichslosen Host oben ist sie
+  // ueberfluessig, der oberste Host uebernimmt dieselbe Rolle.
+  if (!rest.length && AREAS.length) html += `<div class="areadrop-top"></div>`;
   for (const area of AREAS){
     const inArea = byArea.get(area.id) || [];
     // Ein leerer Bereich bleibt nur sichtbar (als Ablageziel zum
     // Hineinziehen), solange nichts herausgefiltert ist - sonst taucht
     // beim Suchen ein Bereich auf, zu dem gerade kein Treffer gehoert.
     if (!inArea.length && !SORTABLE) continue;
-    html += renderAreaHead(area, inArea.length);
+    html += renderAreaHead(area, inArea.length, admin);
     html += inArea.map(h => renderUnit(h, i++, admin)).join("");
   }
-  html += rest.map(h => renderUnit(h, i++, admin)).join("");
   box.innerHTML = html;
 }
 
@@ -444,10 +449,22 @@ function hostAreaGiltig(h){
   return !!(h.area_id && AREAS.some(a => a.id === h.area_id));
 }
 
-function renderAreaHead(area, count){
+function renderAreaHead(area, count, admin){
+  // Dieselben Knoepfe wie eine Host-Zeile (Check/Patch/Restart), nur ohne
+  // History - die gibt es nur pro einzelnem Host. "..." oeffnet denselben
+  // Bearbeiten-Dialog, den auch Settings -> Bereiche benutzt (editArea()),
+  // jetzt direkt von hier aus statt nur aus den Einstellungen.
   return `<div class="areahead" data-area-id="${area.id}">
-    <div class="areahead-name">${esc(area.name)}</div>
-    <div class="areahead-count">${t("area.host_count", { anzahl: count })}</div>
+    <div class="areahead-info">
+      <span class="areahead-name">${esc(area.name)}</span>
+      <span class="areahead-count">${t("area.host_count", { anzahl: count })}</span>
+    </div>
+    <div class="actions">
+      <button data-act="areascan" data-id="${area.id}">${t("act.scan")}</button>
+      <button data-act="areapatch" data-id="${area.id}">${t("act.patch")}</button>
+      <button class="warn" data-act="areareboot" data-id="${area.id}">${t("act.reboot")}</button>
+      ${admin ? `<button data-act="areaedit" data-id="${area.id}">…</button>` : ""}
+    </div>
   </div>`;
 }
 
@@ -542,6 +559,7 @@ function clearDropMarks(){
     u.classList.remove("dropbefore", "dropafter");
   });
   unitsBox().querySelectorAll(".areahead").forEach(a => a.classList.remove("over"));
+  unitsBox().querySelectorAll(".areadrop-top").forEach(a => a.classList.remove("over"));
 }
 
 async function saveOrder(){
@@ -575,9 +593,13 @@ async function moveHostArea(hostId, areaId){
  * und, falls das Ziel zu einem anderen Bereich gehoert (oder gar keinem),
  * das gleich mit.
  *
- * target ist entweder
+ * target ist eines von
  *   { kind: "unit", id, after }     - abgelegt auf einem anderen Host
  *   { kind: "areahead", areaId }    - abgelegt auf einem Bereichs-Kopf
+ *   { kind: "beforeFirstArea" }     - abgelegt auf der Zone vor dem ersten
+ *                                      Bereich (nur da im Markup, wenn kein
+ *                                      bereichsloser Host als Alternative
+ *                                      zur Verfuegung steht)
  *
  * Eigene Funktion statt Logik im Ereignis-Handler, damit sich das ohne
  * eine nachgebaute DOM prüfen laesst - wie _schedule_due() im Backend.
@@ -590,6 +612,15 @@ function applyDrop(hosts, dragId, target){
   const list = hosts.slice();
   const [moved] = list.splice(from, 1);
   const oldAreaId = moved.area_id || null;
+
+  if (target.kind === "beforeFirstArea"){
+    // Diese Zone gibt es nur, wenn schon kein bereichsloser Host da war -
+    // der gezogene wird also automatisch der einzige, seine Position
+    // innerhalb der "bereichslos"-Gruppe ist damit beliebig.
+    list.unshift(moved);
+    moved.area_id = null;
+    return { hosts: list, areaChanged: oldAreaId !== null, newAreaId: null };
+  }
 
   if (target.kind === "areahead"){
     const newAreaId = target.areaId;
@@ -634,6 +665,14 @@ function initSorting(){
 
   box.addEventListener("dragover", e => {
     if (DRAG_ID === null) return;
+    const dropTop = e.target.closest(".areadrop-top");
+    if (dropTop){
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      clearDropMarks();
+      dropTop.classList.add("over");
+      return;
+    }
     const areaHead = e.target.closest(".areahead");
     if (areaHead){
       e.preventDefault();
@@ -654,14 +693,17 @@ function initSorting(){
 
   box.addEventListener("drop", e => {
     if (DRAG_ID === null) return;
+    const dropTop = e.target.closest(".areadrop-top");
     const areaHead = e.target.closest(".areahead");
     const unit = e.target.closest(".unit");
-    if (!areaHead && !unit) return;
+    if (!dropTop && !areaHead && !unit) return;
     e.preventDefault();
 
     const draggedId = DRAG_ID;
     let target;
-    if (areaHead){
+    if (dropTop){
+      target = { kind: "beforeFirstArea" };
+    } else if (areaHead){
       target = { kind: "areahead", areaId: parseInt(areaHead.dataset.areaId) };
     } else {
       const rect = unit.getBoundingClientRect();
@@ -724,6 +766,9 @@ const ACTIONS = {
   areadown:   (d) => moveArea(+d.id, 1),
   areapick:   (d) => toggleAreaPick(d.name),
   areaday:    (d) => toggleAreaDay(d.day),
+  areascan:   (d) => scanArea(+d.id),
+  areapatch:  (d) => patchArea(+d.id),
+  areareboot: (d) => rebootArea(+d.id),
 };
 
 document.addEventListener("click", (e) => {
@@ -2079,7 +2124,6 @@ function renderAreaList(){
         <span style="display:flex;gap:6px">
           <button data-act="areaup" data-id="${a.id}" ${i===0?"disabled":""} title="${esc(t("area.move_up"))}">↑</button>
           <button data-act="areadown" data-id="${a.id}" ${i===AREAS.length-1?"disabled":""} title="${esc(t("area.move_down"))}">↓</button>
-          <button data-act="areaedit" data-id="${a.id}">${t("common.edit")}</button>
         </span></div>`).join("")
     : `<span style="color:var(--muted-2)">${t("area.none")}</span>`;
 }
@@ -2240,6 +2284,34 @@ async function patchArea(areaId){
     } catch(e){}
   }
   toast(t("msg.patch_many", { anzahl: hosts.length }));
+  afterAction();
+}
+
+// Nur Hosts mit tatsaechlichem Neustartbedarf, wie bei scanArea()/patchArea()
+// eine gemeinsame Sicherheitsabfrage statt eines Dialogs pro Host - ein
+// einzelner Host-Neustart (rebootHost()) fragt Downtime/Kulanz individuell
+// ab, das skaliert auf "alle betroffenen Hosts einer Area" nicht sinnvoll.
+async function rebootArea(areaId){
+  const a = AREAS.find(x => x.id === areaId);
+  const hosts = HOSTS.filter(h => h.area_id === areaId && h.approval_state === "approved"
+                                    && h.reboot_required);
+  if (!hosts.length){ toast(t("area.nothing_to_reboot"), true); return; }
+  if (!confirm(t("ask.reboot_area", { anzahl: hosts.length, bereich: a ? a.name : "" }))) return;
+  for (const h of hosts){
+    try {
+      await api("POST", `/api/v1/hosts/${h.id}/jobs`, {
+        job_type: "reboot",
+        set_downtime: true,
+        grace_minutes: 10,
+        downtime_minutes: (a && a.downtime_minutes) || h.downtime_minutes || 30,
+        // source_area_id wie bei patchArea() - die Downtime bei der
+        // Freigabe (agent_pre_reboot) gilt dann der Checkmk-Verknuepfung
+        // des Bereichs, nicht der des einzelnen Hosts.
+        params: { source_area_id: areaId },
+      });
+    } catch(e){}
+  }
+  toast(t("msg.reboot_many", { anzahl: hosts.length }));
   afterAction();
 }
 
