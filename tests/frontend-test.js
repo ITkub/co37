@@ -46,6 +46,11 @@ function mkEl(id) {
     id,
     _text: "", _html: "", value: "", checked: false, placeholder: "",
     className: "", style: {}, dataset: {}, files: [],
+    // Fuer die Scrollsperre (Rueckmeldung Schritt 5, Punkt 4): showModal()
+    // und close() setzen 'open' wie im echten <dialog> und benachrichtigen
+    // registrierte MutationObserver - siehe FakeMutationObserver unten.
+    open: false,
+    _observers: [],
     classList: {
       _c: new Set(),
       add(c) { this._c.add(c); }, remove(c) { this._c.delete(c); },
@@ -58,9 +63,19 @@ function mkEl(id) {
     set innerHTML(v) { this._html = String(v); },
     addEventListener() {}, removeEventListener() {},
     appendChild() {}, remove() {}, select() {}, setSelectionRange() {},
-    setAttribute() {}, showModal() {}, close() {}, click() {}, focus() {}, blur() {},
+    setAttribute() {},
+    showModal() { this.open = true; this._observers.forEach(cb => cb()); },
+    close() { this.open = false; this._observers.forEach(cb => cb()); },
+    click() {}, focus() {}, blur() {},
     scrollTop: 0, scrollHeight: 0, clientHeight: 0,
   };
+}
+// Bildet nur genau das nach, was app.js tatsaechlich benutzt: eine einzige
+// Beobachtung des 'open'-Attributs. Kein generischer DOM-Mutationsabgleich.
+class FakeMutationObserver {
+  constructor(cb) { this.cb = cb; }
+  observe(el) { el._observers.push(this.cb); }
+  disconnect() {}
 }
 function el(id) { return store[id] || (store[id] = mkEl(id)); }
 
@@ -86,17 +101,26 @@ for (const m of html.matchAll(/<button([^>]*?)data-(h?)tab="(\w+)"([^>]*)>/g)) {
   tabButtons.push(b);
 }
 
+// Alle <dialog id="..."> aus dem echten Markup - fuer
+// document.querySelectorAll("dialog") (Scrollsperre, Rueckmeldung
+// Schritt 5, Punkt 4). Liefert dieselben, ueber el() zwischengespeicherten
+// Objekte wie document.getElementById(), damit ein showModal()/close() von
+// app.js auf demselben Objekt landet, das hier beobachtet wird.
+const dialogIds = [...html.matchAll(/<dialog id="(\w+)"/g)].map(m => m[1]);
+
 // Die Oberflaeche haengt einen Klick-Verteiler ans Dokument. Hier
 // mitgeschnitten, damit der Test ihn aufrufen kann - im Browser passiert
 // das ueber ein echtes Klickereignis.
 let CLICK_HANDLER = null;
-// Offene Dialoge fuer document.querySelectorAll("dialog[open]").
+// Offene Dialoge fuer document.querySelectorAll("dialog[open]") - eigens
+// von Hand gefuellt in den Tests, die das brauchen (Meldungsposition),
+// unabhaengig vom echten offen/geschlossen-Zustand ueber .open.
 const DIALOGE_OFFEN = [];
 
 global.document = {
   documentElement: { dataset: {} },
   cookie: "",
-  body: { appendChild() {}, removeChild() {} },
+  body: { appendChild() {}, removeChild() {}, style: {} },
   addEventListener(typ, fn) { if (typ === "click") CLICK_HANDLER = fn; },
   removeEventListener() {},
   getElementById: el,
@@ -117,6 +141,7 @@ global.document = {
   querySelectorAll(sel) {
     // Meldungen haengen sich an den obersten offenen Dialog.
     if (sel === "dialog[open]") return DIALOGE_OFFEN;
+    if (sel === "dialog") return dialogIds.map(el);
     if (sel === "#sTabs button") return tabButtons.filter(b => b._group === "sTabs");
     if (sel === "#hTabs button") return tabButtons.filter(b => b._group === "hTabs");
     if (sel === "[data-close]") return [];
@@ -151,6 +176,7 @@ global.fetch = (url, opts = {}) => {
 global.prompt = () => KEY;
 global.confirm = () => true;
 global.matchMedia = () => ({ matches: false });
+global.MutationObserver = FakeMutationObserver;
 global.URL.createObjectURL = () => "blob:x";
 global.URL.revokeObjectURL = () => {};
 
@@ -177,7 +203,8 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
   + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
-  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead };";
+  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, "
+  + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime };";
 const wrapped = new Function(script + EXPORTS);
 let api;
 try {
@@ -1172,6 +1199,206 @@ global.setTimeout = origSetTimeout;
           rebootAuftrag && rebootAuftrag.params
           && rebootAuftrag.params.source_area_id === areaR.id,
           rebootAuftrag && rebootAuftrag.params);
+  }
+
+  console.log("\n=== Rueckmeldung: 4 weitere Punkte ===");
+  {
+    const adminCall = async (path, opts = {}) => {
+      const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+        headers: {"X-API-Key": KEY, "Content-Type": "application/json"},
+        method: opts.method || (opts.body ? "POST" : "GET"),
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      });
+      const text = await r.text();
+      let json = {};
+      try { json = text ? JSON.parse(text) : {}; } catch(e){}
+      return [r.status, json];
+    };
+    api.setzeSprache("de");   // deterministisch fuer die erwarteten Texte unten
+
+    const mkHost = (id, overrides) => Object.assign({
+      id, hostname: `S6-${id}`, display_name: null,
+      approval_state: "approved", status: "online",
+      os_type: "linux", updates_available: 0, security_updates: 0,
+      checkmk_downtime_all: false, checkmk_hosts: [], downtime_minutes: 30,
+      reboot_required: false, patch_enabled: false, patch_followup_left: 0,
+      updates_require_reboot: false, area_id: null,
+    }, overrides);
+
+    // --- Punkt 1: Nummerierung faengt in jeder Gruppe wieder bei 1 an -
+    // ausdruecklich auch im bereichslosen Bereich, nicht nur je Area. ---
+    const areaN = { id: 90701, name: "S6-Bereich", sort_order: 1, host_count: 0 };
+    const hFrei1 = mkHost(90101, {});
+    const hFrei2 = mkHost(90102, {});
+    const hIn1 = mkHost(90103, { area_id: areaN.id });
+    const hIn2 = mkHost(90104, { area_id: areaN.id });
+
+    api.setAreas([areaN]);
+    api.setHosts([hFrei1, hFrei2, hIn1, hIn2]);
+    api.setLastAction({});
+    el("filter").value = ""; el("fState").value = "";
+    api.render();
+    let out = el("units").innerHTML;
+    const slotVon = (id) => {
+      const m = out.match(new RegExp(
+        `<div class="unit"[^>]*data-id="${id}">\\s*<div class="slot[^>]*>(\\d+)<`));
+      return m ? m[1] : null;
+    };
+    check("bereichsloser Host 1 startet bei 01", slotVon(hFrei1.id) === "01", slotVon(hFrei1.id));
+    check("bereichsloser Host 2 zaehlt weiter auf 02", slotVon(hFrei2.id) === "02", slotVon(hFrei2.id));
+    check("erster Host IM Bereich beginnt wieder bei 01, nicht bei 03 (durchgehend)",
+          slotVon(hIn1.id) === "01", slotVon(hIn1.id));
+    check("zweiter Host im Bereich zaehlt innerhalb des Bereichs weiter auf 02",
+          slotVon(hIn2.id) === "02", slotVon(hIn2.id));
+
+    // Gegenprobe: EINE gemeinsame Nummerierung ueber alles wuerde die
+    // beiden letzten Pruefungen auf 03/04 statt 01/02 durchfallen lassen -
+    // das war vor der Umsetzung tatsaechlich der Fall (durchgehendes i in
+    // render() statt eines je-Gruppe-Index aus map()).
+
+    // --- Punkt 2: dritte Zeile mit der letzten abgeschlossenen Aktion ---
+    const hOhne = mkHost(90105, {});
+    api.setHosts([hOhne]);
+    api.setAreas([]);
+    api.setLastAction({});
+    api.render();
+    check("ohne abgeschlossenen Auftrag erscheint keine dritte Zeile",
+          !el("units").innerHTML.includes('class="lastaction"'));
+
+    const faelle = [
+      ["scan", "done", "note.last_scan_done"],
+      ["scan", "failed", "note.last_scan_failed"],
+      ["patch", "done", "note.last_patch_done"],
+      ["patch", "failed", "note.last_patch_failed"],
+      ["reboot", "done", "note.last_reboot_done"],
+      ["reboot", "failed", "note.last_reboot_failed"],
+    ];
+    for (const [job_type, state, schluessel] of faelle){
+      const zeitpunkt = "2026-08-20T13:34:00Z";
+      api.setLastAction({ [hOhne.id]: { host_id: hOhne.id, job_type, state, finished_at: zeitpunkt } });
+      api.render();
+      const zeit = api.fmtTime(zeitpunkt, {weekday:"short", hour:"2-digit", minute:"2-digit"});
+      const erwartet = api.t(schluessel, { zeit });
+      check(`dritte Zeile fuer ${job_type}/${state}`,
+            el("units").innerHTML.includes(erwartet), erwartet);
+    }
+
+    // Ein Auftragstyp ohne eigene Formulierung (z.B. Selbstaktualisierung)
+    // bleibt bewusst ohne dritte Zeile.
+    api.setLastAction({ [hOhne.id]: {
+      host_id: hOhne.id, job_type: "selfupdate", state: "done",
+      finished_at: "2026-08-20T13:34:00Z" } });
+    api.render();
+    check("Auftragsarten ohne Formulierung (z.B. Selbstaktualisierung) bleiben ohne dritte Zeile",
+          !el("units").innerHTML.includes('class="lastaction"'));
+
+    // --- Punkt 2, Server: /api/v1/jobs/last liefert je Host den zuletzt
+    // abgeschlossenen Auftrag, aktuellsten zuerst, cancelled zaehlt nicht. ---
+    const suffix6 = Date.now();
+    const [ce6, enroll6] = await adminCall("/api/v1/agent/enroll", { body: {
+      hostname: `S6-JOB-HOST-${suffix6}`, os_type: "linux",
+      os_version: "Debian 13", agent_version: "0.36.0",
+    }});
+    check("Testhost fuer jobs/last angemeldet", ce6 === 200, ce6);
+    const token6 = enroll6.agent_token;
+    const [, hosts6] = await adminCall("/api/v1/hosts");
+    const hid6 = hosts6.find(h => h.hostname === `S6-JOB-HOST-${suffix6}`).id;
+    await adminCall(`/api/v1/hosts/${hid6}/approve`, { body: {} });
+
+    const agentReport = async (job_id, state) => {
+      const r = await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/report`, {
+        method: "POST",
+        headers: {"X-Agent-Token": token6, "Content-Type": "application/json"},
+        body: JSON.stringify({ job_id, state, result: {} }),
+      });
+      return r.status;
+    };
+    const letzterAuftrag = async () => {
+      const [, liste] = await adminCall("/api/v1/jobs/last");
+      return liste.find(j => j.host_id === hid6);
+    };
+
+    const [, scanJob] = await adminCall(`/api/v1/hosts/${hid6}/jobs`, { body: { job_type: "scan", params: {} } });
+    check("scan-Auftrag angelegt", !!scanJob.id, scanJob);
+    check("scan-Auftrag noch nicht in jobs/last, solange er nicht abgeschlossen ist",
+          !(await letzterAuftrag()));
+    check("agent/report scan done", (await agentReport(scanJob.id, "done")) === 200);
+    let letzter = await letzterAuftrag();
+    check("jobs/last zeigt den scan-Auftrag als erledigt",
+          letzter && letzter.job_type === "scan" && letzter.state === "done", letzter);
+
+    const [, patchJob] = await adminCall(`/api/v1/hosts/${hid6}/jobs`, { body: { job_type: "patch", params: {} } });
+    check("agent/report patch failed", (await agentReport(patchJob.id, "failed")) === 200);
+    letzter = await letzterAuftrag();
+    check("jobs/last zeigt jetzt den neueren patch-Auftrag statt des aelteren scan-Auftrags",
+          letzter && letzter.job_type === "patch" && letzter.state === "failed", letzter);
+
+    const [, cancelJob] = await adminCall(`/api/v1/hosts/${hid6}/jobs`, { body: { job_type: "reboot", params: {} } });
+    check("agent/report reboot cancelled", (await agentReport(cancelJob.id, "cancelled")) === 200);
+    letzter = await letzterAuftrag();
+    check("ein abgebrochener (cancelled) Auftrag zaehlt nicht als letzte Aktion",
+          letzter && letzter.job_type === "patch", letzter);
+
+    // finished_at fehlt in einem seltenen Pfad (agent/notice haengt an den
+    // juengsten Selfupdate-Auftrag an, ohne finished_at zu setzen) - dann
+    // muss created_at als Behelf einspringen, sonst faellt der Auftrag beim
+    // Sortieren nach hinten und wuerde nie als der juengste erkannt.
+    await adminCall(`/api/v1/hosts/${hid6}/jobs`, { body: { job_type: "selfupdate", params: {} } });
+    const noticeStatus = await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/notice`, {
+      method: "POST",
+      headers: {"X-Agent-Token": token6, "Content-Type": "application/json"},
+      body: JSON.stringify({ message: "Testfehler", result: {} }),
+    });
+    check("agent/notice angenommen", noticeStatus.status === 200, noticeStatus.status);
+    letzter = await letzterAuftrag();
+    check("jobs/last erkennt den Selfupdate-Auftrag ohne finished_at ueber created_at als juengsten",
+          letzter && letzter.job_type === "selfupdate" && letzter.state === "failed"
+          && !!letzter.finished_at, letzter);
+
+    // Aufraeumen: dieser Testhost wird nicht mehr gebraucht. Wichtig fuer
+    // den vollstaendigen Lauf (alle Reihen zusammen) - roles-test.py laeuft
+    // bewusst als letzte Reihe gegen denselben Bestand und prueft die
+    // Freigabe bis zum Freibetrag (10 Hosts). Ein hier liegen gelassener,
+    // freigegebener Host wuerde diesen Spielraum unbemerkt verkleinern.
+    await adminCall(`/api/v1/hosts/${hid6}`, { method: "DELETE" });
+
+    // --- Punkt 3: Entfernen-Knopf direkt in der Bereichsliste ---
+    const [, areaS3] = await adminCall("/api/v1/areas", { body: { name: `S6-Remove-${suffix6}` } });
+    await api.loadAreasTab();
+    check("neuer Entfernen-Knopf in der Bereichsliste vorhanden",
+          el("areaList").innerHTML.includes(`data-act="arearemove" data-id="${areaS3.id}"`));
+    check("der Entfernen-Knopf im Bearbeiten-Dialog bleibt zusaetzlich bestehen (aDelete)",
+          !!el("aDelete"));
+
+    await api.removeArea(areaS3.id, false);
+    await api.loadAreasTab();
+    check("Bereich ist nach removeArea() wirklich weg",
+          !api.getAreas().some(a => a.id === areaS3.id), api.getAreas().map(a => a.id));
+
+    // --- Punkt 4: Scrollsperre haelt den Hintergrund fest, solange
+    // mindestens ein Dialog offen ist - auch wenn zwei gleichzeitig offen
+    // sind (z.B. Settings mit einem Bereichs-Dialog obendrauf). ---
+    for (const id of ["dlgLogin","dlgHost","dlgArea","dlgSettings","dlgReboot","dlgLive","dlgDetail"])
+      el(id).close();
+    check("Hintergrund frei, solange kein Dialog offen ist",
+          document.body.style.overflow === "", document.body.style.overflow);
+
+    el("dlgSettings").showModal();
+    check("Hintergrund gesperrt, sobald ein Dialog offen ist",
+          document.body.style.overflow === "hidden");
+
+    el("dlgArea").showModal();
+    check("weiterhin gesperrt mit zwei gleichzeitig offenen Dialogen",
+          document.body.style.overflow === "hidden");
+
+    el("dlgArea").close();
+    check("bleibt gesperrt, solange der aeussere Dialog (Settings) noch offen ist - "
+          + "durfte NICHT durchs Schliessen des inneren Dialogs freigegeben werden",
+          document.body.style.overflow === "hidden");
+
+    el("dlgSettings").close();
+    check("Hintergrund wieder frei, sobald auch der letzte Dialog geschlossen ist",
+          document.body.style.overflow === "", document.body.style.overflow);
   }
 
   console.log(`\nFehler: ${fails}`);

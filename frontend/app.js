@@ -243,6 +243,34 @@ function toast(msg, err){
   }
   setTimeout(() => el.remove(), err ? 9000 : 5000);
 }
+/*
+ * Scrollsperre fuer den Hintergrund, solange irgendein Dialog offen ist.
+ *
+ * <dialog> mit showModal() sperrt Tastaturfokus und Klicks auf den
+ * Hintergrund, aber nicht das Mausrad - ohne das hier scrollt die Seite
+ * dahinter mit, wenn das Rad ueber dem Dialog oder seinem abgedunkelten
+ * Hintergrund gedreht wird.
+ *
+ * Ueber einen MutationObserver auf dem 'open'-Attribut jedes Dialogs statt
+ * an jeder showModal()/close()-Stelle einzeln gesetzt - davon gibt es weit
+ * ueber ein Dutzend, verteilt ueber die ganze Datei, und eine davon zu
+ * vergessen wuerde nur bei genau diesem einen Dialog auffallen. Der
+ * Observer erfasst jeden Weg, wie sich ein Dialog oeffnet oder schliesst,
+ * die Esc-Taste eingeschlossen.
+ *
+ * Gezaehlt wird die Anzahl offener Dialoge, nicht nur "ist irgendeiner
+ * offen" umgeschaltet - zwei koennen gleichzeitig offen sein (etwa
+ * Einstellungen, darueber ein Bereich bearbeiten), der Hintergrund darf
+ * erst wieder frei sein, wenn wirklich keiner mehr offen ist.
+ */
+function aktualisiereHintergrundsperre(){
+  const offen = Array.from(document.querySelectorAll("dialog")).some(d => d.open);
+  document.body.style.overflow = offen ? "hidden" : "";
+}
+document.querySelectorAll("dialog").forEach(dlg => {
+  new MutationObserver(aktualisiereHintergrundsperre)
+    .observe(dlg, { attributes: true, attributeFilter: ["open"] });
+});
 /**
  * Maskiert Text fuer die Ausgabe in HTML.
  *
@@ -419,9 +447,12 @@ function render(){
     } else rest.push(h);
   });
 
-  let i = 0;
+  // Die laufende Nummer zaehlt seit der Rueckmeldung zu Schritt 5 je Gruppe
+  // neu ab 1 - bereichslos genauso wie jeder einzelne Bereich. Sie hat sonst
+  // keine Funktion (Drag & Drop haengt an der Host-ID, nicht an der Zahl),
+  // deshalb einfach der Index aus map() statt eines gemeinsamen Zaehlers.
   let html = "";
-  html += rest.map(h => renderUnit(h, i++, admin)).join("");
+  html += rest.map((h, idx) => renderUnit(h, idx, admin)).join("");
   // Ohne einen einzigen bereichslosen Host gibt es nichts, worauf man zum
   // Herausziehen ablegen koennte - dafuer diese schmale Zone direkt vor dem
   // ersten Bereich. Mit mindestens einem bereichslosen Host oben ist sie
@@ -434,7 +465,7 @@ function render(){
     // beim Suchen ein Bereich auf, zu dem gerade kein Treffer gehoert.
     if (!inArea.length && !SORTABLE) continue;
     html += renderAreaHead(area, inArea.length, admin);
-    html += inArea.map(h => renderUnit(h, i++, admin)).join("");
+    html += inArea.map((h, idx) => renderUnit(h, idx, admin)).join("");
   }
   box.innerHTML = html;
 }
@@ -506,12 +537,31 @@ function renderUnit(h, i, admin){
   if (h.patch_followup_left > 0)
     notes.push(t("note.followup", { anzahl: h.patch_followup_left }));
 
+  // Dritte Zeile: was der Host als letztes gemacht hat (Rueckmeldung
+  // Schritt 5) - eigene Zeile statt in "notes" gemischt, weil es sich vom
+  // aktuellen Zustand oben unterscheidet: eine abgeschlossene Vergangenheit,
+  // kein laufender Hinweis. Nur scan/patch/reboot haben eine Formulierung -
+  // andere Auftragsarten (etwa die Agent-Selbstaktualisierung) bleiben ohne
+  // dritte Zeile, dafuer hat niemand danach gefragt.
+  const zuletzt = LAST_ACTION[h.id];
+  let letzteAktion = "";
+  if (zuletzt){
+    const zeit = fmtTime(zuletzt.finished_at, {weekday:"short", hour:"2-digit", minute:"2-digit"});
+    const schluessel = {
+      scan:   zuletzt.state === "done" ? "note.last_scan_done"   : "note.last_scan_failed",
+      patch:  zuletzt.state === "done" ? "note.last_patch_done"  : "note.last_patch_failed",
+      reboot: zuletzt.state === "done" ? "note.last_reboot_done" : "note.last_reboot_failed",
+    }[zuletzt.job_type];
+    if (schluessel) letzteAktion = t(schluessel, { zeit });
+  }
+
   return `<div class="unit"${hostAreaGiltig(h) ? ` data-in-area="1"` : ""} data-id="${h.id}">
       <div class="slot${SORTABLE ? " grab" : ""}"${SORTABLE ? ` draggable="true" title="${esc(t("list.drag"))}"` : ` title="${esc(t("list.drag_blocked"))}"`}>${String(i+1).padStart(2,"0")}</div>
       <div class="led ${LED[s]}"></div>
       <div class="hostcell">
         <div class="hostname">${esc(h.display_name || h.hostname)}</div>
         <div class="sub">${esc(h.hostname)}${notes.length ? " · " + notes.join(" · ") : ""}</div>
+        ${letzteAktion ? `<div class="lastaction">${esc(letzteAktion)}</div>` : ""}
       </div>
       <div class="os">${h.os_type || "—"}</div>
       <div class="updates"><span class="chip ${upd?"warn":"zero"}">${upd}</span></div>
@@ -769,6 +819,7 @@ const ACTIONS = {
   areascan:   (d) => scanArea(+d.id),
   areapatch:  (d) => patchArea(+d.id),
   areareboot: (d) => rebootArea(+d.id),
+  arearemove: (d) => removeArea(+d.id, false),
 };
 
 document.addEventListener("click", (e) => {
@@ -784,7 +835,7 @@ document.addEventListener("click", (e) => {
 });
 
 /* ---------- Aktionen ---------- */
-let PLANNED = {}, ACTIVE = {};
+let PLANNED = {}, ACTIVE = {}, LAST_ACTION = {};
 let REFRESH_TIMER = null, FOLLOWUPS = [];
 
 /**
@@ -826,6 +877,12 @@ async function load(){
     ACTIVE = {};
     (await api("GET", "/api/v1/jobs/active")).forEach(j => { ACTIVE[j.host_id] = j; });
   } catch(e){ ACTIVE = {}; }
+  // Fuer die dritte Zeile in der Uebersicht (Rueckmeldung Schritt 5) - was
+  // der Host als letztes gemacht hat und ob es geklappt hat.
+  try {
+    LAST_ACTION = {};
+    (await api("GET", "/api/v1/jobs/last")).forEach(j => { LAST_ACTION[j.host_id] = j; });
+  } catch(e){ LAST_ACTION = {}; }
 
   // Ein Auftrag ist gerade fertig geworden
   if (wasBusy.length && !Object.keys(ACTIVE).length) followUp();
@@ -2124,6 +2181,7 @@ function renderAreaList(){
         <span style="display:flex;gap:6px">
           <button data-act="areaup" data-id="${a.id}" ${i===0?"disabled":""} title="${esc(t("area.move_up"))}">↑</button>
           <button data-act="areadown" data-id="${a.id}" ${i===AREAS.length-1?"disabled":""} title="${esc(t("area.move_down"))}">↓</button>
+          <button class="danger" data-act="arearemove" data-id="${a.id}">${t("area.remove")}</button>
         </span></div>`).join("")
     : `<span style="color:var(--muted-2)">${t("area.none")}</span>`;
 }
@@ -2248,15 +2306,20 @@ document.getElementById("aSave").onclick = async () => {
   render();
 };
 
-document.getElementById("aDelete").onclick = async () => {
-  const a = AREAS.find(x => x.id === EDIT_AREA_ID);
+// Geteilt zwischen dem Loeschen-Knopf im Bearbeiten-Dialog und dem neuen
+// Remove-Knopf direkt in der Bereichsliste (Rueckmeldung Schritt 5) - beide
+// tun dasselbe, nur der Dialog muss sich zusaetzlich noch schliessen.
+async function removeArea(id, dialogSchliessen){
+  const a = AREAS.find(x => x.id === id);
   if (!confirm(t("ask.remove_area", { name: a ? a.name : "" }))) return;
-  try { await api("DELETE", `/api/v1/areas/${EDIT_AREA_ID}`); } catch(e){ return; }
-  document.getElementById("dlgArea").close();
+  try { await api("DELETE", `/api/v1/areas/${id}`); } catch(e){ return; }
+  if (dialogSchliessen) document.getElementById("dlgArea").close();
   toast(t("msg.removed", { name: a ? a.name : "" }));
   await loadAreasTab();
   render();
-};
+}
+
+document.getElementById("aDelete").onclick = () => removeArea(EDIT_AREA_ID, true);
 
 async function scanArea(areaId){
   const hosts = HOSTS.filter(h => h.area_id === areaId && h.approval_state === "approved");

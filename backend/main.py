@@ -2854,6 +2854,38 @@ def active_jobs(session: Session = Depends(get_session)):
     ]
 
 
+@app.get("/api/v1/jobs/last", dependencies=[Depends(require_login)])
+def last_jobs(session: Session = Depends(get_session)):
+    """
+    Der zuletzt abgeschlossene Auftrag je Host, fuer die dritte Zeile in der
+    Uebersicht ("Letzte Pruefung/Letztes Update/Letzter Neustart um ...").
+
+    Nur done/failed zaehlen als tatsaechliche Aktion - ein abgebrochener
+    (cancelled) Auftrag ist keine. finished_at fehlt in einem seltenen Pfad
+    (eine Selbstaktualisierung, die per Notiz nachtraeglich als
+    fehlgeschlagen markiert wird, ohne den Zeitstempel zu setzen) - dann
+    created_at als Behelf, sonst faellt der Auftrag beim Sortieren ans Ende
+    und wuerde nie als der juengste erkannt.
+    """
+    jobs = session.exec(
+        select(Job).where(Job.state.in_([JobState.done, JobState.failed]))
+    ).all()
+    jobs.sort(key=lambda j: j.finished_at or j.created_at, reverse=True)
+    gesehen = set()
+    ergebnis = []
+    for j in jobs:
+        if j.host_id in gesehen:
+            continue
+        gesehen.add(j.host_id)
+        ergebnis.append({
+            "host_id": j.host_id,
+            "job_type": j.job_type.value,
+            "state": j.state.value,
+            "finished_at": ensure_utc(j.finished_at or j.created_at),
+        })
+    return ergebnis
+
+
 @app.delete("/api/v1/jobs/{job_id}", dependencies=[Depends(require_login)])
 def cancel_job(job_id: int, session: Session = Depends(get_session)):
     """Bricht einen wartenden Auftrag ab. Laufende bleiben unberuehrt."""
