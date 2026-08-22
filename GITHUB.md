@@ -133,6 +133,20 @@ genau.
 
 ---
 
+## Noch offen: Pakete verteilen
+
+`co37_v*.zip`, `.sig` und `.sha256` sind bewusst in `.gitignore` — sie
+blähen das Repository sonst auf und werfen die Frage auf, welche Fassung
+gerade gilt (siehe Kommentar dort). `git push` überträgt daher nie die
+gebauten Pakete, nur den Quellstand.
+
+Sobald das Repository öffentlich ist, brauchen Nutzer trotzdem einen Weg an
+die Pakete. Vorgesehen: **GitHub Releases** — zu jedem Tag (z. B.
+`v0.36.2`) zip, `.sig` und `.sha256` als Release-Assets hochladen. Damit
+bleibt der Quellcode schlank und jede Version bekommt ihre eigenen,
+eindeutig zugeordneten Pakete. Noch nicht umgesetzt, muss vor der
+Veröffentlichung geklärt sein.
+
 ## Noch offen: Pakete bauen
 
 `build_release.sh` braucht `zip` und `unzip`. **Beides bringt Git Bash
