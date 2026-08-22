@@ -687,6 +687,40 @@ Skript in Node gegen ein laufendes Backend ausführt. Siehe `tests/README.md`.
 
 ---
 
+# Best Practices
+
+Sammlung von Empfehlungen für den Betrieb. Wächst mit der Zeit.
+
+## Bereiche (Areas)
+
+Bereiche gruppieren Hosts in der Übersicht — **freiwillig**, nichts zwingt
+dazu. Ein Host gehört höchstens einem Bereich an.
+
+**Wann sich ein Bereich lohnt:** wenn mehrere Hosts dasselbe Wartungsfenster
+teilen sollen oder ohnehin zusammengehören — etwa Cluster-Knoten, bei denen
+ein Ausfall dieselben Checkmk-Objekte betrifft. Für einzelne, unabhängige
+Hosts reicht der Zeitplan am Host selbst.
+
+**Eigener Zeitplan, keine Vererbung.** Ein Bereich bekommt einen eigenen
+Sammel-Zeitplan und eine eigene Downtime, unabhängig vom Zeitplan seiner
+Hosts. Hat ein enthaltener Host bereits einen eigenen Zeitplan, blockiert das
+Speichern nicht — nur eine Warnung, dass sich beide überschneiden könnten.
+Entweder den Host-Zeitplan entfernen oder bewusst beides parallel laufen
+lassen.
+
+**Check/Patch/Restart wirkt auf den ganzen Bereich.** Über den Bereichs-Kopf
+lässt sich der gesamte Bereich auf einmal prüfen, patchen oder neu starten —
+praktisch für Gruppen, die ohnehin gemeinsam behandelt werden sollen.
+
+**Zuordnen per Drag & Drop** in der Hostliste: auf einen Bereichs-Kopf
+gezogen tritt der Host bei, auf einen bereichslosen Host gezogen verlässt er
+seinen Bereich wieder.
+
+**Löschen nur, wenn leer.** Ein Bereich mit Hosts lässt sich nicht löschen —
+erst die Hosts herausziehen.
+
+---
+
 # Offene Punkte
 
 - Agent- und Update-Pakete sind unsigniert. Wer Schreibzugriff auf das
