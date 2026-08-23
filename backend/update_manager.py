@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(os.getenv("CO37_DATA", "/opt/co37/data"))
 UPDATE_DIR = DATA_DIR / "update"
 INCOMING_ZIP = UPDATE_DIR / "incoming.zip"
+# Die Signatur wird neben dem Paket abgelegt, nicht nur als "signed": true
+# im Status vermerkt. Der Watcher prueft sie vor dem Auspacken noch einmal
+# selbst und braucht sie dafuer. Er darf sich auf die Pruefung hier nicht
+# verlassen: sie findet unprivilegiert statt, ausgepackt wird als root.
+INCOMING_SIG = UPDATE_DIR / "incoming.sig"
 STATUS_FILE = UPDATE_DIR / "status.json"
 PROBE_DIR = UPDATE_DIR / "_probe"
 PROBE_ZIP = UPDATE_DIR / "_probe.zip"
@@ -212,6 +217,13 @@ def validate_and_store_update(file_bytes: bytes, filename: str,
     shutil.move(str(PROBE_ZIP), str(INCOMING_ZIP))
     shutil.rmtree(PROBE_DIR, ignore_errors=True)
 
+    # Signatur fuer den Watcher hinterlegen. Ohne Signatur die alte
+    # ausdruecklich wegraeumen - sonst bliebe die eines frueheren Pakets
+    # liegen und der Watcher pruefte das neue gegen die falsche Datei.
+    INCOMING_SIG.unlink(missing_ok=True)
+    if signature:
+        INCOMING_SIG.write_text(signature, encoding="ascii")
+
     status = {
         "state": "uploaded",
         "filename": filename,
@@ -245,6 +257,7 @@ def cancel_update() -> dict:
     if status.get("state") != "uploaded":
         raise ValueError("Es liegt kein wartendes Update vor - Abbruch nicht moeglich.")
     INCOMING_ZIP.unlink(missing_ok=True)
+    INCOMING_SIG.unlink(missing_ok=True)
     status = _default_status()
     _write_status(status)
     return status

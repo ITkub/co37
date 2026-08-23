@@ -440,15 +440,16 @@ Neues Paket bauen:
 cd /opt/co37 && bash build_release.sh 0.5.0
 ```
 
-Unter **Einstellungen → Update** hochladen. Das Backend prüft die ZIP-Struktur
-und stellt bereit, führt aber nichts aus. Erst nach Bestätigung übernimmt
-`update_watcher.py` als root:
+Unter **Einstellungen → Update** hochladen. Das Backend prüft Signatur und
+ZIP-Struktur und stellt bereit, führt aber nichts aus. Erst nach Bestätigung
+übernimmt `update_watcher.py` als root:
 
-1. aktuellen Stand nach `update_backups/<zeitstempel>` sichern
-2. `backend/`, `frontend/` und `agent/` austauschen
-3. `pip install -r requirements.txt`
-4. Dienst neu starten
-5. `/api/health` abfragen — schlägt das fehl, wird zurückgerollt
+1. **Signatur erneut prüfen** — stimmt sie nicht, endet es hier
+2. aktuellen Stand nach `update_backups/<zeitstempel>` sichern
+3. `backend/`, `frontend/` und `agent/` austauschen
+4. `pip install -r requirements.txt`
+5. Dienst neu starten
+6. `/api/health` abfragen — schlägt das fehl, wird zurückgerollt
 
 Ausgetauscht werden `backend/`, `frontend/`, `agent/`, `packaging/`, `tests/`
 sowie die Skripte auf oberster Ebene (`setup.sh`, `build_packages.sh`,
@@ -460,27 +461,54 @@ Watcher stillschweigend überspringen — ihre Korrekturen erreichten den Betrie
 dann nie. `data/` wird nie angefasst. Die letzten drei
 Sicherungen bleiben.
 
-Bis 0.4.2 wurden nur die drei Verzeichnisse getauscht — Korrekturen an den
-Hilfsskripten erreichten eine laufende Installation daher nie. Wer von einer
-Fassung vor 0.4.3 kommt, muss `update_watcher.py` einmalig von Hand ersetzen:
-
-```
-systemctl stop co37-watcher
-```
-
-```
-unzip -o -j /tmp/co37_v0_4_3.zip update_watcher.py build_packages.sh build_release.sh setup.sh -d /opt/co37
-```
-
-```
-systemctl start co37-watcher
-```
-
-Danach laufen Updates vollständig über die Oberfläche.
-
 Backend und Watcher sind getrennt, weil das Backend unprivilegiert läuft. Dürfte
 es sich selbst ersetzen, wäre der Upload-Endpunkt gleichbedeutend mit
 Codeausführung als root.
+
+## Warum die Signatur zweimal geprüft wird
+
+Einmal im Backend beim Hochladen, ein zweites Mal im Watcher vor dem
+Auspacken. Das ist keine Verdopplung aus Versehen.
+
+Das Backend läuft unprivilegiert. `incoming.zip` liegt unter `data/` — dem
+einzigen Verzeichnis, in das es schreiben darf. Wer Code als `co37`
+ausführt, umgeht damit die gesamte Anwendungslogik: eigenes Paket
+hinlegen, `status.json` auf `triggered` setzen, fertig. Ohne die zweite
+Prüfung packt der Watcher es als root aus — und genau die Trennung, für
+die es ihn gibt, wäre keine mehr.
+
+Die Regel lautet deshalb: **der Watcher verlässt sich auf keine Prüfung,
+die jenseits der Rechtegrenze stattgefunden hat.** Geprüft wird mit
+derselben Funktion wie im Backend (`backend/release_sig.py`), nicht mit
+einer zweiten Kopie — das Verzeichnis gehört root, `co37` kann es nicht
+umschreiben.
+
+Der Watcher läuft mit dem System-Python, nicht mit dem venv: er muss auch
+dann noch zurückrollen können, wenn ein misslungenes Update das venv
+zerlegt hat. Dafür braucht er **`python3-cryptography`** als
+Systempaket. `setup.sh` installiert es mit. Fehlt es, wird ein Update
+**abgewiesen** statt ungeprüft eingespielt — die Meldung nennt den Befehl.
+
+Ohne ausgelieferten `release_key.pub` wird nicht geprüft. Das ist der
+Zustand eines selbst gebauten Quellstands, und es ist dieselbe Regel wie
+im Backend.
+
+## Wem die Dateien gehören
+
+`/opt/co37` gehört **root**, nur `/opt/co37/data` gehört `co37`.
+
+Der Watcher führt als root Dateien aus diesem Verzeichnis aus: sich
+selbst, `build_packages.sh`, `pip` aus dem venv. Gehörten die `co37`,
+könnte jeder, der Code als `co37` ausführt, sie austauschen und wäre
+damit root — ganz ohne Update-Mechanik.
+
+Der Backend-Prozess verliert dadurch nichts: durch `ProtectSystem=strict`
+und `ReadWritePaths` darf er ohnehin nur nach `data/` schreiben. Lesen und
+Ausführen bleibt über die Modusbits erhalten.
+
+`setup.sh` setzt das, und der Watcher stellt es nach jedem Austausch und
+nach jeder Rückrollung wieder her. Wichtig ist das Zweite: täte er es
+nicht, hübe das nächste Update die Trennung wieder auf.
 
 ---
 
@@ -586,28 +614,13 @@ gehen als Argumentliste an `subprocess`, nie durch eine Shell.
 Unter **Einstellungen → Update** steht, welche Fassung des Watchers läuft.
 Meldet er sich nicht oder ist er älter als das System, steht dort der Grund.
 
-**Das ist wichtiger, als es klingt.** Ein Watcher aus einer Fassung vor 0.4.3
-tauscht beim Update nur `backend/`, `frontend/` und `agent/` aus. Alles auf
-oberster Ebene bleibt liegen — `build_packages.sh`, `setup.sh` und der Watcher
-selbst. Er kann sich also aus eigener Kraft nie erneuern, und Korrekturen an
-den Hilfsskripten erreichen den Betrieb nie. Von außen sieht es so aus, als
-hätten die Updates keine Wirkung.
+**Das ist wichtiger, als es klingt.** Ein zurückgebliebener Watcher tauscht
+beim Update weniger aus, als er soll — im schlimmsten Fall nur `backend/`,
+`frontend/` und `agent/`, während alles auf oberster Ebene liegen bleibt.
+Korrekturen an den Hilfsskripten erreichen den Betrieb dann nie, und von
+außen sieht es so aus, als hätten die Updates keine Wirkung.
 
-Einmalig von Hand auflösen:
-
-```
-systemctl stop co37-watcher
-```
-
-```
-cd /opt/co37 && unzip -o -j /tmp/co37_vX_Y_Z.zip update_watcher.py build_packages.sh build_release.sh setup.sh -d /opt/co37
-```
-
-```
-chmod +x /opt/co37/*.sh && systemctl start co37-watcher
-```
-
-Danach prüfen:
+Welche Fassung tatsächlich läuft:
 
 ```
 curl -s -H "X-API-Key: DEIN-TOKEN" localhost:8080/api/v1/watcher

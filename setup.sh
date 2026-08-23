@@ -42,7 +42,12 @@ fi
 # ---------------------------------------------------------------------
 echo ">>> Pakete installieren"
 apt-get update -qq
-PKGS="python3 python3-venv python3-pip openssl ca-certificates sqlite3 unzip curl"
+# python3-cryptography braucht der Update-Watcher. Er laeuft mit dem
+# System-Python, nicht mit dem venv - bewusst: er muss auch dann noch
+# zurueckrollen koennen, wenn ein misslungenes Update das venv zerlegt
+# hat. Damit steht ihm aber auch nichts aus requirements.txt zur
+# Verfuegung, und die Signaturpruefung vor dem Auspacken braucht Ed25519.
+PKGS="python3 python3-venv python3-pip python3-cryptography openssl ca-certificates sqlite3 unzip curl"
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS
 
 # ---------------------------------------------------------------------
@@ -83,7 +88,19 @@ else
   chmod 600 "$BASE/data/secret.key"
 fi
 
-chown -R co37:co37 "$BASE"
+# Eigentuemer: alles root, nur die Daten gehoeren co37.
+#
+# Der Watcher laeuft als root und fuehrt Dateien aus diesem Verzeichnis
+# aus - update_watcher.py selbst, build_packages.sh, pip aus dem venv.
+# Gehoerten die co37, koennte jeder, der Code als co37 ausfuehrt, sie
+# austauschen und damit root werden. Genau die Trennung, fuer die es den
+# Watcher ueberhaupt gibt, waere dann keine.
+#
+# Der Backend-Prozess verliert dadurch nichts: er darf durch
+# ProtectSystem=strict und ReadWritePaths ohnehin nur nach data/
+# schreiben. Lesen und Ausfuehren bleibt ueber die Modusbits erhalten.
+chown -R root:root "$BASE"
+chown -R co37:co37 "$BASE/data"
 chmod 700 "$BASE/data"
 
 # ---------------------------------------------------------------------

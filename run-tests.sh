@@ -97,6 +97,7 @@ REIHEN=(
   "proxy-fallback  $PY tests/proxy-fallback-test.py"
   "license        $PY tests/license-test.py"
   "release-sig    $PY tests/release-sig-test.py"
+  "watcher-sig    $PY tests/watcher-sig-test.py"
   "keyguard       $PY tests/keyguard-test.py"
   "patchdue        $PY tests/patchdue-test.py"
   "area-migrate    $PY tests/area-migrate-test.py"

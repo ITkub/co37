@@ -96,7 +96,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.36.3"
+WATCHER_VERSION = "0.36.4"
 WATCHER_INFO = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 
@@ -132,6 +132,90 @@ def append_log(status: dict, line: str):
 
 def run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def eigentuemer_setzen():
+    """
+    Stellt die Eigentumsverhaeltnisse nach jedem Eingriff wieder her:
+    alles root, nur data/ gehoert co37.
+
+    An einer Stelle, weil das Austauschen und das Zurueckrollen es beide
+    brauchen und ein Auseinanderlaufen genau die Luecke oeffnen wuerde,
+    die das hier schliesst: der Watcher fuehrt als root Dateien aus
+    diesem Verzeichnis aus (sich selbst, build_packages.sh, pip aus dem
+    venv). Waeren die fuer co37 schreibbar, waere jede Ausfuehrung als
+    co37 gleichbedeutend mit root.
+    """
+    run(["chown", "-R", "root:root", str(BASE)])
+    run(["chown", "-R", "co37:co37", str(DATA_DIR)])
+
+
+# ----------------------------------------------------------------------
+# Signatur des Pakets - noch einmal, hier oben
+# ----------------------------------------------------------------------
+# Das Backend prueft die Signatur bereits beim Hochladen. Das genuegt
+# nicht: das Backend laeuft unprivilegiert, dieser Prozess als root, und
+# incoming.zip liegt in data/ - dem einzigen Verzeichnis, in das das
+# Backend schreiben darf. Wer Code als co37 ausfuehrt, umgeht die
+# Anwendungslogik einfach, legt ein eigenes Paket hin und setzt den
+# Status auf 'triggered'.
+#
+# Die Regel lautet deshalb: dieser Prozess verlaesst sich auf keine
+# Pruefung, die jenseits der Rechtegrenze stattgefunden hat, und prueft
+# selbst - vor dem Auspacken.
+#
+# Geprueft wird mit derselben Funktion wie im Backend (backend/
+# release_sig.py), nicht mit einer zweiten Kopie der Kryptologik. Das
+# Verzeichnis gehoert root, kann von co37 also nicht umgeschrieben
+# werden - anders waere der Import selbst die Luecke.
+INCOMING_SIG = UPDATE_DIR / "incoming.sig"
+
+
+class PaketAbgewiesen(RuntimeError):
+    """Ein Paket, das nicht ausgepackt werden darf."""
+
+
+def pruefe_signatur(paket: Path, signatur: Path):
+    """
+    Wirft PaketAbgewiesen, wenn das Paket nicht vom Herausgeber stammt.
+
+    Ohne ausgelieferten release_key.pub wird nicht geprueft - dieselbe
+    Regel wie im Backend, damit ein selbst gebauter Quellstand ohne
+    Signatur weiterlaeuft.
+    """
+    schluessel = BASE / "backend" / "release_key.pub"
+    if not schluessel.is_file():
+        log("Kein release_key.pub vorhanden - Paket wird ungeprueft "
+            "eingespielt (selbst gebauter Stand)")
+        return
+
+    sys.path.insert(0, str(BASE / "backend"))
+    try:
+        import release_sig
+    except Exception as exc:  # noqa: BLE001
+        # Bewusst abweisen statt durchlassen. Ein Update, das die
+        # Pruefung stillschweigend ueberspringt, ist genau der Vorfall,
+        # der zu 0.34.0 gefuehrt hat.
+        raise PaketAbgewiesen(
+            f"Die Signatur kann nicht geprueft werden ({exc}). Der "
+            f"Watcher laeuft mit dem System-Python und braucht dafuer "
+            f"das Paket python3-cryptography: "
+            f"apt install -y python3-cryptography"
+        )
+
+    if not signatur.is_file():
+        raise PaketAbgewiesen(
+            "Zu diesem Paket liegt keine Signatur vor. Es wird nicht "
+            "eingespielt.")
+
+    try:
+        release_sig.pruefen(paket.read_bytes(),
+                            signatur.read_text(encoding="ascii",
+                                               errors="replace"))
+    except release_sig.SignaturFehler as exc:
+        raise PaketAbgewiesen(str(exc))
+
+    log("Signatur des Pakets geprueft")
 
 
 # ----------------------------------------------------------------------
@@ -228,7 +312,7 @@ def restore_backup(src: Path):
         source = src / name
         if source.is_file():
             shutil.copy2(source, BASE / name)
-    run(["chown", "-R", "co37:co37", str(BASE)])
+    eigentuemer_setzen()
 
 
 def find_update_root(extract_dir: Path) -> Path:
@@ -283,7 +367,7 @@ def swap_in_new_code(root: Path) -> bool:
             shutil.copy2(new_self, BASE / SELF_FILE)
             self_changed = True
 
-    run(["chown", "-R", "co37:co37", str(BASE)])
+    eigentuemer_setzen()
     # Skripte muessen ausfuehrbar bleiben
     for name in MANAGED_FILES + [SELF_FILE]:
         f = BASE / name
@@ -399,6 +483,12 @@ def do_update():
         if not INCOMING_ZIP.exists():
             raise RuntimeError("incoming.zip fehlt")
 
+        # Vor allem anderen, insbesondere vor dem Auspacken und vor der
+        # Sicherung: was nicht vom Herausgeber stammt, wird hier nicht
+        # angefasst.
+        append_log(status, "Pruefe Signatur")
+        pruefe_signatur(INCOMING_ZIP, INCOMING_SIG)
+
         tag = datetime.now().strftime("%Y%m%d-%H%M%S")
         append_log(status, "Sichere aktuelle Version")
         backup_path = backup_current(tag)
@@ -485,6 +575,7 @@ def do_update():
     finally:
         shutil.rmtree(WORK_DIR, ignore_errors=True)
         INCOMING_ZIP.unlink(missing_ok=True)
+        INCOMING_SIG.unlink(missing_ok=True)
 
 
 def main():
