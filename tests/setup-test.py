@@ -126,6 +126,43 @@ check("python3-cryptography wird mitinstalliert",
       "python3-cryptography" in quelle)
 
 # ----------------------------------------------------------------------
+# Der Admin-Token steht nur bei der Erstinstallation im Klartext
+# ----------------------------------------------------------------------
+# Der Anlass: setup.sh gab ihn am Ende JEDES Laufs aus, auch wenn er
+# gerade eben als "Vorhandener Admin-Token wird weiterverwendet" gemeldet
+# worden war. Bei einem Wiederholungslauf ist das nur eine Gelegenheit,
+# ihn irgendwohin zu kopieren, wo er nicht hingehoert - genau so ist er
+# einmal in einem Chatprotokoll gelandet und musste getauscht werden.
+zeilen = quelle.splitlines()
+klartext = [i for i, z in enumerate(zeilen) if "Admin-Token: $TOKEN" in z]
+check("der Token wird genau einmal im Klartext ausgegeben",
+      len(klartext) == 1, len(klartext))
+
+check("TOKEN_NEU wird bei der Erstinstallation gesetzt",
+      re.search(r"TOKEN_NEU=1", quelle) is not None)
+check("und vorher auf 0", re.search(r"^TOKEN_NEU=0", quelle, re.M) is not None)
+
+if len(klartext) == 1:
+    # Rueckwaerts bis zum umschliessenden if laufen. Steht dazwischen ein
+    # 'fi', ist die Ausgabe nicht mehr in dem Zweig - dann greift die
+    # Bedingung nicht, auch wenn sie irgendwo darueber steht.
+    i = klartext[0]
+    umschliessend = None
+    for j in range(i - 1, -1, -1):
+        z = zeilen[j].strip()
+        if z == "fi":
+            break
+        if z.startswith("if "):
+            umschliessend = z
+            break
+    check("die Klartextausgabe haengt an TOKEN_NEU",
+          umschliessend is not None and "TOKEN_NEU" in umschliessend,
+          umschliessend or "kein umschliessendes if gefunden")
+
+check("beim Wiederholungslauf wird nur der Fundort genannt",
+      "steht in $BASE/data/admin.token" in quelle)
+
+# ----------------------------------------------------------------------
 # Und das Skript muss ueberhaupt laufen koennen
 # ----------------------------------------------------------------------
 # Nur wenn bash da ist. Fehlt sie, ist das kein Fehler des Skripts, und

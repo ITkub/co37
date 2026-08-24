@@ -49,8 +49,13 @@ bash /opt/co37/setup.sh
 ```
 
 Das Skript legt Benutzer, venv, systemd-Dienste und Schlüssel an. Am Ende werden
-**Adresse und Admin-Token** ausgegeben. Beides notieren — der Token wird beim
-ersten Aufruf der Oberfläche gebraucht.
+**Adresse und Admin-Token** ausgegeben. Der Token gilt **nur auf dem Server
+selbst** (127.0.0.1) — er ist der Weg zurück, wenn du dich aus der Oberfläche
+aussperrst, und das Testgerüst benutzt ihn. Für die Oberfläche brauchst du ihn
+nicht.
+
+Bei einem Wiederholungslauf wird er nicht erneut ausgegeben, sondern nur sein
+Fundort genannt. Er steht in `/opt/co37/data/admin.token`.
 
 Läuft mehrfach ohne Schaden; bestehende Schlüssel und Daten bleiben erhalten.
 
@@ -96,7 +101,8 @@ python.org und legt sie in `packaging/cache/` ab. Ohne Netzzugang die Datei
 http://192.168.1.10:8080
 ```
 
-Beim ersten Aufruf nach dem Admin-Token aus Schritt 1.5 gefragt.
+Anmeldung beim ersten Mal mit **`admin` / `admin`**. Das Passwort gehört
+danach unter *Einstellungen → Konto* geändert.
 
 ---
 
@@ -140,14 +146,20 @@ Agents und warten dann auf Freigabe.
 ### 3.1 Befehl aus der Oberfläche holen
 
 **Einstellungen → Agents → Linux → Befehl kopieren.** Enthält Serveradresse und
-API-Key bereits eingesetzt.
+ein frisch erzeugtes **Installations-Token** bereits eingesetzt. Das Token läuft
+nach 15 Minuten ab und gilt für wenige Abrufe — was davon in der Verlaufsdatei
+des Zielsystems zurückbleibt, ist dann wertlos. Deshalb erst kurz vor der
+Einrichtung erzeugen.
+
+Nicht den Admin-Token verwenden: der gilt nur auf dem Server selbst und würde
+vom Zielsystem aus abgewiesen.
 
 ### 3.2 Auf dem Zielsystem ausführen
 
 Als root, Beispiel:
 
 ```
-curl -fsSL -H "X-API-Key: DEIN-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent_0.4.1_all.deb -o /tmp/pp-agent.deb && CO37_SERVER="http://192.168.1.10:8080" apt-get install -y /tmp/pp-agent.deb
+curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent_VERSION_all.deb -o /tmp/co37-agent.deb && CO37_SERVER="http://192.168.1.10:8080" apt-get install -y --allow-downgrades /tmp/co37-agent.deb
 ```
 
 `apt-get install` statt `dpkg -i` — sonst wird `python3-requests` nicht
@@ -704,9 +716,12 @@ sicheren Kontext bereit — HTTPS oder `localhost`. Über `http://<ip>:8080` gib
 es sie nicht. Die Kopierknöpfe nutzen daher einen Rückfallweg über ein
 verstecktes Textfeld, der auch ohne TLS funktioniert.
 
-Der Admin-Token geht unverschlüsselt über das Netz. Für ein internes Netz
-vertretbar, aber der Token gehört getauscht, sobald das System über WireGuard
-oder einen Reverse Proxy erreichbar wird.
+Anmeldedaten und Sitzungscookie gehen unverschlüsselt über das Netz. Für ein
+internes Netz vertretbar, aber sobald das System über WireGuard oder einen
+Reverse Proxy erreichbar wird, gehört TLS davor — siehe `REVERSE-PROXY.md`.
+
+Der Admin-Token ist davon nicht betroffen: er gilt nur über Loopback und geht
+gar nicht erst über das Netz.
 
 ---
 

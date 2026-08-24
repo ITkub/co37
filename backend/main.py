@@ -707,8 +707,38 @@ def authenticate(x_api_key: str, x_session: str, session: Session,
     dort aufgerufen werden kann, wo die Pruefung von einer Bedingung
     abhaengt - beim Paketdownload etwa, der alternativ den
     Paket-Schluessel akzeptiert.
+
+    Der API-Key gilt NUR ueber Loopback. Warum:
+
+    Er stammt aus der Zeit vor den Benutzerkonten, als er der einzige Weg
+    hinein war. Heute meldet sich ein Mensch mit Passwort an, und dafuer
+    gibt es eine Drosselung - fuenf Fehlversuche je Quelle, dann fuenfzehn
+    Minuten Pause. Fuer den API-Key gab es nichts dergleichen: dauerhaft
+    gueltig, nie ablaufend, volle Rechte, auf jeder Route, unbegrenzt oft
+    versuchbar. Er war damit die einzige Zugangsberechtigung, die niemand
+    bremst.
+
+    Gebraucht wird er heute noch an zwei Stellen, und beide sitzen auf dem
+    Rechner selbst: das Testgeruest und der Weg zurueck, wenn man sich aus
+    der Oberflaeche aussperrt - einziges Administratorkonto deaktiviert,
+    Passwort weg. Wer das braucht, hat ohnehin eine Shell auf dem Server.
+
+    Aus dem Netz ist er damit gar nicht mehr erreichbar, auch nicht ueber
+    den Reverse Proxy: geprueft wird die tatsaechliche Gegenstelle, nicht
+    X-Forwarded-For. Eine weitergereichte Kopfzeile waere hier genau die
+    falsche Grundlage - sie kann sich jeder selbst setzen.
+
+    Abgewiesen wird nur ein PASSENDER Key von aussen. Ein unpassender
+    faellt weiter auf die Sitzungspruefung durch, damit eine
+    versehentlich mitgeschickte Kopfzeile niemanden aussperrt.
     """
     if x_api_key and secrets.compare_digest(x_api_key, ADMIN_TOKEN):
+        if not is_loopback(request):
+            raise HTTPException(
+                403,
+                "Der Admin-Token gilt nur auf dem Server selbst "
+                "(127.0.0.1). Fuer den Zugriff von aussen bitte anmelden.",
+            )
         return Principal("api-key", Role.admin)
 
     row = _session_by_token(session_token(request, x_session), session)

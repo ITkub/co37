@@ -70,6 +70,12 @@ echo ">>> Virtualenv"
 # Geheimnisse - bestehende werden nie ueberschrieben
 # ---------------------------------------------------------------------
 echo ">>> Schluessel"
+# TOKEN_NEU entscheidet unten, ob der Token am Ende im Klartext auf dem
+# Bildschirm steht. Bei der Erstinstallation muss er das - sonst kennt ihn
+# niemand. Bei jedem weiteren Lauf waere es nur eine Gelegenheit, ihn
+# irgendwohin zu kopieren, wo er nicht hingehoert. Genau so ist er einmal
+# in einem Chatprotokoll gelandet und musste getauscht werden.
+TOKEN_NEU=0
 if [ -f "$BASE/data/admin.token" ]; then
   TOKEN=$(cat "$BASE/data/admin.token")
   echo "    Vorhandener Admin-Token wird weiterverwendet."
@@ -77,6 +83,7 @@ else
   TOKEN=$(openssl rand -base64 36 | tr -d '/+=' | cut -c1-40)
   echo "$TOKEN" > "$BASE/data/admin.token"
   chmod 600 "$BASE/data/admin.token"
+  TOKEN_NEU=1
 fi
 
 if [ -f "$BASE/data/secret.key" ]; then
@@ -241,7 +248,13 @@ echo " Unverschluesselt - fuer den Betrieb im lokalen Netz vorgesehen."
 echo " Zugriff aus anderen Netzen bitte ueber WireGuard."
 
 echo
-echo " Admin-Token: $TOKEN"
+if [ "$TOKEN_NEU" = "1" ]; then
+  echo " Admin-Token: $TOKEN"
+  echo " Notieren. Er gilt nur auf dem Server selbst (127.0.0.1),"
+  echo " fuer den Zugriff ueber das Netz meldest du dich an."
+else
+  echo " Admin-Token: unveraendert, steht in $BASE/data/admin.token"
+fi
 echo
 echo " Dateien, die in die Datensicherung gehoeren:"
 echo "     $BASE/data/co37.db"
