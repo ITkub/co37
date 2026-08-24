@@ -96,7 +96,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.36.4"
+WATCHER_VERSION = "0.36.6"
 WATCHER_INFO = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 
@@ -124,10 +124,70 @@ def write_status(data: dict):
         pass
 
 
-def append_log(status: dict, line: str):
-    status.setdefault("log", []).append(f"[{datetime.now():%H:%M:%S}] {line}")
+def eintrag(schluessel: str, **werte) -> dict:
+    """Ein Protokolleintrag als Schluessel. Ohne Zeitstempel."""
+    e = {"k": schluessel}
+    if werte:
+        e["p"] = werte
+    return e
+
+
+def eintrag_text(text: str) -> dict:
+    """Ein Protokolleintrag, der unveraendert angezeigt wird."""
+    return {"text": text}
+
+
+def _journalzeile(e: dict) -> str:
+    """
+    Wie ein Eintrag im Journal steht.
+
+    Der Schluessel samt Werten, nicht der uebersetzte Satz. Fuer jemanden,
+    der auf dem Rechner sitzt, ist das eindeutiger: es bleibt ueber
+    Fassungen und Sprachen hinweg gleich und laesst sich greppen.
+    """
+    if "k" not in e:
+        return e.get("text", "")
+    return e["k"] + "".join(f" {n}={w}" for n, w in (e.get("p") or {}).items())
+
+
+def append_eintrag(status: dict, e: dict):
+    """
+    Haengt einen fertigen Eintrag an - mit Zeitstempel, geschrieben,
+    protokolliert.
+
+    Die eine Stelle, die Eintraege ins Protokoll bringt. append_log() und
+    append_zeile() sind nur die bequemen Formen davon; build_packages()
+    liefert seine Eintraege schon fertig und geht direkt hierher.
+    """
+    status.setdefault("log", []).append(
+        {"t": f"{datetime.now():%H:%M:%S}", **e})
     write_status(status)
-    log(line)
+    log(_journalzeile(e))
+
+
+def append_log(status: dict, schluessel: str, **werte):
+    """
+    Haengt einen Protokolleintrag an - als Schluessel, nicht als Satz.
+
+    Uebersetzt wird erst beim Anzeigen. Backend und Agent liefern schon
+    immer Schluessel; der Watcher war die letzte Stelle, die deutsche
+    Prosa direkt in die Oberflaeche geschrieben hat - sie stand dort auch
+    dann, wenn die Oberflaeche auf Englisch lief.
+    """
+    append_eintrag(status, eintrag(schluessel, **werte))
+
+
+def append_zeile(status: dict, text: str):
+    """
+    Haengt eine Zeile an, die NICHT uebersetzt wird.
+
+    Fuer die Ausgabe von build_packages.sh, apt und pip: die entsteht
+    ausserhalb und laesst sich nicht in Schluessel fassen. Die
+    Oberflaeche gibt solche Eintraege unveraendert aus - und ebenso
+    Eintraege, die noch reine Zeichenketten sind, wie sie ein Watcher vor
+    0.36.6 geschrieben hat.
+    """
+    append_eintrag(status, eintrag_text(text))
 
 
 def run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
@@ -391,7 +451,7 @@ def write_build_status(data: dict):
         pass
 
 
-def build_packages(log_lines: list[str] = None) -> tuple[bool, list[str]]:
+def build_packages(log_lines: list[dict] = None) -> tuple[bool, list[dict]]:
     """
     Baut die Agent-Pakete. Wird nach jedem Update aufgerufen und kann
     zusaetzlich ueber die Oberflaeche angefordert werden.
@@ -401,46 +461,46 @@ def build_packages(log_lines: list[str] = None) -> tuple[bool, list[str]]:
     pkg_dir = DATA_DIR / "packages"
 
     if not builder.is_file():
-        lines.append("build_packages.sh nicht gefunden")
+        lines.append(eintrag("pkg.log.script_missing"))
         return False, lines
 
-    lines.append("Baue Agent-Pakete...")
+    lines.append(eintrag("pkg.log.building"))
     res = run(["bash", str(builder)], timeout=1800)
     out = ((res.stdout or "") + (res.stderr or "")).strip()
 
     for line in out.splitlines():
         if line.strip():
-            lines.append("  " + line.rstrip())
+            lines.append(eintrag_text("  " + line.rstrip()))
 
     names = sorted(p.name for p in pkg_dir.glob("co37-agent*")) \
         if pkg_dir.is_dir() else []
 
     if res.returncode != 0:
-        lines.append("Paketbau fehlgeschlagen.")
+        lines.append(eintrag("pkg.log.failed"))
         return False, lines
 
-    lines.append("Fertig: " + (", ".join(names) or "keine Pakete erzeugt"))
+    lines.append(eintrag("pkg.log.done", pakete=", ".join(names))
+                 if names else eintrag("pkg.log.done_none"))
 
     if not any(n.endswith(".msi") for n in names):
         # Ursache unterscheiden, sonst schickt die Meldung auf die falsche
         # Faehrte, wenn wixl laengst installiert ist.
         if not shutil.which("wixl"):
-            lines.append(
-                "Kein Windows-Paket: 'wixl' ist nicht installiert. "
-                "Auf dem Server nachholen mit: apt install wixl"
-            )
+            lines.append(eintrag("pkg.log.no_msi_wixl"))
         elif "python.org" in out or "Embeddable" in out:
-            lines.append(
-                "Kein Windows-Paket: die Python-Distribution konnte nicht "
-                "geladen werden. Der Server braucht Zugriff auf python.org, "
-                "oder die Datei von Hand ablegen unter "
-                "packaging/cache/python-3.12.8-embed-amd64.zip"
-            )
+            lines.append(eintrag("pkg.log.no_msi_python"))
         else:
-            lines.append(
-                "Kein Windows-Paket erzeugt. Grund siehe Ausgabe oben."
-            )
-    return True, lines
+            lines.append(eintrag("pkg.log.no_msi_other"))
+
+    # Die neuen Pakete gehoeren root - build_packages.sh laeuft als root.
+    # Lesen genuegt dem Backend, aber unter data/ soll durchgehend co37
+    # stehen, wie ueberall sonst dort.
+    #
+    # Stand bis 0.36.5 HINTER einem 'return' und lief damit nie. Solange
+    # das ganze Verzeichnis co37 gehoerte, fiel das nicht auf; seit $BASE
+    # root gehoert, waere es aufgefallen. Dagegen gibt es jetzt eine
+    # Pruefung: tests/watcher-sig-test.py sucht Anweisungen hinter einem
+    # 'return' im ganzen Watcher.
     try:
         run(["chown", "-R", "co37:co37", str(pkg_dir)], timeout=60)
     except Exception:  # noqa: BLE001
@@ -451,7 +511,8 @@ def build_packages(log_lines: list[str] = None) -> tuple[bool, list[str]]:
 def handle_build_request():
     """Verarbeitet eine ueber die Oberflaeche angeforderte Paketerstellung."""
     log(">>> Paketbau angefordert")
-    write_build_status({"state": "running", "log": ["Wird ausgefuehrt..."]})
+    write_build_status({"state": "running",
+                        "log": [eintrag("pkg.log.running")]})
     try:
         ok, lines = build_packages()
         write_build_status({
@@ -462,7 +523,7 @@ def handle_build_request():
     except Exception as exc:  # noqa: BLE001
         write_build_status({
             "state": "error",
-            "log": [f"Ausnahme: {exc}"],
+            "log": [eintrag("pkg.log.exception", fehler=str(exc))],
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
     finally:
@@ -486,15 +547,15 @@ def do_update():
         # Vor allem anderen, insbesondere vor dem Auspacken und vor der
         # Sicherung: was nicht vom Herausgeber stammt, wird hier nicht
         # angefasst.
-        append_log(status, "Pruefe Signatur")
+        append_log(status, "upd.log.check_sig")
         pruefe_signatur(INCOMING_ZIP, INCOMING_SIG)
 
         tag = datetime.now().strftime("%Y%m%d-%H%M%S")
-        append_log(status, "Sichere aktuelle Version")
+        append_log(status, "upd.log.backup")
         backup_path = backup_current(tag)
-        append_log(status, f"Gesichert unter update_backups/{tag}")
+        append_log(status, "upd.log.backup_done", ordner=tag)
 
-        append_log(status, "Entpacke Paket")
+        append_log(status, "upd.log.unpack")
         shutil.rmtree(WORK_DIR, ignore_errors=True)
         WORK_DIR.mkdir(parents=True)
         with zipfile.ZipFile(INCOMING_ZIP) as zf:
@@ -502,25 +563,25 @@ def do_update():
         root = find_update_root(WORK_DIR)
 
         new_version = (root / "backend" / "VERSION").read_text().strip()
-        append_log(status, f"Neue Version: {new_version}")
+        append_log(status, "upd.log.new_version", version=new_version)
 
-        append_log(status, "Tausche Programmdateien")
+        append_log(status, "upd.log.swap")
         self_changed = swap_in_new_code(root)
         if self_changed:
-            append_log(status, "Watcher wurde ebenfalls erneuert")
+            append_log(status, "upd.log.watcher_renewed")
 
-        append_log(status, "Aktualisiere Abhaengigkeiten")
+        append_log(status, "upd.log.deps")
         res = run([str(VENV_PIP), "install", "-q", "-r",
                    str(BASE / "backend" / "requirements.txt")], timeout=1200)
         if res.returncode != 0:
             raise RuntimeError(f"pip fehlgeschlagen: {res.stderr[-800:]}")
 
-        append_log(status, "Starte Dienst neu")
+        append_log(status, "upd.log.restart")
         res = run(["systemctl", "restart", SERVICE], timeout=120)
         if res.returncode != 0:
             raise RuntimeError(f"Neustart fehlgeschlagen: {res.stderr[-800:]}")
 
-        append_log(status, "Warte auf Health-Check")
+        append_log(status, "upd.log.health")
         if not wait_for_health():
             raise RuntimeError(
                 f"Health-Check nach dem Neustart fehlgeschlagen: "
@@ -530,15 +591,14 @@ def do_update():
         # Agent-Pakete liegen unter data/ und werden beim Update nicht
         # ausgetauscht. Sie enthalten eine Kopie der agent.py und waeren
         # danach veraltet.
-        append_log(status, "Baue Agent-Pakete neu")
+        append_log(status, "upd.log.build_agents")
         ok, lines = build_packages()
-        for line in lines[-25:]:
-            append_log(status, line)
+        for e in lines[-25:]:
+            append_eintrag(status, e)
         if not ok:
-            append_log(status, "Systemupdate bleibt trotzdem gueltig. "
-                               "Neubau ueber die Oberflaeche moeglich.")
+            append_log(status, "upd.log.build_failed_ok")
 
-        append_log(status, "Update erfolgreich")
+        append_log(status, "upd.log.success")
         status["state"] = "success"
         status["new_version"] = new_version
         status["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -546,26 +606,26 @@ def do_update():
 
         if self_changed:
             # Zum Schluss, damit der laufende Vorgang abgeschlossen ist.
-            append_log(status, "Starte Watcher neu")
+            append_log(status, "upd.log.restart_watcher")
             run(["systemctl", "restart", "co37-watcher"], timeout=30)
 
     except Exception as exc:  # noqa: BLE001
-        append_log(status, f"Fehler: {exc}")
+        append_log(status, "upd.log.error", fehler=str(exc))
         if backup_path and backup_path.exists():
-            append_log(status, "Rolle auf die gesicherte Version zurueck")
+            append_log(status, "upd.log.rollback")
             try:
                 restore_backup(backup_path)
                 run([str(VENV_PIP), "install", "-q", "-r",
                      str(BASE / "backend" / "requirements.txt")], timeout=1200)
                 run(["systemctl", "restart", SERVICE], timeout=120)
                 if wait_for_health():
-                    append_log(status, "Rueckrollung erfolgreich, alte Version laeuft")
+                    append_log(status, "upd.log.rollback_ok")
                     status["state"] = "rolled_back"
                 else:
-                    append_log(status, "Rueckrollung ohne Health-Check - Eingriff noetig")
+                    append_log(status, "upd.log.rollback_no_health")
                     status["state"] = "error"
             except Exception as rexc:  # noqa: BLE001
-                append_log(status, f"Rueckrollung fehlgeschlagen: {rexc}")
+                append_log(status, "upd.log.rollback_failed", fehler=str(rexc))
                 status["state"] = "error"
         else:
             status["state"] = "error"

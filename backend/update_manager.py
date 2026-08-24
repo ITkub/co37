@@ -247,7 +247,10 @@ def trigger_update() -> dict:
         raise ValueError("Update-Datei nicht mehr vorhanden, bitte erneut hochladen.")
     status["state"] = "triggered"
     status["triggered_at"] = utcnow().isoformat()
-    status["log"] = ["Update angefordert, warte auf Verarbeitung durch den Host..."]
+    # Schluessel statt Satz - die Oberflaeche uebersetzt beim Anzeigen,
+    # gleiche Form wie die Eintraege des Watchers.
+    status["log"] = [{"t": datetime.now().strftime("%H:%M:%S"),
+                      "k": "upd.log.queued"}]
     _write_status(status)
     return status
 

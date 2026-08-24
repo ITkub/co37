@@ -227,6 +227,50 @@ check("restore_backup setzt die Eigentuemer",
 check("kein chown von BASE auf co37 mehr im Quelltext",
       'chown", "-R", "co37:co37", str(BASE)' not in quelle)
 
+# Die frisch gebauten Agent-Pakete gehoeren danach co37.
+check("build_packages setzt den Eigentuemer der Pakete",
+      'chown", "-R", "co37:co37", str(pkg_dir)' in quelle)
+
+# ======================================================================
+# Kein toter Code hinter einem return
+# ======================================================================
+# Der Anlass, gefunden beim Umbau auf Schluessel in 0.36.6: in
+# build_packages() stand
+#
+#     return True, lines
+#     try:
+#         run(["chown", "-R", "co37:co37", str(pkg_dir)])
+#     ...
+#     return True, lines
+#
+# Das chown lief also nie. Aufgefallen ist es nur beim Lesen - kein Test
+# hat es gemerkt, und die Wirkung war lange unsichtbar, weil ohnehin das
+# ganze Verzeichnis co37 gehoerte. Seit $BASE root gehoert, waeren die
+# Pakete root geblieben.
+#
+# Deshalb hier eine allgemeine Schranke fuer die ganze Datei statt einer
+# Pruefung nur auf diese eine Stelle: was hinter einem return, raise,
+# break oder continue im selben Block steht, laeuft nie.
+print("--- Kein toter Code ---")
+import ast  # noqa: E402
+
+baum = ast.parse((WURZEL / "update_watcher.py").read_text(encoding="utf-8"))
+ABBRUCH = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+tot = []
+for knoten in ast.walk(baum):
+    for feld in ("body", "orelse", "finalbody"):
+        block = getattr(knoten, feld, None)
+        if not isinstance(block, list):
+            continue
+        for i, anweisung in enumerate(block[:-1]):
+            if isinstance(anweisung, ABBRUCH):
+                naechste = block[i + 1]
+                tot.append(
+                    f"Zeile {naechste.lineno} nach {type(anweisung).__name__} "
+                    f"in Zeile {anweisung.lineno}")
+check("keine Anweisung hinter return/raise im selben Block",
+      not tot, "; ".join(tot))
+
 # ======================================================================
 # Das Backend legt die Signatur ueberhaupt erst ab
 # ======================================================================

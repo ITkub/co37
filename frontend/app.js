@@ -285,6 +285,31 @@ document.querySelectorAll("dialog").forEach(dlg => {
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 /**
+ * Setzt ein Protokoll aus Update oder Paketbau zu Text zusammen.
+ *
+ * Watcher und Backend liefern Schluessel, keine Saetze - uebersetzt wird
+ * hier. Vorher standen dort deutsche Saetze, die auch bei englischer
+ * Oberflaeche deutsch blieben.
+ *
+ * Drei Formen kommen vor, alle drei muessen durchlaufen:
+ *   {t, k, p}   ein Schluessel mit Werten - wird uebersetzt
+ *   {t, text}   Ausgabe von build_packages.sh, apt, pip - unveraendert
+ *   "..."       reine Zeichenkette, wie sie ein Watcher vor 0.36.6
+ *               geschrieben hat. Steht noch im Protokoll des Updates,
+ *               das die neue Fassung gerade eingespielt hat.
+ *
+ * Ein unbekannter Schluessel liefert ueber t() den Schluessel selbst -
+ * sichtbar kaputt statt leer, falls ein neuerer Watcher etwas meldet,
+ * das diese Oberflaeche noch nicht kennt.
+ */
+function protokoll(eintraege){
+  return (eintraege || []).map(e => {
+    if (typeof e === "string") return e;
+    const zeit = e.t ? `[${e.t}] ` : "";
+    return zeit + (e.k ? t(e.k, e.p || {}) : (e.text ?? ""));
+  }).join("\n");
+}
+/**
  * Zeigt einen Zeitstempel aus der API in Ortszeit.
  *
  * Die API liefert UTC mit Zeitzone. Vorher wurde an einer Stelle die
@@ -1643,7 +1668,7 @@ async function loadBuildStatus(){
   const busy = st.state === "requested" || st.state === "running";
   const done = st.state === "success" || st.state === "error";
   box.style.display = (busy || done) ? "block" : "none";
-  if (busy || done) box.textContent = (st.log || []).join("\n");
+  if (busy || done) box.textContent = protokoll(st.log);
 
   document.getElementById("pkgBuild").disabled = busy;
 
@@ -2008,7 +2033,7 @@ async function loadUpdate(){
   document.getElementById("uDrop").style.display = (pending||busy) ? "none" : "block";
   document.getElementById("uLogBox").style.display = (busy||done) ? "block" : "none";
   if (busy || done){
-    document.getElementById("upLog").textContent = (st.log||[]).join("\n") || "…";
+    document.getElementById("upLog").textContent = protokoll(st.log) || "…";
     document.getElementById("uAck").style.display = done ? "inline-block" : "none";
   }
   if (busy && !UPD_TIMER) UPD_TIMER = setInterval(loadUpdate, 3000);

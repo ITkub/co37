@@ -350,5 +350,107 @@ console.log("\n=== data-i18n-html enthaelt nur Auszeichnung ===");
         schluessel.length);
 }
 
+// ------------------------------------- data-i18n-html verschluckt Nachbarn
+console.log("\n=== data-i18n-html umschliesst keine benannten Elemente ===");
+{
+  // Der Anlass, aus 0.36.3: die Zeilen der Agent-Pakete standen auf
+  // data-i18n-html, und in genau diesen Spannen lagen die Elemente
+  // #infoLinux und #infoWin. data-i18n-html setzt innerHTML - beim
+  // Sprachaufbau waren die beiden damit weg, und app.js scheiterte
+  // danach an document.getElementById(...).textContent = ... mit
+  // "Cannot set properties of null". Erst beim Oeffnen der
+  // Einstellungen sichtbar, deshalb von 201 Frontend-Pruefungen nicht
+  // erwischt.
+  //
+  // Das ist der Unterschied zu data-i18n: das ersetzt nur den ersten
+  // Textknoten und laesst Kindelemente stehen. Wer Auszeichnung
+  // braucht, gibt ihr eine eigene Spanne und legt das benannte Element
+  // daneben, nicht hinein.
+  const treffer = [];
+  const re = /<(\w+)([^>]*\bdata-i18n-html="([^"]+)"[^>]*)>/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const tag = m[1];
+    const rest = html.slice(m.index + m[0].length);
+    // Ende des Elements suchen, verschachtelte gleichnamige Tags mitzaehlen.
+    const teile = rest.matchAll(new RegExp(`<(/?)${tag}\\b`, "g"));
+    let tiefe = 1, ende = rest.length;
+    for (const teil of teile) {
+      tiefe += teil[1] === "/" ? -1 : 1;
+      if (tiefe === 0) { ende = teil.index; break; }
+    }
+    const inhalt = rest.slice(0, ende);
+    for (const id of inhalt.matchAll(/\bid="([^"]+)"/g)) {
+      treffer.push(`${m[3]} umschliesst #${id[1]}`);
+    }
+  }
+  check("kein data-i18n-html umschliesst ein Element mit id",
+        treffer.length === 0, treffer.join(" | "));
+}
+
+// -------------------------------- Watcher schreibt Schluessel, keine Saetze
+console.log("\n=== Watcher und Paketbau liefern Schluessel ===");
+{
+  // Der Anlass: das Update-Protokoll in der Oberflaeche stand auf
+  // Deutsch, auch wenn die Oberflaeche auf Englisch lief. Der Watcher
+  // schrieb fertige deutsche Saetze in status.json, und app.js gab sie
+  // unveraendert aus. Backend und Agent halten sich seit 0.35.x an
+  // "Schluessel, nie Saetze" - der Watcher war die letzte Ausnahme.
+  const fsx = require("fs");
+  const pfad = require("path").join(
+    require("path").dirname(HTML_PATH), "..", "update_watcher.py");
+  let watcher = "";
+  try { watcher = fsx.readFileSync(pfad, "utf8"); } catch (e) { /* s.u. */ }
+  check("update_watcher.py ist lesbar", watcher.length > 0, pfad);
+
+  // Jedes Argument von append_log() und jeder eintrag()-Aufruf muss ein
+  // Schluessel sein: nur Kleinbuchstaben, Ziffern, Punkt, Unterstrich.
+  // Ein Satz enthaelt Leerzeichen und faellt damit auf.
+  const schluesselform = /^[a-z][a-z0-9_.]*$/;
+  const schlecht = [];
+  const aufrufe = [
+    ...watcher.matchAll(/append_log\(\s*status\s*,\s*"([^"]*)"/g),
+    ...watcher.matchAll(/(?<!def )\beintrag\(\s*"([^"]*)"/g),
+  ];
+  for (const a of aufrufe) {
+    if (!schluesselform.test(a[1])) schlecht.push(a[1].slice(0, 40));
+  }
+  check("append_log/eintrag bekommen nur Schluessel, keine Saetze",
+        schlecht.length === 0, schlecht.join(" | "));
+  check("es wurden ueberhaupt Aufrufe gefunden", aufrufe.length > 10,
+        aufrufe.length);
+
+  // Und jeder dieser Schluessel muss im Woerterbuch stehen, sonst zeigt
+  // die Oberflaeche den Schluessel selbst an.
+  const unbekannt = [...new Set(aufrufe.map(a => a[1]))]
+                    .filter(k => schluesselform.test(k))
+                    .filter(k => i18n.I18N.en[k] === undefined);
+  check("jeder Schluessel des Watchers ist uebersetzt",
+        unbekannt.length === 0, unbekannt.join(", "));
+
+  // Das Backend setzt beim Anfordern eine erste Zeile - ebenfalls als
+  // Schluessel.
+  const um = fsx.readFileSync(require("path").join(
+    require("path").dirname(HTML_PATH), "..", "backend", "update_manager.py"),
+    "utf8");
+  const backendZeile = um.match(/"k":\s*"([^"]+)"/);
+  check("das Backend setzt einen Schluessel statt eines Satzes",
+        backendZeile !== null, backendZeile ? backendZeile[1] : "keiner");
+  if (backendZeile) {
+    check("und der Schluessel ist uebersetzt",
+          i18n.I18N.en[backendZeile[1]] !== undefined, backendZeile[1]);
+  }
+
+  // Das Frontend darf das Protokoll nicht mehr rohgejoint ausgeben.
+  const appjs2 = fsx.readFileSync(require("path").join(
+    require("path").dirname(HTML_PATH), "app.js"), "utf8");
+  check("app.js setzt das Protokoll ueber protokoll() zusammen",
+        /function protokoll\(/.test(appjs2)
+        && (appjs2.match(/protokoll\(st\.log\)/g) || []).length === 2,
+        (appjs2.match(/protokoll\(st\.log\)/g) || []).length);
+  check("kein rohes join des Protokolls mehr",
+        !/\(st\.log\s*\|\|\s*\[\]\)\.join/.test(appjs2));
+}
+
 console.log(`\nFehler: ${fails}`);
 process.exit(fails ? 1 : 0);
