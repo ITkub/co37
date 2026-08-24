@@ -1117,6 +1117,51 @@ def check_hostname(name: str) -> str:
     return name
 
 
+# ----------------------------------------------------------------------
+# Auskunftsfelder des Agents
+# ----------------------------------------------------------------------
+# os_version, agent_version, ip_address und reboot_reasons sind reine
+# Auskunft: sie werden angezeigt, es haengt keine Entscheidung an ihrem
+# genauen Wert. Der Agent bestimmt sie frei, und bei der Anmeldung tut
+# das JEDER im Netz - dieser Endpunkt ist bewusst offen.
+#
+# Gekuerzt statt abgewiesen. Ein Heartbeat, der mit 422 scheitert, nimmt
+# einen Host dauerhaft aus dem Betrieb, und platform.platform() kann auf
+# einem System, das ich nicht kenne, mehr liefern als hier angesetzt.
+# Kuerzen kann das nicht passieren.
+#
+# Das ist eine Groessenschranke, keine Sicherheitsschranke: die liegt im
+# Frontend, das diese Werte escaped ausgibt. Hier geht es darum, dass
+# niemand die Datenbank und jede Host-Abfrage mit Megabyte volllaufen
+# laesst.
+FELD_MAX = 120           # os_version: "Windows-10-10.0.19045-SP0" u.ae.
+VERSION_MAX = 40         # agent_version: "0.36.6"
+IP_MAX = 45              # laenger wird auch eine IPv6-Adresse nicht
+GRUENDE_MAX = 20         # so viele Neustartgruende zeigt niemand mehr an
+GRUND_MAX = 80
+
+
+def kurz(wert, grenze: int) -> str:
+    """
+    Auskunftstext auf ein anzeigbares Mass bringen.
+
+    Steuerzeichen fliegen raus - sie wuerden das Protokoll und die Liste
+    zerschiessen, ohne je etwas zu bedeuten. Ein Zeichensatzfilter
+    darueber hinaus waere falsch: die Versionszeichenkette eines fremden
+    Systems darf aussehen, wie sie will.
+    """
+    text = "" if wert is None else str(wert)
+    text = "".join(c for c in text if c == " " or c.isprintable())
+    return text.strip()[:grenze]
+
+
+def kurze_gruende(werte) -> list:
+    """Neustartgruende: Anzahl und Laenge je Eintrag begrenzt."""
+    if not isinstance(werte, list):
+        return []
+    return [kurz(w, GRUND_MAX) for w in werte[:GRUENDE_MAX] if kurz(w, GRUND_MAX)]
+
+
 class AgentEnroll(BaseModel):
     hostname: str
     os_type: OSType
@@ -1487,9 +1532,9 @@ def agent_enroll(
         existing.agent_token_hash = hash_token(token)
         existing.approval_state = ApprovalState.pending
         existing.os_type = payload.os_type
-        existing.os_version = payload.os_version
-        existing.ip_address = payload.ip_address
-        existing.agent_version = payload.agent_version
+        existing.os_version = kurz(payload.os_version, FELD_MAX)
+        existing.ip_address = kurz(payload.ip_address, IP_MAX)
+        existing.agent_version = kurz(payload.agent_version, VERSION_MAX)
         existing.enrolled_at = utcnow()
         existing.enrolled_from_ip = client_ip(request)
         existing.last_seen = None
@@ -1517,9 +1562,9 @@ def agent_enroll(
         hostname=hostname,
         agent_token_hash=hash_token(token),
         os_type=payload.os_type,
-        os_version=payload.os_version,
-        ip_address=payload.ip_address,
-        agent_version=payload.agent_version,
+        os_version=kurz(payload.os_version, FELD_MAX),
+        ip_address=kurz(payload.ip_address, IP_MAX),
+        agent_version=kurz(payload.agent_version, VERSION_MAX),
         approval_state=ApprovalState.pending,
         enrolled_at=utcnow(),
         enrolled_from_ip=request.client.host if request.client else None,
@@ -1554,11 +1599,11 @@ def agent_heartbeat(
     # erst sauber anmelden, dann im naechsten Heartbeat umbenennen.
     host.hostname = check_hostname(payload.hostname)
     host.os_type = payload.os_type
-    host.os_version = payload.os_version
-    host.ip_address = payload.ip_address
-    host.agent_version = payload.agent_version
+    host.os_version = kurz(payload.os_version, FELD_MAX)
+    host.ip_address = kurz(payload.ip_address, IP_MAX)
+    host.agent_version = kurz(payload.agent_version, VERSION_MAX)
     host.reboot_required = payload.reboot_required
-    host.reboot_reasons = payload.reboot_reasons
+    host.reboot_reasons = kurze_gruende(payload.reboot_reasons)
     host.status = HostStatus.online
     host.last_seen = utcnow()
     session.add(host)
@@ -1839,7 +1884,7 @@ def agent_scan_result(
     host.updates_available = len(payload.updates)
     host.security_updates = security
     host.reboot_required = payload.reboot_required
-    host.reboot_reasons = payload.reboot_reasons
+    host.reboot_reasons = kurze_gruende(payload.reboot_reasons)
     # Aus den gemeldeten Paketen abgeleitet, nicht als eigenes Feld
     # uebertragen: so gibt es nur eine Quelle. Verschwindet ein
     # Kernel-Update aus der Liste, faellt die Vorschau von selbst weg -

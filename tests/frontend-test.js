@@ -204,7 +204,8 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, "
-  + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime };";
+  + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
+  + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
 try {
@@ -1399,6 +1400,74 @@ global.setTimeout = origSetTimeout;
     el("dlgSettings").close();
     check("Hintergrund wieder frei, sobald auch der letzte Dialog geschlossen ist",
           document.body.style.overflow === "", document.body.style.overflow);
+  }
+
+  // ==================================================================
+  console.log("\n=== Text vom Agent wird escaped ===");
+  {
+    // In die zweite Zeile einer Host-Zeile ("notes") laufen Werte, die
+    // der Agent bestimmt. h.agent_version kommt aus /agent/enroll und
+    // damit von JEDEM im Netz, ohne Anmeldung.
+    //
+    // Das ist kein Schoenheitsfehler: der Klick-Handler reagiert auf
+    // JEDES [data-act]-Element. Eingeschleustes Markup kann also einen
+    // echten Knopf erzeugen - data-act="approve" mit freier data-id -
+    // und ihn per style-Attribut tarnen. Ein Klick des Administrators
+    // genuegt. Die Regel script-src 'self' verhindert nur, dass Skript
+    // laeuft, nicht dass Markup entsteht.
+    const boese = '<img src=x data-act="deluser" data-id="1">';
+    const mk = (id, overrides) => Object.assign({
+      id, hostname: `X${id}`, display_name: null,
+      approval_state: "approved", status: "online",
+      os_type: "linux", updates_available: 0, security_updates: 0,
+      checkmk_downtime_all: false, checkmk_hosts: [], downtime_minutes: 30,
+      reboot_required: false, patch_enabled: false, patch_followup_left: 0,
+      updates_require_reboot: false, area_id: null,
+    }, overrides);
+
+    el("filter").value = "";
+    el("fState").value = "";
+    api.setAreas([]);
+
+    // 1. agent_version - der unauthentifizierte Weg. Damit die Meldung
+    //    "Agent veraltet" ueberhaupt erscheint, muss AGENT_VER abweichen.
+    api.setAgentVer("0.0.0");
+    api.setHosts([mk(90701, { agent_version: boese })]);
+    api.render();
+    let out = el("units").innerHTML;
+    check("agent_version erscheint nicht als Markup",
+          !out.includes("<img"), out.slice(out.indexOf("class=\"sub\""), 260));
+    check("und auch nicht als klickbares data-act",
+          !out.includes('data-act="deluser"'));
+    check("der Text ist aber sichtbar, escaped",
+          out.includes("&lt;img"), out.includes("&lt;img"));
+
+    // 2. reboot_reasons - unbekannte Gruende gibt rebootNote() bewusst im
+    //    Klartext des Agents aus.
+    api.setAgentVer("");
+    api.setHosts([mk(90702, {
+      reboot_required: true, reboot_reasons: [boese],
+    })]);
+    api.render();
+    out = el("units").innerHTML;
+    check("reboot_reasons erscheint nicht als Markup", !out.includes("<img"));
+    check("reboot_reasons wird escaped angezeigt", out.includes("&lt;img"));
+
+    // 3. progress aus einem laufenden Auftrag.
+    api.setHosts([mk(90703, {})]);
+    api.setActive({ 90703: { id: 5, job_type: "patch", progress: boese } });
+    api.render();
+    out = el("units").innerHTML;
+    check("progress erscheint nicht als Markup", !out.includes("<img"));
+    check("progress wird escaped angezeigt", out.includes("&lt;img"));
+    api.setActive({});
+
+    // Gegenprobe zur Aussagekraft: der Hostname selbst war schon vorher
+    // escaped. Waere esc() an der falschen Stelle, fiele das hier auf.
+    api.setHosts([mk(90704, { display_name: boese })]);
+    api.render();
+    out = el("units").innerHTML;
+    check("display_name bleibt escaped", !out.includes("<img"));
   }
 
   console.log(`\nFehler: ${fails}`);

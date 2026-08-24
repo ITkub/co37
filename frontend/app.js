@@ -531,6 +531,16 @@ function renderUnit(h, i, admin){
   const stale = AGENT_VER && h.agent_version && h.agent_version !== AGENT_VER;
 
   const act = ACTIVE[h.id];
+  // In notes landet Text, den der Agent bestimmt: h.agent_version (kommt
+  // aus /agent/enroll und damit von JEDEM im Netz, ohne Anmeldung),
+  // act.progress, act.job_type und die Gruende aus h.reboot_reasons.
+  //
+  // Beim Ausgeben deshalb esc() auf das zusammengesetzte Ganze - siehe
+  // unten bei class="sub". Ohne das liess sich Markup in die Liste
+  // schreiben, und weil der Klick-Handler auf JEDES [data-act] reagiert,
+  // war das kein Schoenheitsfehler: ein eingeschleuster Knopf mit
+  // data-act="approve" und freier data-id ist ein echter Knopf, per
+  // style-Attribut als etwas Harmloses getarnt.
   const notes = [];
   if (act) notes.push(act.progress ? `${act.job_type}: ${act.progress}`
                                     : t("note.job_running", { auftrag: act.job_type }));
@@ -585,7 +595,7 @@ function renderUnit(h, i, admin){
       <div class="led ${LED[s]}"></div>
       <div class="hostcell">
         <div class="hostname">${esc(h.display_name || h.hostname)}</div>
-        <div class="sub">${esc(h.hostname)}${notes.length ? " · " + notes.join(" · ") : ""}</div>
+        <div class="sub">${esc(h.hostname)}${notes.length ? " · " + esc(notes.join(" · ")) : ""}</div>
         ${letzteAktion ? `<div class="lastaction">${esc(letzteAktion)}</div>` : ""}
       </div>
       <div class="os">${h.os_type || "—"}</div>
