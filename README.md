@@ -579,7 +579,24 @@ Willst du eine Unit ändern, ändere sie an der Stelle, die sie erzeugt.
 |---|---|
 | Checkmk-Automation-Secret | Fernet-verschlüsselt in der Datenbank, Schlüssel aus `CO37_SECRET_KEY` |
 | Agent-Tokens | nur als SHA-256-Hash; der Agent erzeugt sie bei der Anmeldung selbst |
-| Admin-Token | Umgebungsvariable der systemd-Unit |
+| Admin-Token und `CO37_SECRET_KEY` | `/etc/co37/backend.env`, root:root mit 600 — plus `data/admin.token` und `data/secret.key`, damit `setup.sh` sie über Neuinstallationen hinweg wiederfindet |
+
+**Nicht in der Unit-Datei.** `/etc/systemd/system/co37-backend.service`
+entsteht mit den Vorgaberechten und ist damit für jeden lokalen Benutzer
+lesbar; `systemctl show` gibt `Environment=`-Zeilen ohnehin im Klartext
+aus. Der Admin-Token ist Vollzugriff auf die Schnittstelle, und
+`CO37_SECRET_KEY` entschlüsselt das Checkmk-Secret in der Datenbank.
+Beide stehen deshalb in einer `EnvironmentFile`, deren Inhalt systemd
+nicht anzeigt. Pfade und Intervalle bleiben als `Environment=` in der
+Unit — `systemctl cat co37-backend` soll weiter zum Nachsehen taugen, und
+so ist auf einen Blick klar, welche zwei Werte geheim sind.
+
+Bewusst **nicht** unter `data/`: das gehört `co37` und ist für den
+Backend-Prozess schreibbar. Er könnte sich dort sonst beim nächsten
+Neustart einen eigenen Admin-Token setzen.
+
+Was bleibt: `/proc/<pid>/environ`, lesbar für root und für `co37` selbst.
+Das ist unvermeidbar — `co37` hält den Schlüssel ohnehin.
 
 `secret.key` und `co37.db` gehören **nicht in dasselbe Backup-Ziel**.
 Sonst ist die Trennung wirkungslos.

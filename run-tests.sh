@@ -95,6 +95,7 @@ fi
 # das Muster, an dem hier schon mehrfach etwas gescheitert ist.
 REIHEN=(
   "deps            $PY tests/deps-test.py"
+  "setup           $PY tests/setup-test.py"
   "proxy-fallback  $PY tests/proxy-fallback-test.py"
   "license        $PY tests/license-test.py"
   "release-sig    $PY tests/release-sig-test.py"

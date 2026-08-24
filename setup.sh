@@ -104,6 +104,45 @@ chown -R co37:co37 "$BASE/data"
 chmod 700 "$BASE/data"
 
 # ---------------------------------------------------------------------
+# Geheimnisse fuer den Dienst
+# ---------------------------------------------------------------------
+# Nicht als Environment= in die Unit. Die Unit-Datei entsteht mit den
+# Vorgaberechten und ist damit fuer JEDEN lokalen Benutzer lesbar - und
+# 'systemctl show' gibt Environment=-Zeilen im Klartext aus. Der
+# Admin-Token ist Vollzugriff auf die Schnittstelle, CO37_SECRET_KEY
+# entschluesselt das Checkmk-Secret in der Datenbank.
+#
+# Den Inhalt einer EnvironmentFile zeigt systemctl dagegen nicht, und die
+# Datei selbst gehoert root mit 600. Was bleibt, ist /proc/<pid>/environ
+# fuer root und fuer co37 selbst - unvermeidbar, co37 haelt den
+# Schluessel ohnehin.
+#
+# NICHT unter $BASE/data: das gehoert co37 und liegt in ReadWritePaths.
+# Der Backend-Prozess koennte die Datei sonst ueberschreiben und sich beim
+# naechsten Neustart einen eigenen Admin-Token setzen.
+#
+# Nur die beiden Geheimnisse. Pfade und Intervalle bleiben in der Unit,
+# damit 'systemctl cat' sie weiter zeigt und auf einen Blick klar ist,
+# WELCHE zwei Werte geheim sind.
+#
+# Ein fester Pfad, also eine Installation je Rechner. Die README setzt
+# ohnehin einen Server je Netz voraus.
+echo ">>> Geheimnisse"
+ENVFILE=/etc/co37/backend.env
+mkdir -p "$(dirname "$ENVFILE")"
+# Erst leer und eng, dann fuellen: sonst stuende der Token einen Moment
+# lang mit 644 auf der Platte.
+umask 177
+: > "$ENVFILE"
+umask 022
+cat > "$ENVFILE" <<EOF
+CO37_ADMIN_TOKEN=$TOKEN
+CO37_SECRET_KEY=$SECRET_KEY
+EOF
+chown root:root "$ENVFILE"
+chmod 600 "$ENVFILE"
+
+# ---------------------------------------------------------------------
 # Backend-Dienst
 # ---------------------------------------------------------------------
 echo ">>> Backend-Dienst"
@@ -118,8 +157,7 @@ Type=simple
 User=co37
 Group=co37
 WorkingDirectory=$BASE/backend
-Environment="CO37_ADMIN_TOKEN=$TOKEN"
-Environment="CO37_SECRET_KEY=$SECRET_KEY"
+EnvironmentFile=$ENVFILE
 Environment="CO37_DB=sqlite:///$BASE/data/co37.db"
 Environment="CO37_DATA=$BASE/data"
 Environment="CO37_POLL_INTERVAL=60"
