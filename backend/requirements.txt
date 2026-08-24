@@ -1,7 +1,26 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-sqlmodel==0.0.22
+# Alle Fassungen festgenagelt. Ein Update, das sich beim Einspielen
+# selbst zusammensucht, ist bei jedem Kunden ein anderes.
+#
+# Stand geprueft am 2026-08-24: pip-audit meldet null Befunde, und der
+# volle Testlauf laeuft damit durch. Beim Anheben beides wiederholen -
+# tests/deps-test.py haelt nur den Abgleich zwischen dieser Datei und dem,
+# was tatsaechlich installiert ist, nicht den Stand der Schwachstellen.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+sqlmodel==0.0.39
 httpx==0.28.1
-pydantic==2.10.4
-cryptography==44.0.0
-python-multipart==0.0.20
+pydantic==2.13.4
+cryptography==50.0.0
+python-multipart==0.0.32
+
+# starlette kommt eigentlich ueber fastapi und stand deshalb lange nicht
+# hier. Sie steht jetzt ausdruecklich drin, weil in ihr der einzige
+# unauthentifiziert erreichbare Befund der Sicherheitspruefung sass: ein
+# Range-Header, der in FileResponse quadratische Laufzeit ausloest, und
+# die Oberflaeche wird ueber StaticFiles ausgeliefert. Behoben ab 0.49.1.
+#
+# Ohne den Pin koennte eine kuenftige Aufloesung stillschweigend wieder
+# eine aeltere Fassung ziehen. Mit ihm gibt es beim naechsten
+# FastAPI-Sprung einen Konflikt, den man aufloesen MUSS - das faellt beim
+# Bauen sofort auf und ist genau die Absicht.
+starlette==1.6.0
