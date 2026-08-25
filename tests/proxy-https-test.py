@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
-ADMIN = {"X-API-Key": os.getenv("CO37_TEST_KEY", "t")}
+ADMIN = {"X-Session": os.getenv("CO37_TEST_SESSION", "")}
 
 fails = 0
 

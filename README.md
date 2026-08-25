@@ -48,14 +48,8 @@ mkdir -p /opt/co37 && unzip -o /tmp/co37_v0_4_1.zip -d /opt/co37
 bash /opt/co37/setup.sh
 ```
 
-Das Skript legt Benutzer, venv, systemd-Dienste und Schlüssel an. Am Ende werden
-**Adresse und Admin-Token** ausgegeben. Der Token gilt **nur auf dem Server
-selbst** (127.0.0.1) — er ist der Weg zurück, wenn du dich aus der Oberfläche
-aussperrst, und das Testgerüst benutzt ihn. Für die Oberfläche brauchst du ihn
-nicht.
-
-Bei einem Wiederholungslauf wird er nicht erneut ausgegeben, sondern nur sein
-Fundort genannt. Er steht in `/opt/co37/data/admin.token`.
+Das Skript legt Benutzer, venv, systemd-Dienste und Schlüssel an. Am Ende wird
+die **Adresse** ausgegeben. Anmeldung beim ersten Mal mit `admin` / `admin`.
 
 Läuft mehrfach ohne Schaden; bestehende Schlüssel und Daten bleiben erhalten.
 
@@ -151,8 +145,6 @@ nach 15 Minuten ab und gilt für wenige Abrufe — was davon in der Verlaufsdate
 des Zielsystems zurückbleibt, ist dann wertlos. Deshalb erst kurz vor der
 Einrichtung erzeugen.
 
-Nicht den Admin-Token verwenden: der gilt nur auf dem Server selbst und würde
-vom Zielsystem aus abgewiesen.
 
 ### 3.2 Auf dem Zielsystem ausführen
 
@@ -591,21 +583,27 @@ Willst du eine Unit ändern, ändere sie an der Stelle, die sie erzeugt.
 |---|---|
 | Checkmk-Automation-Secret | Fernet-verschlüsselt in der Datenbank, Schlüssel aus `CO37_SECRET_KEY` |
 | Agent-Tokens | nur als SHA-256-Hash; der Agent erzeugt sie bei der Anmeldung selbst |
-| Admin-Token und `CO37_SECRET_KEY` | `/etc/co37/backend.env`, root:root mit 600 — plus `data/admin.token` und `data/secret.key`, damit `setup.sh` sie über Neuinstallationen hinweg wiederfindet |
+| Benutzerpasswörter | scrypt-Hash mit eigenem Salt je Konto |
+| `CO37_SECRET_KEY` | `/etc/co37/backend.env`, root:root mit 600 — plus `data/secret.key`, damit `setup.sh` ihn über Neuinstallationen hinweg wiederfindet |
 
 **Nicht in der Unit-Datei.** `/etc/systemd/system/co37-backend.service`
 entsteht mit den Vorgaberechten und ist damit für jeden lokalen Benutzer
 lesbar; `systemctl show` gibt `Environment=`-Zeilen ohnehin im Klartext
-aus. Der Admin-Token ist Vollzugriff auf die Schnittstelle, und
-`CO37_SECRET_KEY` entschlüsselt das Checkmk-Secret in der Datenbank.
-Beide stehen deshalb in einer `EnvironmentFile`, deren Inhalt systemd
-nicht anzeigt. Pfade und Intervalle bleiben als `Environment=` in der
-Unit — `systemctl cat co37-backend` soll weiter zum Nachsehen taugen, und
-so ist auf einen Blick klar, welche zwei Werte geheim sind.
+aus. `CO37_SECRET_KEY` entschlüsselt das Checkmk-Secret in der Datenbank
+und steht deshalb in einer `EnvironmentFile`, deren Inhalt systemd nicht
+anzeigt. Pfade und Intervalle bleiben als `Environment=` in der Unit —
+`systemctl cat co37-backend` soll weiter zum Nachsehen taugen, und so ist
+auf einen Blick klar, welcher Wert geheim ist.
 
 Bewusst **nicht** unter `data/`: das gehört `co37` und ist für den
-Backend-Prozess schreibbar. Er könnte sich dort sonst beim nächsten
-Neustart einen eigenen Admin-Token setzen.
+Backend-Prozess schreibbar.
+
+**Es gibt keinen globalen Admin-Token mehr.** Bis 0.36.11 gab es einen —
+aus der Zeit vor den Benutzerkonten. Er lief nie ab, galt auf jeder Route
+und ließ sich, anders als das Passwort, unbegrenzt durchprobieren; die
+Drosselung sitzt nur an der Anmelderoute. Entfallen in 0.36.12. Wer sich
+aussperrt, kommt über die Datenbank zurück — siehe *Wenn du dich
+aussperrst*.
 
 Was bleibt: `/proc/<pid>/environ`, lesbar für root und für `co37` selbst.
 Das ist unvermeidbar — `co37` hält den Schlüssel ohnehin.
@@ -649,11 +647,18 @@ beim Update weniger aus, als er soll — im schlimmsten Fall nur `backend/`,
 Korrekturen an den Hilfsskripten erreichen den Betrieb dann nie, und von
 außen sieht es so aus, als hätten die Updates keine Wirkung.
 
-Welche Fassung tatsächlich läuft:
+Welche Fassung tatsächlich läuft, steht unter **Einstellungen → Update**.
+Von der Kommandozeile aus braucht es eine Anmeldung:
 
 ```
-curl -s -H "X-API-Key: DEIN-TOKEN" localhost:8080/api/v1/watcher
+S=$(curl -s -X POST -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"DEIN-PASSWORT"}' \
+      localhost:8080/api/v1/login | python3 -c 'import sys,json;print(json.load(sys.stdin)["session"])')
+curl -s -H "X-Session: $S" localhost:8080/api/v1/watcher
 ```
+
+Steht der HTTPS-Zwang, geht das über `localhost` nicht — dann denselben
+Aufruf gegen die eingerichtete `https://`-Adresse richten.
 
 ---
 
@@ -676,8 +681,10 @@ Programmstand. Ab 0.4.1 wird das Schema beim Start automatisch angeglichen —
 tritt der Fall trotzdem auf, den Bericht abrufen:
 
 ```
-curl -s -H "X-API-Key: DEIN-TOKEN" localhost:8080/api/v1/schema
+curl -s -H "X-Session: $S" localhost:8080/api/v1/schema
 ```
+
+`$S` wie oben durch Anmelden besorgen.
 
 Notfalls Datenbank beiseitelegen. Alle Hosts melden sich danach neu an und
 warten auf Freigabe:
@@ -706,6 +713,75 @@ journalctl -u co37-watcher -n 40 --no-pager
 
 ---
 
+# Wenn du dich aussperrst
+
+Drei Fälle: das einzige Administratorkonto ist deaktiviert, das Passwort ist
+weg, oder der HTTPS-Zwang steht auf einem Proxy, der nicht mehr antwortet.
+
+**Warte erst einmal ab.** Der HTTPS-Zwang schaltet sich nach 15 Minuten selbst
+ab, wenn sich in dieser Zeit niemand über HTTPS angemeldet hat. Genau dafür
+gibt es die Frist — ein falsch eingetragener Proxy soll nicht dauerhaft
+aussperren. Der Vorgang steht danach im Prüfprotokoll.
+
+Hilft das nicht, gibt es den Weg über die Datenbank. Er braucht **root auf dem
+Server** — was angemessen ist: wer sich aussperrt, muss sich ausweisen können,
+und die Shell ist der Ausweis.
+
+### HTTPS-Zwang abschalten
+
+```
+systemctl stop co37-backend
+```
+
+```
+sqlite3 /opt/co37/data/co37.db "update setting set value='false' where key='https_only';"
+```
+
+```
+systemctl start co37-backend
+```
+
+Danach ist die Oberfläche wieder unverschlüsselt erreichbar. Proxy richten,
+Zwang neu einschalten.
+
+### Passwort zurücksetzen und Konto reaktivieren
+
+Setzt das Passwort von `admin` neu und hebt eine Deaktivierung auf. Das
+Passwort im Befehl ersetzen:
+
+```
+systemctl stop co37-backend
+```
+
+```
+cd /opt/co37/backend && CO37_DB="sqlite:////opt/co37/data/co37.db" CO37_DATA=/opt/co37/data /opt/co37/venv/bin/python3 - <<'EOF'
+import main
+from models import User, Role
+from sqlmodel import Session, select
+with Session(main.engine) as s:
+    u = s.exec(select(User).where(User.username == "admin")).first()
+    u.password_hash = main.hash_password("NEUES-PASSWORT")
+    u.disabled = False
+    u.role = Role.admin
+    s.add(u); s.commit()
+    print("zurueckgesetzt")
+EOF
+```
+
+```
+chown co37:co37 /opt/co37/data/co37.db* && systemctl start co37-backend
+```
+
+Das `chown` am Ende, weil die Befehle als root laufen: legt SQLite dabei eine
+Journaldatei an, gehörte sie sonst root, und das Backend läuft als `co37`.
+
+Der Umweg über das Programm statt über `sqlite3` ist Absicht — das Passwort
+wird mit scrypt gehasht, und der Hash entsteht hier mit derselben Funktion,
+die auch die Anmeldung prüft. Von Hand gebaut wäre er ein zweiter Weg, der
+irgendwann auseinanderläuft.
+
+---
+
 # Betrieb über HTTP: was das bedeutet
 
 CO-37 läuft im lokalen Netz ohne TLS. Zwei Auswirkungen, die im Browser
@@ -720,8 +796,6 @@ Anmeldedaten und Sitzungscookie gehen unverschlüsselt über das Netz. Für ein
 internes Netz vertretbar, aber sobald das System über WireGuard oder einen
 Reverse Proxy erreichbar wird, gehört TLS davor — siehe `REVERSE-PROXY.md`.
 
-Der Admin-Token ist davon nicht betroffen: er gilt nur über Loopback und geht
-gar nicht erst über das Netz.
 
 ---
 

@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
-ADMIN_KEY = os.getenv("CO37_TEST_KEY", "t")
+ADMIN_SESSION = os.getenv("CO37_TEST_SESSION", "")
 
 fails = 0
 
@@ -63,7 +63,7 @@ def call(path, data=None, method=None, hdr=None):
         return 0, str(e)
 
 
-adm = {"X-API-Key": ADMIN_KEY}
+adm = {"X-Session": ADMIN_SESSION}
 
 # Einen Benutzer mit der Rolle 'user' anlegen und anmelden
 call("/api/v1/users", {"username": "tester", "password": "tester-passwort",
@@ -142,8 +142,13 @@ check("eigenes Passwort aenderbar", code == 200, code)
 code, res = call("/api/v1/install-token", {}, hdr=adm)
 check("Administrator erhaelt ein Token", code == 200, code)
 tok = res.get("token", "") if code == 200 else ""
-check("Token ist nicht der API-Key", tok and tok != ADMIN_KEY,
-      "gleich!" if tok == ADMIN_KEY else "")
+# Hiess frueher "Token ist nicht der API-Key". Den gibt es nicht mehr;
+# verglichen wird jetzt gegen die Sitzung, mit der diese Reihe arbeitet -
+# ein Installations-Token, das die eigene Sitzung zurueckgaebe, waere
+# derselbe Fehler in neuer Form.
+check("Installations-Token ist nicht die Sitzung",
+      tok and tok != ADMIN_SESSION,
+      "gleich!" if tok == ADMIN_SESSION else "")
 check("Frist wird mitgeliefert", bool(res.get("expires_at")), res.get("expires_at"))
 max_uses = res.get("max_uses", 0)
 

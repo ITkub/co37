@@ -8,7 +8,9 @@ const fs = require("fs");
 const { execSync } = require("child_process");
 
 const PORT = process.argv[2] || "8085";
-const KEY = process.argv[3] || "t";
+// Sitzungstoken statt des frueheren globalen Admin-Tokens. run-tests.sh
+// meldet sich einmal an und reicht es an alle Reihen weiter.
+const SESSION = process.argv[3] || process.env.CO37_TEST_SESSION || "";
 
 // Seit 0.13.0 arbeitet die Oberflaeche mit einer Anmeldesitzung statt mit
 // dem API-Key. Die Sitzung muss vorliegen, bevor das Skript geladen wird -
@@ -173,7 +175,7 @@ global.fetch = (url, opts = {}) => {
   }
   return realFetch(url, { ...opts, headers });
 };
-global.prompt = () => KEY;
+global.prompt = () => SESSION;
 global.confirm = () => true;
 global.matchMedia = () => ({ matches: false });
 global.MutationObserver = FakeMutationObserver;
@@ -239,7 +241,7 @@ global.setTimeout = origSetTimeout;
   let pkgs = null;
   try {
     const probe = await fetch(`http://127.0.0.1:${PORT}/api/v1/packages`,
-                              {headers: {"X-API-Key": KEY}});
+                              {headers: {"X-Session": SESSION}});
     const body = await probe.text();
     console.log("Direkter Abruf:", probe.status, body.slice(0,80));
     try { pkgs = JSON.parse(body); } catch(e){ pkgs = null; }
@@ -272,9 +274,12 @@ global.setTimeout = origSetTimeout;
         el("agBase").innerHTML.includes(`127.0.0.1:${PORT}`),
         el("agBase").innerHTML.slice(0, 60));
   check("Linux-Befehl enthaelt ein Token", /X-Install-Token: \S{20,}/.test(lin));
-  // Auf den Kopfzeilennamen pruefen, nicht auf den Wert: der Test-Schluessel
-  // ist oft ein einzelner Buchstabe und kommt in jedem Befehl vor.
+  // Auf den Kopfzeilennamen pruefen, nicht auf den Wert. Der API-Key ist
+  // entfallen; die Pruefung bleibt, damit er nicht ueber einen alten
+  // Codepfad zurueckkehrt.
   check("Linux-Befehl nutzt NICHT den API-Key", !lin.includes("X-API-Key"));
+  check("und auch nicht die Sitzung",
+        !SESSION || !lin.includes(SESSION));
   check("Windows-Befehl enthaelt msiexec", win.includes("msiexec"));
   check("Windows-Befehl enthaelt .msi", win.includes(".msi"));
   check("Windows-Befehl enthaelt CO37SERVER", win.includes("CO37SERVER"));
@@ -301,7 +306,7 @@ global.setTimeout = origSetTimeout;
       ["GET",  "/api/v1/packages/build-status", [200]],
       ["GET",  "/api/v1/packages", [200]]]) {
     const r = await fetch(`http://127.0.0.1:${PORT}${path}`,
-                          {method: meth, headers: {"X-API-Key": KEY}});
+                          {method: meth, headers: {"X-Session": SESSION}});
     check(`${meth} ${path}`, want.includes(r.status), String(r.status));
   }
 
@@ -317,7 +322,7 @@ global.setTimeout = origSetTimeout;
   console.log("\n=== Neustart-Dialog ===");
   // Host vortaeuschen, damit rebootHost etwas findet
   const hostsResp = await fetch(`http://127.0.0.1:${PORT}/api/v1/hosts`,
-                                {headers: {"X-API-Key": KEY}});
+                                {headers: {"X-Session": SESSION}});
   const hosts = await hostsResp.json();
   if (hosts.length) {
     api.setHosts ? api.setHosts(hosts) : null;
@@ -337,7 +342,7 @@ global.setTimeout = origSetTimeout;
   console.log("\n=== Zeitzonen ===");
   {
     const r = await fetch(`http://127.0.0.1:${PORT}/api/v1/hosts`,
-                          {headers: {"X-API-Key": KEY}});
+                          {headers: {"X-Session": SESSION}});
     const hosts = await r.json();
     const stamps = [];
     for (const h of hosts)
@@ -945,7 +950,7 @@ global.setTimeout = origSetTimeout;
 
   await api.makeInstallToken();
   const cmd = el("cmdLinux").textContent;
-  // X-Install-Token, nicht X-API-Key: der Befehl wird auf einem fremden
+  // X-Install-Token, nicht die Sitzung: der Befehl wird auf einem fremden
   // Rechner ausgefuehrt und bleibt dort in der Verlaufsdatei stehen.
   check("Befehl nutzt ein Installations-Token",
         cmd.includes("X-Install-Token:"), cmd.slice(0, 70));
@@ -957,11 +962,12 @@ global.setTimeout = origSetTimeout;
 
   console.log("\n=== Bereiche in den Einstellungen ===");
   {
-    // Eigener HTTP-Helfer statt api.apiCall(): der laeuft ueber Cookie und
-    // Anmeldesitzung, hier reicht wie im Rest der Suite der X-API-Key.
+    // Eigener HTTP-Helfer statt api.apiCall(): der laeuft ueber das Cookie
+    // des Browsers, hier geht die Sitzung wie im Rest der Suite als
+    // Kopfzeile X-Session mit.
     const adminCall = async (path, opts = {}) => {
       const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
-        headers: {"X-API-Key": KEY, "Content-Type": "application/json"},
+        headers: {"X-Session": SESSION, "Content-Type": "application/json"},
         method: opts.method || (opts.body ? "POST" : "GET"),
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       });
@@ -1144,7 +1150,7 @@ global.setTimeout = origSetTimeout;
     // Test oben. Nur Hosts mit tatsaechlichem Neustartbedarf werden erfasst. ---
     const adminCall = async (path, opts = {}) => {
       const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
-        headers: {"X-API-Key": KEY, "Content-Type": "application/json"},
+        headers: {"X-Session": SESSION, "Content-Type": "application/json"},
         method: opts.method || (opts.body ? "POST" : "GET"),
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       });
@@ -1206,7 +1212,7 @@ global.setTimeout = origSetTimeout;
   {
     const adminCall = async (path, opts = {}) => {
       const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
-        headers: {"X-API-Key": KEY, "Content-Type": "application/json"},
+        headers: {"X-Session": SESSION, "Content-Type": "application/json"},
         method: opts.method || (opts.body ? "POST" : "GET"),
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       });

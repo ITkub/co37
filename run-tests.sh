@@ -13,7 +13,6 @@
 set -u
 
 PORT="${CO37_TEST_PORT:-8099}"
-KEY="testkey"
 TMP=$(mktemp -d)
 AUSFUEHRLICH=0
 NUR=""
@@ -90,7 +89,7 @@ fi
 # tun haben - genau so ist der Frontend-Test schon einmal stumm
 # ausgestiegen.
 #
-# $PY steht hier direkt drin, nicht als Platzhalter wie PORT und KEY.
+# $PY steht hier direkt drin, nicht als Platzhalter wie PORT und SESSION.
 # Eine Ersetzung waere wieder ein Treffer auf eine Teilzeichenkette -
 # das Muster, an dem hier schon mehrfach etwas gescheitert ist.
 REIHEN=(
@@ -117,7 +116,7 @@ REIHEN=(
   "agent-api       $PY tests/agent-api-test.py"
   "area            $PY tests/area-test.py"
   "host-patch      $PY tests/host-patch-test.py"
-  "frontend        node tests/frontend-test.js PORT KEY frontend/index.html"
+  "frontend        node tests/frontend-test.js PORT SESSION frontend/index.html"
   "roles           $PY tests/roles-test.py"
 )
 
@@ -142,7 +141,6 @@ fi
 echo "Backend auf Port $PORT, Daten in $TMP"
 (
   cd backend || exit 1
-  CO37_ADMIN_TOKEN="$KEY" \
   CO37_SECRET_KEY="testsecret" \
   CO37_DB="sqlite:///$TMP/co37.db" \
   CO37_DATA="$TMP" \
@@ -171,7 +169,33 @@ fi
 # Reihen durchlaufen
 # ---------------------------------------------------------------------
 export CO37_TEST_URL="http://127.0.0.1:$PORT"
-export CO37_TEST_KEY="$KEY"
+
+# ---------------------------------------------------------------------
+# Eine Sitzung fuer alle Reihen
+# ---------------------------------------------------------------------
+# Frueher sprachen die Reihen das Backend mit dem globalen Admin-Token an
+# (X-API-Key). Den gibt es nicht mehr - er lief nie ab, galt auf jeder
+# Route und war die einzige Berechtigung, die keine Drosselung bremste.
+#
+# Stattdessen EINE Anmeldung hier, das Sitzungstoken geht als
+# CO37_TEST_SESSION an alle Reihen. Bewusst nur einmal und bewusst hier:
+# roles-test.py loest am Ende absichtlich die Anmeldedrosselung aus. Wuerde
+# sich jede Reihe selbst anmelden, liefe alles danach in die Sperre. Eine
+# bereits bestehende Sitzung beruehrt das nicht - gedrosselt wird nur die
+# Anmelderoute.
+SESSION=$(curl -s --max-time 10 -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}' \
+  "http://127.0.0.1:$PORT/api/v1/login" \
+  | "$PY" -c 'import sys,json; print(json.load(sys.stdin).get("session",""))' 2>/dev/null)
+
+if [ -z "$SESSION" ]; then
+  echo "Anmeldung am Testbackend fehlgeschlagen - ohne Sitzung laeuft keine Reihe."
+  echo "Letzte Zeilen des Backends:"
+  tail -20 "$TMP/backend.log"
+  exit 1
+fi
+export CO37_TEST_SESSION="$SESSION"
 
 gesamt=0; fehlerhaft=0; uebersprungen=0
 echo
@@ -181,7 +205,7 @@ for eintrag in "${REIHEN[@]}"; do
   befehl="${eintrag#* }"
   befehl="${befehl#"${befehl%%[![:space:]]*}"}"
   befehl="${befehl/PORT/$PORT}"
-  befehl="${befehl/KEY/$KEY}"
+  befehl="${befehl/SESSION/$SESSION}"
 
   if [ -n "$NUR" ] && [ "$NUR" != "$name" ]; then
     uebersprungen=$((uebersprungen + 1))

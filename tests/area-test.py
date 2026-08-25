@@ -31,8 +31,7 @@ import urllib.request
 from datetime import datetime, timedelta
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
-ADMIN_KEY = os.getenv("CO37_TEST_KEY", "t")
-ADM = {"X-API-Key": ADMIN_KEY}
+ADM = {"X-Session": os.getenv("CO37_TEST_SESSION", "")}
 
 fails = 0
 

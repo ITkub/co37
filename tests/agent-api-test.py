@@ -26,7 +26,7 @@ def call(path, data=None, method=None, hdr=None):
     except urllib.error.HTTPError as e:
         return {"HTTP": e.code, "body": e.read().decode()[:300]}
 
-adm = {"X-API-Key": os.getenv("CO37_TEST_KEY", "t")}
+adm = {"X-Session": os.getenv("CO37_TEST_SESSION", "")}
 en = call("/api/v1/agent/enroll", {"hostname":"TEST-WIN01","os_type":"windows",
      "os_version":"Windows 11","ip_address":"192.0.2.50","agent_version":"0.18.0"})
 tok = en["agent_token"]; ah = {"X-Agent-Token": tok}

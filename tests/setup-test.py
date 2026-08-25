@@ -126,41 +126,70 @@ check("python3-cryptography wird mitinstalliert",
       "python3-cryptography" in quelle)
 
 # ----------------------------------------------------------------------
-# Der Admin-Token steht nur bei der Erstinstallation im Klartext
+# Kein Admin-Token mehr
 # ----------------------------------------------------------------------
-# Der Anlass: setup.sh gab ihn am Ende JEDES Laufs aus, auch wenn er
-# gerade eben als "Vorhandener Admin-Token wird weiterverwendet" gemeldet
-# worden war. Bei einem Wiederholungslauf ist das nur eine Gelegenheit,
-# ihn irgendwohin zu kopieren, wo er nicht hingehoert - genau so ist er
-# einmal in einem Chatprotokoll gelandet und musste getauscht werden.
-zeilen = quelle.splitlines()
-klartext = [i for i, z in enumerate(zeilen) if "Admin-Token: $TOKEN" in z]
-check("der Token wird genau einmal im Klartext ausgegeben",
-      len(klartext) == 1, len(klartext))
+# Bis 0.36.11 erzeugte setup.sh einen globalen Admin-Token, legte ihn in
+# data/admin.token ab, schrieb ihn in die env-Datei und gab ihn aus. Der
+# Token ist entfallen (siehe tests/apikey-test.py). Hier wird nur noch
+# festgehalten, dass die Einrichtung ihn nicht wieder einfuehrt - und
+# dass eine liegengebliebene Datei aus einer aelteren Fassung weggeraeumt
+# wird, statt als totes Geheimnis auf der Platte zu bleiben.
+check("setup.sh erzeugt keinen Admin-Token",
+      "CO37_ADMIN_TOKEN" not in quelle and "openssl rand -base64 36" not in quelle)
+check("und legt keine admin.token an",
+      'echo "$TOKEN" >' not in quelle)
+check("eine alte admin.token wird entfernt",
+      'rm -f "$BASE/data/admin.token"' in quelle)
+check("die env-Datei haelt nur noch den Verschluesselungsschluessel",
+      "CO37_SECRET_KEY=$SECRET_KEY" in quelle and "CO37_ADMIN_TOKEN=" not in quelle)
 
-check("TOKEN_NEU wird bei der Erstinstallation gesetzt",
-      re.search(r"TOKEN_NEU=1", quelle) is not None)
-check("und vorher auf 0", re.search(r"^TOKEN_NEU=0", quelle, re.M) is not None)
+# ----------------------------------------------------------------------
+# Die dokumentierte Wiederherstellung passt noch zum Code
+# ----------------------------------------------------------------------
+# Wer sich aussperrt, kommt ueber die Datenbank zurueck - der Weg steht in
+# der README unter "Wenn du dich aussperrst". Ein Befehl in der Doku, der
+# nicht mehr laeuft, ist schlimmer als keiner: gebraucht wird er genau
+# dann, wenn man ihn nicht in Ruhe ausprobieren kann.
+#
+# Geprueft wird beides gegeneinander - die Doku gegen den Code und
+# umgekehrt. Wird hash_password umbenannt oder der Schluessel des
+# HTTPS-Zwangs geaendert, faellt es hier auf.
+print("--- Dokumentierte Wiederherstellung ---")
+README = WURZEL / "README.md"
+MAIN = WURZEL / "backend" / "main.py"
+check("README ist lesbar", README.is_file(), README)
+doku = README.read_text(encoding="utf-8")
+backend = MAIN.read_text(encoding="utf-8")
 
-if len(klartext) == 1:
-    # Rueckwaerts bis zum umschliessenden if laufen. Steht dazwischen ein
-    # 'fi', ist die Ausgabe nicht mehr in dem Zweig - dann greift die
-    # Bedingung nicht, auch wenn sie irgendwo darueber steht.
-    i = klartext[0]
-    umschliessend = None
-    for j in range(i - 1, -1, -1):
-        z = zeilen[j].strip()
-        if z == "fi":
-            break
-        if z.startswith("if "):
-            umschliessend = z
-            break
-    check("die Klartextausgabe haengt an TOKEN_NEU",
-          umschliessend is not None and "TOKEN_NEU" in umschliessend,
-          umschliessend or "kein umschliessendes if gefunden")
+check("die README beschreibt den Weg zurueck",
+      "# Wenn du dich aussperrst" in doku)
 
-check("beim Wiederholungslauf wird nur der Fundort genannt",
-      "steht in $BASE/data/admin.token" in quelle)
+# Der Python-Block muss syntaktisch gueltig sein.
+block = re.search(r"<<'EOF'\n(.*?)\nEOF\n", doku, re.S)
+check("der Block zum Zuruecksetzen steht in der README", block is not None)
+if block:
+    import ast  # noqa: E402
+    try:
+        ast.parse(block.group(1))
+        ok, grund = True, ""
+    except SyntaxError as exc:
+        ok, grund = False, str(exc)
+    check("und ist syntaktisch gueltig", ok, grund)
+
+    # Gegen den Code: was der Block aufruft, muss es geben.
+    check("er benutzt main.hash_password",
+          "main.hash_password(" in block.group(1))
+    check("und die Funktion gibt es im Backend",
+          "def hash_password(" in backend)
+    check("er hebt die Deaktivierung auf", "disabled = False" in block.group(1))
+    check("das Feld heisst im Modell auch so",
+          "disabled" in (WURZEL / "backend" / "models.py").read_text(encoding="utf-8"))
+
+# Der sqlite3-Befehl muss den Schluessel treffen, den das Backend liest.
+check("der dokumentierte sqlite3-Befehl setzt https_only",
+      "where key='https_only'" in doku)
+check("und das Backend liest genau diesen Schluessel",
+      'SET_HTTPS_ONLY = "https_only"' in backend)
 
 # ----------------------------------------------------------------------
 # Und das Skript muss ueberhaupt laufen koennen

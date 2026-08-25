@@ -1,40 +1,51 @@
 """
-CO-37 - Der Admin-Token gilt nur auf dem Rechner selbst.
+CO-37 - Der globale Admin-Token ist entfallen und kommt nicht zurueck.
 
-Der Anlass (F-11, gefunden beim Durchsprechen der Sicherheitspruefung):
-in authenticate() wird der API-Key VOR der Sitzung geprueft, auf jeder
-Route. Die Drosselung greift aber nur an der Anmelderoute. Der
-Admin-Token war damit die einzige Zugangsberechtigung, die man unbegrenzt
-oft durchprobieren kann - dauerhaft gueltig, nie ablaufend, volle Rechte.
-Vierzig Zeichen aus openssl rand machen Durchprobieren unrealistisch, aber
-die Asymmetrie blieb: das Passwort ist nach fuenf Fehlversuchen fuenfzehn
-Minuten dicht, der Token nie.
+Die Geschichte in drei Schritten:
 
-Gebraucht wird er nur noch dort, wo man ohnehin auf dem Server sitzt: vom
-Testgeruest und als Weg zurueck, wenn man sich aus der Oberflaeche
-aussperrt. Deshalb gilt er jetzt nur ueber Loopback.
+  Der Token stammte aus der Zeit vor den Benutzerkonten, als er der
+  einzige Weg hinein war. Danach blieb er: dauerhaft gueltig, nie
+  ablaufend, volle Rechte auf jeder Route - und als einzige
+  Zugangsberechtigung ohne Drosselung, denn die sitzt nur an der
+  Anmelderoute (F-11 der Sicherheitspruefung).
+
+  In 0.36.10 galt er nur noch ueber Loopback. Damit war er auf einer
+  Installation mit HTTPS-Zwang unbenutzbar: der Zwang laesst ueber
+  Loopback nur /api/health durch. Uebrig blieb eine Berechtigung ohne
+  Nutzen, aber mit Angriffsflaeche.
+
+  In 0.36.12 ist er entfallen. Der Weg zurueck nach einem Aussperren
+  fuehrt ueber die Datenbank - siehe README, "Wenn du dich aussperrst".
+
+Diese Reihe haelt den Zustand fest. Eine Kopfzeile X-API-Key darf nichts
+mehr oeffnen, und im Code darf der Weg nicht wieder auftauchen - auch
+nicht versehentlich, etwa weil jemand eine alte Fassung einer Datei
+zurueckspielt.
 
 Geprueft wird die Funktion direkt statt ueber das Netz: das Testgeruest
-bindet uvicorn an 127.0.0.1, von aussen kaeme man gar nicht erst an. Ein
-nachgebautes Request-Objekt sagt genau, welche Gegenstelle gemeldet wird -
-und das ist der Punkt, um den es geht.
+bindet uvicorn an 127.0.0.1, und es geht hier ohnehin um Code, der nicht
+mehr da sein soll.
 
 Braucht kein Backend und kein Netz.
 
     python3 tests/apikey-test.py
 """
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 
+WURZEL = Path(__file__).resolve().parent.parent
 TMP = Path(tempfile.mkdtemp())
 os.environ["CO37_DB"] = f"sqlite:///{TMP}/apikey.db"
 os.environ["CO37_DATA"] = str(TMP)
-os.environ["CO37_ADMIN_TOKEN"] = "geheimer-test-token"
 os.environ["CO37_SECRET_KEY"] = "test"
+# Bewusst gesetzt: haette das Backend die Variable noch, wuerde sie hier
+# greifen - und die Pruefungen unten wuerden es merken.
+os.environ["CO37_ADMIN_TOKEN"] = "sollte-nichts-mehr-oeffnen"
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+sys.path.insert(0, str(WURZEL / "backend"))
 import main  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from starlette.requests import Request  # noqa: E402
@@ -42,7 +53,6 @@ from sqlmodel import Session, SQLModel  # noqa: E402
 
 SQLModel.metadata.create_all(main.engine)
 
-KEY = "geheimer-test-token"
 fails = 0
 
 
@@ -54,7 +64,6 @@ def check(label, ok, extra=""):
 
 
 def anfrage(ip, kopfzeilen=None):
-    """Ein Request, der als Gegenstelle genau ip meldet."""
     return Request({
         "type": "http", "http_version": "1.1", "method": "GET",
         "path": "/", "raw_path": b"/", "query_string": b"",
@@ -65,80 +74,92 @@ def anfrage(ip, kopfzeilen=None):
     })
 
 
-def versuch(key, ip, kopfzeilen=None):
-    """Gibt (Rolle, None) zurueck oder (None, HTTP-Code)."""
+# ----------------------------------------------------------------------
+print("--- Der Weg ist im Code nicht mehr da ---")
+quelle = (WURZEL / "backend" / "main.py").read_text(encoding="utf-8")
+
+check("keine Konstante ADMIN_TOKEN mehr",
+      re.search(r"^ADMIN_TOKEN\s*=", quelle, re.M) is None)
+check("CO37_ADMIN_TOKEN wird nicht mehr gelesen",
+      'getenv("CO37_ADMIN_TOKEN"' not in quelle)
+check("kein Parameter x_api_key mehr",
+      re.search(r"\bx_api_key\b", quelle) is None)
+check("X-API-Key steht nicht mehr in den erlaubten CORS-Kopfzeilen",
+      re.search(r'allow_headers=\[[^\]]*X-API-Key', quelle, re.S) is None)
+
+# authenticate() nimmt den Key nicht mehr entgegen.
+import inspect  # noqa: E402
+argumente = list(inspect.signature(main.authenticate).parameters)
+check("authenticate() kennt kein x_api_key", "x_api_key" not in argumente,
+      argumente)
+
+# ----------------------------------------------------------------------
+print("--- Und er oeffnet nichts mehr ---")
+
+
+def versuch(kopfzeilen=None, sitzung="", ip="127.0.0.1"):
+    """
+    Ruft authenticate() so auf, wie FastAPI es tut.
+
+    Das Sitzungstoken geht als Argument hinein, nicht als Kopfzeile - die
+    zieht sonst die Routenschicht heraus, und die laeuft hier nicht mit.
+    Die Kopfzeilen dienen dem Gegenteil: sie sollen belegen, dass eine
+    mitgeschickte X-API-Key nichts mehr bewirkt.
+    """
     with Session(main.engine) as s:
         try:
-            wer = main.authenticate(key, "", s, anfrage(ip, kopfzeilen))
+            wer = main.authenticate(sitzung, s, anfrage(ip, kopfzeilen))
             return wer.role, None
         except HTTPException as exc:
             return None, exc.status_code
 
 
-# ----------------------------------------------------------------------
-print("--- Von innen gilt er ---")
-rolle, code = versuch(KEY, "127.0.0.1")
-check("richtiger Token ueber 127.0.0.1 wird angenommen",
-      rolle == main.Role.admin, code or rolle)
+# Genau der Wert aus der Umgebungsvariable - haette das Backend ihn noch,
+# waere das hier ein Treffer.
+rolle, code = versuch({"X-API-Key": "sollte-nichts-mehr-oeffnen"})
+check("X-API-Key mit dem alten Wert oeffnet nichts", code == 401,
+      code or rolle)
 
-rolle, code = versuch(KEY, "::1")
-check("und ueber ::1 ebenso", rolle == main.Role.admin, code or rolle)
+rolle, code = versuch({"X-API-Key": "sollte-nichts-mehr-oeffnen"}, ip="192.0.2.9")
+check("auch nicht aus dem Netz", code == 401, code or rolle)
 
-# ----------------------------------------------------------------------
-print("--- Von aussen nicht ---")
-rolle, code = versuch(KEY, "192.0.2.9")
-check("richtiger Token aus dem Netz wird abgewiesen", code == 403, code or rolle)
-
-# Der eigentliche Angriff: die Kopfzeile setzt sich jeder selbst. Geprueft
-# wird die tatsaechliche Gegenstelle, nicht was die Anfrage behauptet.
-rolle, code = versuch(KEY, "192.0.2.9", {"X-Forwarded-For": "127.0.0.1"})
-check("X-Forwarded-For hilft nicht", code == 403, code or rolle)
-
-rolle, code = versuch(KEY, "192.0.2.9", {"X-Real-IP": "127.0.0.1"})
-check("X-Real-IP hilft ebenso wenig", code == 403, code or rolle)
-
-# Und noch einmal schaerfer, MIT eingetragenem Proxy. Ohne ihn glaubt
-# client_ip() der Kopfzeile ohnehin nicht - eine Pruefung ohne diesen
-# Schritt kann nicht unterscheiden, ob hier die Gegenstelle oder
-# client_ip() befragt wird, und bliebe auch dann gruen, wenn jemand auf
-# client_ip() umstellt. Genau das waere aber die Luecke: der Proxy steht
-# vor dem Netz, und dann waere der Token darueber wieder erreichbar.
-main._PROXY_CFG["trusted"] = ["192.0.2.9"]
-try:
-    rolle, code = versuch(KEY, "192.0.2.9", {"X-Forwarded-For": "127.0.0.1"})
-    check("auch ueber den eingetragenen Proxy nicht", code == 403, code or rolle)
-finally:
-    main._PROXY_CFG["trusted"] = []
-
-# Ohne erkennbare Gegenstelle im Zweifel abweisen.
-rolle, code = versuch(KEY, None)
-check("ohne erkennbare Gegenstelle abgewiesen", code == 403, code or rolle)
+rolle, code = versuch({})
+check("ohne Kopfzeile ebenfalls 401", code == 401, code or rolle)
 
 # ----------------------------------------------------------------------
-print("--- Ein unpassender Key sperrt niemanden aus ---")
-# Wichtig fuer die Rueckwaertsvertraeglichkeit: eine versehentlich
-# mitgeschickte Kopfzeile darf nicht 403 ergeben, sondern muss weiter auf
-# die Sitzungspruefung durchfallen. Ohne Sitzung ist das 401, nicht 403.
-rolle, code = versuch("falscher-token", "192.0.2.9")
-check("falscher Token aus dem Netz faellt auf die Sitzung durch (401)",
-      code == 401, code or rolle)
+print("--- Die Sitzung ist der Weg ---")
+# Gegenprobe zur Aussagekraft: wenn hier gar nichts mehr durchkaeme,
+# blieben die Pruefungen oben auch dann gruen, wenn die Anmeldung kaputt
+# waere. Also einmal zeigen, dass eine gueltige Sitzung angenommen wird.
+from datetime import timedelta  # noqa: E402
 
-rolle, code = versuch("falscher-token", "127.0.0.1")
-check("falscher Token ueber Loopback ebenso", code == 401, code or rolle)
+from models import LoginSession, Role, User  # noqa: E402
 
-rolle, code = versuch("", "192.0.2.9")
-check("gar kein Token ergibt 401", code == 401, code or rolle)
+with Session(main.engine) as s:
+    u = User(username="pruefer", role=Role.admin,
+             password_hash=main.hash_password("egal"))
+    s.add(u)
+    s.commit()
+    s.refresh(u)
+    token = "sitzungstoken-fuer-die-pruefung"
+    s.add(LoginSession(user_id=u.id, token_hash=main.hash_token(token),
+                       expires_at=main.utcnow() + timedelta(hours=1)))
+    s.commit()
+
+rolle, code = versuch(sitzung=token)
+check("eine gueltige Sitzung wird angenommen", rolle == Role.admin,
+      code or rolle)
+
+rolle, code = versuch(sitzung="unbekannt")
+check("eine unbekannte Sitzung nicht", code == 401, code or rolle)
 
 # ----------------------------------------------------------------------
-print("--- Gegenprobe zur Aussagekraft ---")
-# Wenn der richtige Token ueber Loopback NICHT durchkaeme, wuerde oben
-# alles Moegliche gruen bleiben, ohne dass die Regel greift. Deshalb hier
-# ausdruecklich beides nebeneinander.
-rolle_innen, _ = versuch(KEY, "127.0.0.1")
-_, code_aussen = versuch(KEY, "192.0.2.9")
-check("innen angenommen UND aussen abgewiesen - beides zusammen",
-      rolle_innen == main.Role.admin and code_aussen == 403,
-      f"innen={rolle_innen} aussen={code_aussen}")
+print("--- Auch die Einrichtung erzeugt ihn nicht mehr ---")
+setup = (WURZEL / "setup.sh").read_text(encoding="utf-8")
+check("setup.sh erzeugt keinen Admin-Token mehr",
+      "CO37_ADMIN_TOKEN" not in setup)
+check("und raeumt eine alte Datei weg",
+      'rm -f "$BASE/data/admin.token"' in setup)
 
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

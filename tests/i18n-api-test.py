@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
-KEY = os.getenv("CO37_TEST_KEY", "t")
+SESSION = os.getenv("CO37_TEST_SESSION", "")
 
 fails = 0
 
@@ -51,7 +51,7 @@ def call(path, data=None, method=None, hdr=None):
         return e.code, {"body": e.read().decode()[:200]}
 
 
-adm = {"X-API-Key": KEY}
+adm = {"X-Session": SESSION}
 
 # ----------------------------------------------------------------------
 # Vorgabe der Installation
@@ -90,11 +90,14 @@ check("me liefert das Feld language", "language" in res, res)
 check("ohne Wahl steht dort nichts", res.get("language") is None,
       res.get("language"))
 
-# Der API-Key hat kein Konto. Das ist kein Fehler, den jemand beheben
-# muesste - die Oberflaeche merkt sich die Wahl dann nur im Cookie.
-code, res = call("/api/v1/me/language", {"language": "de"}, hdr=adm)
-check("API-Key: Wahl wird angenommen", code == 200, (code, res))
-check("API-Key: aber nicht gespeichert", res.get("gespeichert") is False, res)
+# Hier stand die Wahl eines Aufrufers OHNE Konto - der frueheren
+# Anmeldung ueber den globalen Admin-Token. Den gibt es seit 0.36.12 nicht
+# mehr, jeder Aufrufer hat jetzt ein Konto. Der Fall ist damit entfallen,
+# nicht ungeprueft: es gibt ihn nicht.
+#
+# Die Wahl am echten Konto prueft der Abschnitt weiter unten. Hier wird
+# bewusst NICHTS gesetzt, damit die Sprache des Administrators fuer die
+# nachfolgenden Reihen unveraendert bleibt.
 
 code, res = call("/api/v1/me/language", {"language": "kl"}, hdr=adm)
 check("unbekannte Sprache am Konto wird abgewiesen", code == 400, code)

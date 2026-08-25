@@ -47,7 +47,6 @@ from models import (
 )
 
 DB_URL = os.getenv("CO37_DB", "sqlite:///./co37.db")
-ADMIN_TOKEN = os.getenv("CO37_ADMIN_TOKEN", "change-me")
 AGENT_OFFLINE_AFTER = int(os.getenv("CO37_OFFLINE_SECONDS", "180"))
 DATA_DIR = Path(os.getenv("CO37_DATA", "/opt/co37/data"))
 PKG_DIR = DATA_DIR / "packages"
@@ -140,7 +139,7 @@ if _cors_origins:
         CORSMiddleware,
         allow_origins=_cors_origins,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Content-Type", "X-Session", "X-API-Key",
+        allow_headers=["Content-Type", "X-Session",
                        "X-Agent-Token", "X-Install-Token"],
     )
 
@@ -697,50 +696,37 @@ def session_token(request: Optional[Request], x_session: str = "") -> str:
     return x_session
 
 
-def authenticate(x_api_key: str, x_session: str, session: Session,
+def authenticate(x_session: str, session: Session,
                  request: Optional[Request] = None) -> Principal:
     """
-    Stellt fest, WER da ist. Zwei Wege: eine Anmeldesitzung fuer Menschen
-    und der API-Key fuer Maschinen. Der API-Key gilt als Administrator.
+    Stellt fest, WER da ist. Ein Weg: die Anmeldesitzung.
 
     Als eigene Funktion und nicht nur als Abhaengigkeit, damit sie auch
     dort aufgerufen werden kann, wo die Pruefung von einer Bedingung
-    abhaengt - beim Paketdownload etwa, der alternativ den
-    Paket-Schluessel akzeptiert.
+    abhaengt - beim Paketdownload etwa, der alternativ das
+    Installations-Token akzeptiert.
 
-    Der API-Key gilt NUR ueber Loopback. Warum:
+    Frueher gab es hier einen zweiten Weg: einen globalen Admin-Token als
+    Kopfzeile X-API-Key. Er ist entfallen. Warum:
 
-    Er stammt aus der Zeit vor den Benutzerkonten, als er der einzige Weg
-    hinein war. Heute meldet sich ein Mensch mit Passwort an, und dafuer
-    gibt es eine Drosselung - fuenf Fehlversuche je Quelle, dann fuenfzehn
-    Minuten Pause. Fuer den API-Key gab es nichts dergleichen: dauerhaft
-    gueltig, nie ablaufend, volle Rechte, auf jeder Route, unbegrenzt oft
-    versuchbar. Er war damit die einzige Zugangsberechtigung, die niemand
-    bremst.
+    Er stammte aus der Zeit vor den Benutzerkonten, als er der einzige Weg
+    hinein war. Danach war er dauerhaft gueltig, lief nie ab, galt auf
+    jeder Route und liess sich - anders als das Passwort - unbegrenzt oft
+    durchprobieren; die Drosselung sitzt nur an der Anmelderoute. Ab
+    0.36.10 galt er nur noch ueber Loopback, und damit war er auf einer
+    Installation mit HTTPS-Zwang ohnehin unbenutzbar: der Zwang laesst
+    ueber Loopback nur /api/health durch.
 
-    Gebraucht wird er heute noch an zwei Stellen, und beide sitzen auf dem
-    Rechner selbst: das Testgeruest und der Weg zurueck, wenn man sich aus
-    der Oberflaeche aussperrt - einziges Administratorkonto deaktiviert,
-    Passwort weg. Wer das braucht, hat ohnehin eine Shell auf dem Server.
+    Uebrig blieb eine Berechtigung ohne Nutzen, aber mit Angriffsflaeche.
+    Der Weg zurueck nach einem Aussperren fuehrt jetzt ausdruecklich ueber
+    die Datenbank - siehe README, "Wenn du dich aussperrst". Das braucht
+    root auf dem Server, und genau das ist angemessen.
 
-    Aus dem Netz ist er damit gar nicht mehr erreichbar, auch nicht ueber
-    den Reverse Proxy: geprueft wird die tatsaechliche Gegenstelle, nicht
-    X-Forwarded-For. Eine weitergereichte Kopfzeile waere hier genau die
-    falsche Grundlage - sie kann sich jeder selbst setzen.
-
-    Abgewiesen wird nur ein PASSENDER Key von aussen. Ein unpassender
-    faellt weiter auf die Sitzungspruefung durch, damit eine
-    versehentlich mitgeschickte Kopfzeile niemanden aussperrt.
+    Wer die Schnittstelle aus einem Skript anspricht, meldet sich an und
+    haelt die Sitzung. Sollte einmal eine nicht-interaktive Berechtigung
+    gebraucht werden, gehoert sie je Konto und widerruflich - nicht als
+    ein globaler Schluessel zurueck.
     """
-    if x_api_key and secrets.compare_digest(x_api_key, ADMIN_TOKEN):
-        if not is_loopback(request):
-            raise HTTPException(
-                403,
-                "Der Admin-Token gilt nur auf dem Server selbst "
-                "(127.0.0.1). Fuer den Zugriff von aussen bitte anmelden.",
-            )
-        return Principal("api-key", Role.admin)
-
     row = _session_by_token(session_token(request, x_session), session)
     if not row:
         raise HTTPException(401, "Nicht angemeldet")
@@ -757,7 +743,6 @@ def authenticate(x_api_key: str, x_session: str, session: Session,
 
 def require_login(
     request: Request,
-    x_api_key: str = Header(default=""),
     x_session: str = Header(default=""),
     session: Session = Depends(get_session),
 ) -> Principal:
@@ -771,7 +756,7 @@ def require_login(
     das Hochladen eines Systemupdates, das der Watcher als root auspackt -
     Code als root ausfuehren.
     """
-    return authenticate(x_api_key, x_session, session, request)
+    return authenticate(x_session, session, request)
 
 
 # Gueltigkeitsdauer eines Installations-Tokens. Kurz genug, dass der Wert
@@ -3296,7 +3281,6 @@ def package_build_status():
 def download_package(name: str, request: Request,
                      x_install_token: str = Header(default=""),
                      x_session: str = Header(default=""),
-                     x_api_key: str = Header(default=""),
                      session: Session = Depends(get_session)):
     """
     Einzige Route, die ein Installations-Token akzeptiert.
@@ -3310,7 +3294,7 @@ def download_package(name: str, request: Request,
     """
     if not consume_install_token(x_install_token, session, request):
         # Kein gueltiges Token: dann muss es eine Anmeldung sein.
-        require_admin(authenticate(x_api_key, x_session, session, request))
+        require_admin(authenticate(x_session, session, request))
 
     if "/" in name or "\\" in name or name.startswith("."):
         raise HTTPException(400, "Ungueltiger Name")
