@@ -27,7 +27,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.36.12"
+AGENT_VERSION = "0.36.14"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -93,6 +93,66 @@ def load_config(path: Path) -> dict:
     return cfg
 
 
+# ----------------------------------------------------------------------
+# Rechte an der Konfiguration
+# ----------------------------------------------------------------------
+# Aus der Sicherheitspruefung vom 2026-08-22 (F-06).
+#
+# In agent.conf steht das Dauertoken des Hosts. Wer es liest, kann sich
+# gegenueber dem Backend als dieser Host ausgeben: Auftraege abholen,
+# Ergebnisse faelschen, den Agent-Code beziehen.
+#
+# Unter Linux stand die Datei schon immer auf 600 und gehoert root. Unter
+# Windows lief os.chmod ins Leere - es setzt dort hoechstens das
+# Schreibschutz-Attribut und hat mit der Zugriffssteuerungsliste nichts zu
+# tun. C:\ProgramData vererbt an neue Dateien ein Leserecht fuer
+# "Benutzer"; das Token war damit fuer jedes Konto auf dem Rechner
+# lesbar, auch fuer ein unprivilegiertes.
+#
+# Deshalb hier ausdruecklich: Vererbung abschneiden, danach nur SYSTEM und
+# die lokale Administratorengruppe.
+#
+# Angegeben ueber SIDs, nicht ueber Namen. Auf einem deutschen Windows
+# heisst die Gruppe "Administratoren", auf einem franzoesischen anders -
+# ein Befehl mit dem englischen Namen scheitert dort still, und die Datei
+# bliebe offen.
+SID_SYSTEM = "*S-1-5-18"
+SID_ADMINS = "*S-1-5-32-544"
+
+
+def sichere_rechte(pfad: Path) -> bool:
+    """
+    Beschraenkt den Zugriff auf eine Datei auf das System und die
+    Administratoren.
+
+    Gibt zurueck, ob es gelungen ist. Ein Fehlschlag beendet den Agent
+    nicht - er wuerde sonst wegen einer Nebensache gar nicht mehr
+    arbeiten -, wird aber protokolliert.
+    """
+    if not IS_WINDOWS:
+        try:
+            os.chmod(pfad, 0o600)
+            return True
+        except OSError as exc:
+            log(f"Rechte an {pfad} nicht setzbar: {exc}", err=True)
+            return False
+
+    try:
+        res = subprocess.run(
+            ["icacls", str(pfad), "/inheritance:r",
+             "/grant:r", f"{SID_SYSTEM}:(F)", f"{SID_ADMINS}:(F)"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"icacls nicht ausfuehrbar: {exc}", err=True)
+        return False
+    if res.returncode != 0:
+        log(f"Rechte an {pfad} nicht setzbar: "
+            f"{(res.stderr or res.stdout).strip()[:200]}", err=True)
+        return False
+    return True
+
+
 CFG_PATH = find_config()
 CFG = load_config(CFG_PATH)
 SERVER = CFG["server"].rstrip("/")
@@ -118,7 +178,7 @@ def clear_token():
             if (line.split("=")[0].strip() if "=" in line else "") != "token"
         ]
         CFG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.chmod(CFG_PATH, 0o600)
+        sichere_rechte(CFG_PATH)
     except OSError as exc:
         log(f"Konfiguration nicht schreibbar: {exc}", err=True)
 
@@ -138,10 +198,7 @@ def set_token(token: str):
     if not seen:
         lines.append(f"token = {token}")
     CFG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    try:
-        os.chmod(CFG_PATH, 0o600)
-    except OSError:
-        pass
+    sichere_rechte(CFG_PATH)
 
 
 def api(method: str, path: str, payload=None, params=None, timeout=120, auth=True):
@@ -1267,6 +1324,97 @@ def _strip_version(code: str) -> str:
     )
 
 
+# ----------------------------------------------------------------------
+# Signatur des Agent-Codes
+# ----------------------------------------------------------------------
+# Aus der Sicherheitspruefung vom 2026-08-22 (F-07).
+#
+# Der Agent holt seinen eigenen Code vom Backend und ersetzt damit die
+# Datei, die er als root beziehungsweise als SYSTEM ausfuehrt. Geprueft
+# wurde bisher nur eine SHA-256, die in derselben Antwort steht wie der
+# Code. Wer die Antwort faelschen kann, faelscht beide. Sie schuetzt
+# gegen einen abgebrochenen Download, nicht gegen Manipulation.
+#
+# Dasselbe Verfahren wie beim Update-Paket: Ed25519 ueber die
+# SHA-256-Hexzeichenkette. Der oeffentliche Schluessel wird mit dem
+# Agentenpaket ausgeliefert und liegt neben dieser Datei.
+#
+# Der Zwang haengt am ausgelieferten Schluessel, genau wie im Backend:
+#
+#   Liegt er vor, ist die Signatur Pflicht. Sonst koennte ein Angreifer
+#   sie einfach weglassen.
+#
+#   Liegt er nicht vor, wird nicht geprueft. Das ist der Zustand eines
+#   Quelltextes, aus dem sich jemand selbst baut - er signiert nichts und
+#   hat auch nichts davon.
+#
+# WICHTIG fuer den Uebergang: ein Agent, der sich selbst aktualisiert,
+# tauscht nur agent.py aus. Er bekommt den Schluessel dabei NIE. Die
+# Pruefung beginnt auf einem Host also erst, wenn dort das .deb oder .msi
+# neu installiert wurde. Bis dahin laeuft er wie bisher weiter.
+PUB_DATEI = Path(__file__).resolve().parent / "release_key.pub"
+
+
+def signaturzwang() -> bool:
+    return PUB_DATEI.is_file()
+
+
+def pruefe_code_signatur(code: str, signatur: str) -> tuple[bool, str]:
+    """
+    Prueft die Signatur des vom Backend gelieferten Agent-Codes.
+
+    Rueckgabe: (angenommen, Begruendung bei Ablehnung).
+    """
+    if not signaturzwang():
+        return True, ""
+
+    try:
+        import base64
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
+    except ImportError:
+        # Bewusst ablehnen statt durchlassen. Der Schluessel liegt vor,
+        # also ist auf diesem Host gepruefte Aktualisierung vereinbart.
+        # Eine fehlende Bibliothek darf diese Vereinbarung nicht
+        # stillschweigend aufheben - sonst genuegt es, sie zu entfernen.
+        return False, ("Die Bibliothek 'cryptography' fehlt, der Code laesst "
+                       "sich nicht pruefen. Unter Linux nachinstallieren: "
+                       "apt install python3-cryptography")
+
+    def unb64(text: str) -> bytes:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(
+            unb64(PUB_DATEI.read_text(encoding="ascii").strip()))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Ausgelieferter Signaturschluessel unlesbar: {exc}"
+
+    signatur = (signatur or "").strip()
+    if not signatur:
+        return False, ("Der Server liefert keine Signatur zum Agent-Code. "
+                       "Das Update-Paket auf dem Server ist aelter als die "
+                       "Signaturpflicht - dort erst aktualisieren.")
+
+    try:
+        roh = unb64(signatur)
+    except Exception:  # noqa: BLE001
+        return False, "Die Signatur des Agent-Codes ist beschaedigt."
+
+    inhalt = hashlib.sha256(code.encode("utf-8")).hexdigest().encode("ascii")
+    try:
+        pub.verify(roh, inhalt)
+    except InvalidSignature:
+        return False, ("Die Signatur passt nicht zum gelieferten Agent-Code. "
+                       "Er wurde veraendert oder stammt nicht vom "
+                       "Herausgeber. Es wird nichts eingespielt.")
+    except Exception:  # noqa: BLE001
+        return False, "Die Signatur des Agent-Codes laesst sich nicht pruefen."
+    return True, ""
+
+
 def self_update() -> tuple[bool, str, bool]:
     """
     Holt den aktuellen Agent-Code und ersetzt die eigene Datei.
@@ -1284,6 +1432,13 @@ def self_update() -> tuple[bool, str, bool]:
 
     if not code:
         return False, "Leere Antwort vom Server", False
+
+    # Vor allem anderen: stammt dieser Code vom Herausgeber? Alles, was
+    # danach kommt - Syntaxpruefung, Vergleich mit der eigenen Datei -
+    # setzt voraus, dass ueberhaupt der richtige Code vorliegt.
+    echt, grund = pruefe_code_signatur(code, res.get("signature", ""))
+    if not echt:
+        return False, grund, False
 
     # Genau die Fassung, die hier zuletzt zurueckgenommen wurde, nicht
     # erneut einspielen. Sonst holt der naechste Auftrag sie sofort wieder
@@ -1383,6 +1538,11 @@ def main():
     interval = 60
     recover_failed_update()
     log(f"CO-37 Agent {own_version()} - Server {SERVER}")
+
+    # Bei jedem Start, nicht nur beim Schreiben: eine Konfiguration aus
+    # einer aelteren Fassung, aus einer Sicherung oder von Hand angelegt
+    # kommt sonst nie in Ordnung. Kostet einen Aufruf alle paar Minuten.
+    sichere_rechte(CFG_PATH)
 
     # Solange kein eigenes Token vorliegt, Erstanmeldung versuchen
     while not TOKEN:

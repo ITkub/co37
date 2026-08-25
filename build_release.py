@@ -32,7 +32,14 @@ DATEIEN = [
     "run-tests.sh", ".gitignore", ".gitattributes",
 ]
 
-AUSSCHLUSS = ("__pycache__", ".pyc", ".db", ".db-shm", ".db-wal", ".DS_Store")
+# .log/.log.1: der Agent schreibt sein Protokoll neben agent.py. Wer ihn
+# einmal im Projektverzeichnis von Hand startet, hat danach eine
+# agent.log darin liegen - sie ist per .gitignore nicht im Repository,
+# wanderte aber bis 0.36.12 in jedes Paket. Damit hing der Paketinhalt
+# davon ab, was auf dem Baurechner zufaellig herumlag, und im schlechten
+# Fall stuenden dort Hostnamen und Fehlermeldungen aus einem fremden Netz.
+AUSSCHLUSS = ("__pycache__", ".pyc", ".db", ".db-shm", ".db-wal", ".DS_Store",
+              ".log", ".log.1")
 AUSSCHLUSS_ORDNER = ("__pycache__", "packaging/cache", "packaging/_msi_build")
 
 # Diese Dateien brauchen im Paket das Ausfuehrungsrecht. Pythons
@@ -218,6 +225,58 @@ def signiere(ziel: Path) -> bool:
     return True
 
 
+def signiere_agent() -> bool:
+    """
+    Signiert agent/agent.py, damit der Agent seine eigene Aktualisierung
+    pruefen kann (F-07 der Sicherheitspruefung vom 2026-08-22).
+
+    Reihenfolge ist entscheidend und deshalb hier festgehalten: das muss
+    NACH setze_versionen() geschehen - die schreibt die Zeile
+    AGENT_VERSION in die Datei und aendert damit ihre Pruefsumme - und VOR
+    sammle(), damit die entstandene .sig mit ins Paket wandert. Beides
+    falschherum faellt nicht beim Bauen auf, sondern erst, wenn ein Agent
+    beim Kunden die Aktualisierung ablehnt.
+
+    Ohne privaten Schluessel kein Fehler, aber die alte .sig muss weg:
+    sonst bliebe eine Signatur zu einer frueheren Fassung liegen, wanderte
+    ins Paket, und jeder Agent mit ausgeliefertem Schluessel wiese die
+    Aktualisierung mit "Signatur passt nicht" zurueck. Eine fehlende
+    Signatur ist die ehrlichere Auskunft.
+    """
+    quelle = HIER / "agent" / "agent.py"
+    sig = quelle.with_name(quelle.name + ".sig")
+    # sign-release.py legt neben der Signatur auch eine .sha256 an. Beim
+    # Paket ist die zum Abgleich von Hand gedacht; hier braucht sie
+    # niemand und im Paket waere sie nur eine zweite Wahrheit.
+    summe = quelle.with_name(quelle.name + ".sha256")
+    werkzeug = HIER / "tools" / "sign-release.py"
+    sig.unlink(missing_ok=True)
+    summe.unlink(missing_ok=True)
+    if not werkzeug.is_file():
+        return False
+    r = subprocess.run([sys.executable, str(werkzeug), str(quelle)],
+                       capture_output=True, text=True)
+    summe.unlink(missing_ok=True)
+    if r.returncode != 0 or not sig.is_file():
+        print("    (agent.py nicht signiert - Agents mit ausgeliefertem "
+              "Schluessel lehnen die Selbstaktualisierung ab)")
+        sig.unlink(missing_ok=True)
+        return False
+
+    # Gegenprobe mit dem ausgelieferten oeffentlichen Schluessel - genau
+    # dem, den der Agent spaeter benutzt. Faengt ab, was hier am ehesten
+    # schiefgeht: eine Signatur ueber einen Stand, den es nach dem
+    # naechsten Schreibvorgang so nicht mehr gibt.
+    p = subprocess.run([sys.executable, str(werkzeug), "--pruefen", str(quelle)],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        sig.unlink(missing_ok=True)
+        fehler(f"Die Signatur von agent.py passt nicht zur Datei: "
+               f"{(p.stdout + p.stderr).strip()[:200]}")
+    print(f"agent/agent.py signiert -> {sig.name}")
+    return True
+
+
 # ======================================================================
 def main():
     p = argparse.ArgumentParser(description="CO-37 Update-Paket bauen.")
@@ -239,6 +298,13 @@ def main():
     setze_versionen(version)
     pruefe_versionen(version)
     pruefe_keine_geheimnisse()
+
+    if not a.no_sign:
+        signiere_agent()
+    else:
+        # Auch hier weg - siehe Begruendung in signiere_agent().
+        (HIER / "agent" / "agent.py.sig").unlink(missing_ok=True)
+        (HIER / "agent" / "agent.py.sha256").unlink(missing_ok=True)
 
     ziel = HIER / f"co37_v{version.replace('.', '_')}.zip"
     ziel.unlink(missing_ok=True)

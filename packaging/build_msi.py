@@ -39,6 +39,9 @@ HERE = Path(__file__).resolve().parent
 AGENT_PY = HERE.parent / "agent" / "agent.py"
 CACHE = HERE / "cache"
 
+# Siehe build_deb.py - derselbe Schluessel, dieselbe Begruendung.
+RELEASE_KEY = HERE.parent / "backend" / "release_key.pub"
+
 PY_VERSION = "3.12.8"
 PY_ZIP = f"python-{PY_VERSION}-embed-amd64.zip"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/{PY_ZIP}"
@@ -96,6 +99,24 @@ order = ["server", "token", "verify_ssl"]
 out = [f"{k} = {existing[k]}" for k in order if k in existing]
 out += [f"{k} = {v}" for k, v in existing.items() if k not in order]
 CONF.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+# Zugriff auf die Konfiguration beschraenken (F-06 der
+# Sicherheitspruefung vom 2026-08-22). In der Datei steht das Dauertoken
+# des Hosts; C:\ProgramData vererbt an neue Dateien ein Leserecht fuer
+# "Benutzer", und os.chmod bewirkt unter Windows nichts.
+#
+# Ordner UND Datei: der Ordner, damit spaeter angelegte Dateien richtig
+# beginnen, die Datei, weil sie in diesem Lauf schon geschrieben wurde
+# und die neuen Vorgaben des Ordners nicht rueckwirkend erbt.
+#
+# Ueber SIDs statt Namen - "Administrators" heisst auf einem deutschen
+# Windows anders, und ein Befehl mit dem falschen Namen scheitert still.
+for ziel, rechte in ((CONF_DIR, "(OI)(CI)(F)"), (CONF, "(F)")):
+    subprocess.run(
+        ["icacls", str(ziel), "/inheritance:r",
+         "/grant:r", f"*S-1-5-18:{rechte}", f"*S-1-5-32-544:{rechte}"],
+        capture_output=True,
+    )
 
 python_exe = INSTALL_DIR / "python" / "pythonw.exe"
 agent_py = INSTALL_DIR / "agent.py"
@@ -234,13 +255,23 @@ def build(version: str, out_dir: Path) -> Path:
          "--platform", "win_amd64",
          "--python-version", ".".join(PY_VERSION.split(".")[:2]),
          "--only-binary=:all:",
-         "requests", "urllib3", "certifi", "charset-normalizer", "idna"],
+         # cryptography fuer die Signaturpruefung der Selbstaktualisierung
+         # (F-07). Unter Linux kommt sie aus python3-cryptography; im
+         # Embeddable gibt es kein pip, also muss sie hier mit hinein.
+         "requests", "urllib3", "certifi", "charset-normalizer", "idna",
+         "cryptography"],
         capture_output=True, text=True,
     )
     if res.returncode != 0:
         raise SystemExit(f"pip fehlgeschlagen: {res.stderr[-600:]}")
 
     shutil.copy(AGENT_PY, work / "agent.py")
+    # Muss neben agent.py liegen - der Agent sucht ihn dort.
+    if RELEASE_KEY.is_file():
+        shutil.copy(RELEASE_KEY, work / "release_key.pub")
+    else:
+        print("Hinweis: kein backend/release_key.pub - der Agent aus diesem "
+              "Paket prueft seine Selbstaktualisierung nicht.")
     (work / "install_task.py").write_text(TASK_SCRIPT, encoding="utf-8")
     (work / "uninstall_task.py").write_text(UNINSTALL_SCRIPT, encoding="utf-8")
 

@@ -211,6 +211,22 @@ dahin keine Aufträge. Auf **Freigeben** klicken.
 Das ist der einzige Schutz gegen fremde Anmeldungen — im LAN-Betrieb verlangt
 das System bewusst kein Anmeldetoken.
 
+Begrenzt ist dagegen die **Menge**. Zwei Schranken, seit 0.36.14:
+
+* Höchstens **50 Anmeldungen je Absender-Adresse in 15 Minuten**. Wer darüber
+  kommt, bekommt `429` und einen `Retry-After`.
+* Höchstens **100 Hosts gleichzeitig in „wartet auf Freigabe"**. Ist die Liste
+  voll, wird keine neue Zeile mehr angelegt, bis du freigibst oder entfernst.
+
+Ohne das konnte jeder, der die Route erreicht, in einer Schleife beliebig viele
+Hostzeilen anlegen — der eine echte neue Host wäre in der Freigabeliste
+untergegangen. Ein bereits bekannter Host, dessen Token du zurückgezogen hast,
+kommt auch bei voller Liste noch durch: er legt nichts Neues an.
+
+Wenn du wirklich mehr als 100 Hosts auf einmal ausrollst, gib zwischendurch
+frei. Die Grenzen stehen in `backend/main.py` unter *Drosselung der
+Agent-Anmeldung*.
+
 ### 4.2 Checkmk verknüpfen
 
 Auf **…** beim Host. Unter *Checkmk-Verknüpfung* mehrere Hosts auswählbar: fällt
@@ -401,9 +417,42 @@ erscheint dort in der Übersicht ein Hinweis und ein Knopf **Agent**.
 Für alle auf einmal: **Einstellungen → Agents → Alle veralteten Agents
 aktualisieren.**
 
-Der Agent lädt den Code, prüft die SHA-256-Summe, prüft die Syntax, legt die
-alte Fassung als `.bak` daneben und startet neu. Schlägt eine der Prüfungen
-fehl, bleibt die alte Fassung aktiv.
+Der Agent lädt den Code, **prüft die Signatur**, prüft die SHA-256-Summe, prüft
+die Syntax, legt die alte Fassung als `.bak` daneben und startet neu. Schlägt
+eine der Prüfungen fehl, bleibt die alte Fassung aktiv.
+
+## Warum der Agent-Code signiert wird
+
+Der Agent ersetzt damit die Datei, die er als `root` beziehungsweise als
+`SYSTEM` ausführt. Die SHA-256-Summe steht in **derselben Antwort** wie der
+Code — wer die Antwort fälschen kann, fälscht beide. Sie schützt gegen einen
+abgebrochenen Download, nicht gegen Manipulation. Das ist dieselbe Überlegung,
+die beim Update-Paket zur Signatur geführt hat.
+
+Deshalb signiert `build_release.py` beim Bauen auch `agent/agent.py` und legt
+`agent/agent.py.sig` daneben. Der Agent prüft sie gegen `release_key.pub`, der
+mit dem `.deb` beziehungsweise `.msi` ausgeliefert wird und neben `agent.py`
+liegt.
+
+Die Regel ist dieselbe wie im Backend: **liegt der Schlüssel vor, ist die
+Signatur Pflicht.** Liegt er nicht vor, wird nicht geprüft — das ist der
+Zustand eines Quelltextes, aus dem sich jemand selbst baut.
+
+> **Beim Übergang wichtig.** Ein Agent, der sich selbst aktualisiert, tauscht
+> nur `agent.py` aus. Den Schlüssel bekommt er dabei **nie**. Auf einem
+> bestehenden Host beginnt die Prüfung also erst, wenn dort das `.deb` oder
+> `.msi` neu installiert wurde. Bis dahin läuft er wie bisher weiter — er ist
+> nicht schlechter dran als vorher, aber auch nicht besser. Wer die Prüfung
+> überall haben will, rollt die Agent-Pakete einmal neu aus.
+
+Umgekehrt gilt: ein Agent **mit** Schlüssel gegen einen Server **ohne**
+Signatur im Paket lehnt die Selbstaktualisierung ab und sagt das auch. Der
+Server ist dann älter als die Signaturpflicht und muss zuerst aktualisiert
+werden.
+
+Für Linux braucht der Agent dafür `python3-cryptography`; das Paket setzt es
+als Abhängigkeit. Unter Windows liegt die Bibliothek im MSI (dadurch wächst es
+um gut 10 MB).
 
 ---
 
@@ -628,6 +677,21 @@ Netz behaupten, der Domaincontroller zu sein und dessen Aufträge abholen.
 
 Der Agent erzeugt es bei der Anmeldung selbst, du siehst es nie.
 
+Es steht in `agent.conf` — unter Linux in `/etc/co37/agent.conf` mit `600` und
+`root` als Eigentümer, unter Windows in `C:\ProgramData\CO37\agent.conf`. Dort
+gilt seit 0.36.14 dasselbe: die Vererbung ist abgeschnitten, Zugriff haben nur
+`SYSTEM` und die lokale Administratorengruppe. Vorher erbte die Datei von
+`C:\ProgramData` ein Leserecht für **Benutzer** — jedes Konto auf dem Rechner
+konnte das Token lesen. Nachsehen mit:
+
+```
+icacls C:\ProgramData\CO37\agent.conf
+```
+
+Erwartet werden genau zwei Einträge (`NT-AUTORITÄT\SYSTEM` und die
+Administratorengruppe), beide mit `(F)`, und kein `(I)` davor — das `I` stünde
+für „geerbt".
+
 Das eigentliche Risiko: wer den Server kontrolliert, kontrolliert alle Hosts,
 weil dort überall ein privilegierter Prozess auf Aufträge wartet. Entschärfend
 wirkt, dass das Auftragsprotokoll nur `scan`, `patch`, `reboot` und `selfupdate`
@@ -675,6 +739,14 @@ Schema prüfen:
 ```
 curl -s localhost:8080/api/health
 ```
+
+Seit 0.36.14 stehen `version`, `agent_version` und `schema_version` in dieser
+Antwort **nur noch für Aufrufer über `127.0.0.1` und für angemeldete
+Benutzer**. Von einem anderen Rechner aus kommt nur `status` und
+`default_language` zurück — die Route muss offen bleiben (der Watcher fragt sie
+ab, die Anmeldeseite braucht die Vorgabesprache), aber sie muss nicht jedem
+Unangemeldeten sagen, welche Fassung hier läuft. Der Befehl oben läuft **auf dem
+Server**, dort siehst du alles.
 
 Liefert das `503` mit `schema_mismatch`, passt die Datenbank nicht zum
 Programmstand. Ab 0.4.1 wird das Schema beim Start automatisch angeglichen —

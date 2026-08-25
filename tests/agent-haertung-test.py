@@ -1,0 +1,340 @@
+"""
+CO-37 - Haertung des Agents: Signatur des Codes (F-07) und Rechte an der
+Konfiguration (F-06).
+
+Aus der Sicherheitspruefung vom 2026-08-22.
+
+F-07 - Der Agent holt seinen eigenen Code vom Backend und ersetzt damit
+die Datei, die er als root beziehungsweise als SYSTEM ausfuehrt. Geprueft
+wurde nur eine SHA-256, die in DERSELBEN Antwort steht wie der Code. Wer
+die Antwort faelschen kann, faelscht beide - die Pruefsumme schuetzt
+gegen einen abgebrochenen Download, nicht gegen Manipulation. Dieselbe
+Ueberlegung hat beim Update-Paket zur Signatur gefuehrt (F-01); hier gilt
+sie genauso.
+
+F-06 - In agent.conf steht das Dauertoken des Hosts. Unter Linux stand
+die Datei immer auf 600 und gehoert root. Unter Windows lief os.chmod ins
+Leere, und C:\\ProgramData vererbt an neue Dateien ein Leserecht fuer
+"Benutzer": das Token war fuer jedes Konto auf dem Rechner lesbar.
+
+WAS DIESE REIHE LEISTET UND WAS NICHT - hier ehrlich, damit sie nicht
+mehr zu versprechen scheint, als sie kann:
+
+  F-07 wird ECHT geprueft. Die Reihe erzeugt ein eigenes Wegwerf-
+  Schluesselpaar, signiert damit einen Codestand und laesst die Funktion
+  des Agents darueber urteilen - in beide Richtungen.
+
+  F-06 wird NUR STATISCH geprueft. Hier laeuft kein Windows, icacls gibt
+  es nicht. Die Reihe stellt fest, dass der Aufruf da ist, an den
+  richtigen Stellen steht und SIDs statt uebersetzbarer Gruppennamen
+  benutzt. Ob die Datei danach tatsaechlich zu ist, zeigt auf dem
+  Zielsystem nur:
+
+      icacls C:\\ProgramData\\CO37\\agent.conf
+
+Braucht kein laufendes Backend und kein Netz.
+
+    python3 tests/agent-haertung-test.py
+"""
+import base64
+import hashlib
+import importlib.util
+import os
+import re
+import shutil
+import sys
+import tempfile
+from datetime import timedelta
+from pathlib import Path
+
+WURZEL = Path(__file__).resolve().parent.parent
+TMP = Path(tempfile.mkdtemp())
+
+fails = 0
+
+
+def check(label, ok, extra=""):
+    global fails
+    if not ok:
+        fails += 1
+    print(f"{'ok    ' if ok else 'FEHLER'} {label}{'  -> ' + str(extra) if extra else ''}")
+
+
+def b64(roh: bytes) -> str:
+    return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
+
+
+# ======================================================================
+# F-07, Agent-Seite: die Pruefung urteilt richtig
+# ======================================================================
+print("--- Der Agent prueft die Signatur seines Codes ---")
+
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
+    Ed25519PrivateKey,
+)
+
+# Ein eigenes Paar, nur fuer diese Reihe. Der echte private
+# Signaturschluessel liegt ausschliesslich beim Herausgeber und hat in
+# einem Test nichts verloren - er wird hier weder gelesen noch gebraucht.
+PRIVAT = Ed25519PrivateKey.generate()
+OEFFENTLICH = b64(PRIVAT.public_key().public_bytes(
+    serialization.Encoding.Raw, serialization.PublicFormat.Raw))
+
+
+def signiere(text: str) -> str:
+    """Signiert wie tools/sign-release.py: Ed25519 ueber den SHA-256-Hex."""
+    summe = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return b64(PRIVAT.sign(summe.encode("ascii")))
+
+
+def lade_agent(mit_schluessel: bool):
+    """
+    Laedt agent.py als Modul aus einem eigenen Verzeichnis.
+
+    Eigenes Verzeichnis, weil der Zwang genau daran haengt, ob
+    release_key.pub NEBEN der Datei liegt - das laesst sich nur so
+    herstellen. Eine agent.conf muss dabei sein: ohne sie beendet sich
+    der Agent schon beim Laden.
+    """
+    ordner = TMP / ("mit_key" if mit_schluessel else "ohne_key")
+    ordner.mkdir(parents=True, exist_ok=True)
+    shutil.copy(WURZEL / "agent" / "agent.py", ordner / "agent.py")
+    (ordner / "agent.conf").write_text("server = http://127.0.0.1:1\n",
+                                       encoding="utf-8")
+    if mit_schluessel:
+        (ordner / "release_key.pub").write_text(OEFFENTLICH + "\n",
+                                                encoding="ascii")
+    name = "co37agent_" + ("mit" if mit_schluessel else "ohne")
+    spec = importlib.util.spec_from_file_location(name, ordner / "agent.py")
+    modul = importlib.util.module_from_spec(spec)
+    sys.modules[name] = modul
+    spec.loader.exec_module(modul)
+    return modul
+
+
+mit = lade_agent(True)
+check("mit ausgeliefertem Schluessel gilt Signaturzwang", mit.signaturzwang())
+
+CODE = "print('das ist der agent')\n"
+
+ok, grund = mit.pruefe_code_signatur(CODE, signiere(CODE))
+check("eine gueltige Signatur wird angenommen", ok, grund)
+
+ok, grund = mit.pruefe_code_signatur(CODE, "")
+check("eine fehlende Signatur wird abgewiesen", not ok)
+check("und die Meldung sagt, was zu tun ist",
+      "Server" in grund and "aktualisieren" in grund, grund)
+
+sig = signiere(CODE)
+ok, grund = mit.pruefe_code_signatur(CODE + "# untergeschoben\n", sig)
+check("veraenderter Code faellt durch", not ok)
+check("und die Meldung nennt den Grund", "veraendert" in grund, grund)
+
+# Signatur eines ANDEREN Schluessels - der Fall "Angreifer signiert selbst".
+fremd = Ed25519PrivateKey.generate()
+fremde_sig = b64(fremd.sign(
+    hashlib.sha256(CODE.encode("utf-8")).hexdigest().encode("ascii")))
+ok, _ = mit.pruefe_code_signatur(CODE, fremde_sig)
+check("eine Signatur von fremder Hand faellt durch", not ok)
+
+ok, _ = mit.pruefe_code_signatur(CODE, "kein-base64-!!!")
+check("eine beschaedigte Signatur faellt durch", not ok)
+
+# Gegenprobe zur Aussagekraft: ohne ausgelieferten Schluessel darf nichts
+# geprueft werden. Sonst liesse sich aus dem Quelltext gebauter Code nie
+# mehr aktualisieren, und die Pruefungen oben blieben gruen, wenn die
+# Funktion schlicht immer ablehnte.
+ohne = lade_agent(False)
+check("ohne ausgelieferten Schluessel kein Zwang", not ohne.signaturzwang())
+ok, _ = ohne.pruefe_code_signatur(CODE, "")
+check("und dann wird auch ohne Signatur angenommen", ok)
+
+
+# ======================================================================
+# F-07, Reihenfolge im Agent
+# ======================================================================
+print("--- Geprueft wird, bevor geschrieben wird ---")
+# Eine Signaturpruefung hinter dem Schreibvorgang waere wertlos. Genau
+# dieser Fehler ist beim Watcher schon einmal beinahe passiert (F-01).
+agent_quelle = (WURZEL / "agent" / "agent.py").read_text(encoding="utf-8")
+korpus = agent_quelle[agent_quelle.index("def self_update("):]
+korpus = korpus[:korpus.index("\ndef ", 10)]
+
+i_pruef = korpus.find("pruefe_code_signatur(")
+i_schreib = korpus.find("tmp.write_text(")
+i_compile = korpus.find("compile(code")
+check("self_update ruft die Pruefung auf", i_pruef > 0, i_pruef)
+check("und zwar vor dem Schreiben", 0 < i_pruef < i_schreib,
+      f"pruefen@{i_pruef} schreiben@{i_schreib}")
+check("und vor der Syntaxpruefung", 0 < i_pruef < i_compile,
+      f"pruefen@{i_pruef} compile@{i_compile}")
+
+# Eine fehlgeschlagene Pruefung muss aussteigen, nicht nur protokollieren.
+abschnitt = korpus[i_pruef:i_pruef + 400]
+check("und steigt bei Ablehnung aus",
+      re.search(r"if not echt:\s*\n\s*return False", abschnitt) is not None,
+      abschnitt[:120])
+
+
+# ======================================================================
+# F-07, Backend-Seite: die Signatur wird ausgeliefert
+# ======================================================================
+print("--- Das Backend liefert die Signatur mit ---")
+os.environ["CO37_DB"] = f"sqlite:///{TMP}/haertung.db"
+os.environ["CO37_DATA"] = str(TMP)
+os.environ["CO37_SECRET_KEY"] = "test"
+sys.path.insert(0, str(WURZEL / "backend"))
+import main  # noqa: E402
+from sqlmodel import Session, SQLModel  # noqa: E402
+from models import ApprovalState, Host, OSType  # noqa: E402
+
+SQLModel.metadata.create_all(main.engine)
+
+AGENT_TOKEN = "agent-token-fuer-die-pruefung"
+with Session(main.engine) as s:
+    s.add(Host(hostname="haertung-host", os_type=OSType.linux,
+               agent_token_hash=main.hash_token(AGENT_TOKEN),
+               approval_state=ApprovalState.approved,
+               enrolled_at=main.utcnow()))
+    s.commit()
+
+
+def hole_code():
+    with Session(main.engine) as s:
+        return main.agent_code(AGENT_TOKEN, s)
+
+
+# Eigene agent.py samt Signatur unterschieben, statt die echte zu
+# beruehren: die echte .sig entsteht erst beim Bauen und liegt im
+# Arbeitsstand oft gar nicht vor.
+gefaelschte_quelle = TMP / "serviert" / "agent.py"
+gefaelschte_quelle.parent.mkdir(parents=True, exist_ok=True)
+gefaelschte_quelle.write_text('AGENT_VERSION = "9.9.9"\nprint("hallo")\n',
+                              encoding="utf-8")
+merke_src = main.AGENT_SRC
+try:
+    main.AGENT_SRC = gefaelschte_quelle
+
+    antwort = hole_code()
+    check("die Antwort hat ein Feld signature", "signature" in antwort,
+          sorted(antwort))
+    check("ohne .sig-Datei bleibt es leer", antwort.get("signature") == "",
+          antwort.get("signature"))
+    check("Code und Pruefsumme kommen weiterhin mit",
+          antwort.get("code") and antwort.get("sha256"), sorted(antwort))
+
+    inhalt = gefaelschte_quelle.read_text(encoding="utf-8")
+    echte_sig = signiere(inhalt)
+    gefaelschte_quelle.with_name("agent.py.sig").write_text(
+        echte_sig + "\n", encoding="ascii")
+
+    antwort = hole_code()
+    check("liegt eine .sig daneben, wird sie ausgeliefert",
+          antwort.get("signature") == echte_sig,
+          str(antwort.get("signature"))[:20])
+
+    # Und der Agent nimmt genau das an, was das Backend liefert. Diese
+    # Pruefung ist der eigentliche Punkt: sie verbindet beide Seiten und
+    # faellt auch dann, wenn eine Seite fuer sich stimmig bleibt - etwa
+    # weil eine davon ueber andere Bytes signiert oder prueft.
+    ok, grund = mit.pruefe_code_signatur(antwort.get("code", ""),
+                                         antwort.get("signature", ""))
+    check("und der Agent nimmt sie an", ok, grund)
+finally:
+    main.AGENT_SRC = merke_src
+
+
+# ======================================================================
+# F-07, Baukette
+# ======================================================================
+print("--- Die Signatur entsteht beim Bauen, zur richtigen Zeit ---")
+bau = (WURZEL / "build_release.py").read_text(encoding="utf-8")
+check("build_release.py signiert agent.py", "def signiere_agent(" in bau)
+
+# Nur der Ablauf in main() zaehlt, und darin nur Anweisungen. Die
+# Definition der Funktion steht weiter oben in der Datei, ihr Name auch in
+# einem Kommentar weiter unten - beide Fundstellen saehen nach der
+# richtigen Reihenfolge aus und sagten nichts ueber den Ablauf. Genau
+# daran ist diese Pruefung beim ersten Entwurf vorbeigelaufen.
+zeilen = [z for z in bau[bau.index("def main():"):].splitlines()
+          if not z.lstrip().startswith("#")]
+ablauf = "\n".join(zeilen)
+i_version = ablauf.find("setze_versionen(version)")
+i_sig = ablauf.find("signiere_agent()")
+i_sammle = ablauf.find("dateien = sammle()")
+# Die Reihenfolge ist der ganze Punkt: vor der Versionszeile signiert
+# passt die Signatur nicht mehr zur Datei, nach dem Packen liegt sie
+# nicht im Paket. Beides faellt beim Bauen nicht auf, sondern erst, wenn
+# ein Agent beim Kunden die Aktualisierung ablehnt.
+check("signiert wird NACH dem Setzen der Version", 0 < i_version < i_sig,
+      f"version@{i_version} signieren@{i_sig}")
+check("und VOR dem Einsammeln der Dateien", 0 < i_sig < i_sammle,
+      f"signieren@{i_sig} sammeln@{i_sammle}")
+check("eine alte Signatur wird vorher entfernt",
+      "sig.unlink(missing_ok=True)" in bau)
+check("und die frische gegengeprueft", '"--pruefen"' in bau)
+
+check(".gitignore haelt die Signatur aus dem Repository heraus",
+      "agent/agent.py.sig" in (WURZEL / ".gitignore").read_text(encoding="utf-8"))
+
+
+print("--- Die Pakete liefern den oeffentlichen Schluessel mit ---")
+# Ohne ihn prueft der Agent nichts - der Zwang haengt genau daran.
+deb = (WURZEL / "packaging" / "build_deb.py").read_text(encoding="utf-8")
+check("build_deb.py legt release_key.pub neben agent.py",
+      '"usr/lib/co37/release_key.pub"' in deb and '"usr/lib/co37/agent.py"' in deb)
+check("und setzt python3-cryptography als Abhaengigkeit",
+      "python3-cryptography" in deb)
+
+msi = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+check("build_msi.py kopiert release_key.pub ins Installationsverzeichnis",
+      'work / "release_key.pub"' in msi)
+check("und bringt cryptography als Wheel mit",
+      re.search(r'"idna",\s*\n?\s*"cryptography"', msi) is not None)
+
+
+# ======================================================================
+# F-06 - nur statisch, siehe Kopf dieser Datei
+# ======================================================================
+print("--- Rechte an agent.conf (statisch) ---")
+check("der Agent kennt eine Funktion dafuer",
+      "def sichere_rechte(" in agent_quelle)
+check("sie ruft icacls auf", '"icacls"' in agent_quelle)
+
+# Ueber SIDs, nicht ueber Namen. Auf einem deutschen Windows heisst die
+# Gruppe "Administratoren" - ein Befehl mit dem englischen Namen
+# scheitert dort still, und die Datei bliebe offen.
+check("ueber die SID des Systems", "*S-1-5-18" in agent_quelle)
+check("ueber die SID der Administratoren", "*S-1-5-32-544" in agent_quelle)
+check("keine uebersetzbaren Gruppennamen im Befehl",
+      not re.search(r'"[^"]*\bAdministrators\b[^"]*:\(', agent_quelle))
+check("die Vererbung wird abgeschnitten", "/inheritance:r" in agent_quelle)
+
+# An allen drei Stellen, an denen die Datei entsteht oder vorgefunden wird.
+for stelle, muster in (
+    ("beim Speichern des Tokens", r"def set_token\(.*?sichere_rechte\(CFG_PATH\)"),
+    ("beim Verwerfen des Tokens", r"def clear_token\(.*?sichere_rechte\(CFG_PATH\)"),
+):
+    check(f"aufgerufen {stelle}",
+          re.search(muster, agent_quelle, re.S) is not None)
+
+korpus_main = agent_quelle[agent_quelle.index("def main():"):]
+check("und einmal beim Start", "sichere_rechte(CFG_PATH)" in korpus_main)
+
+# Der alte, unter Windows wirkungslose Weg darf nicht danebenstehen
+# bleiben - sonst sieht die Datei geschuetzt aus und ist es nicht.
+check("kein blosses os.chmod mehr auf die Konfiguration",
+      "os.chmod(CFG_PATH" not in agent_quelle)
+
+check("auch die Installation unter Windows setzt die Rechte",
+      "icacls" in msi and "S-1-5-32-544" in msi)
+check("und zwar auf Ordner und Datei",
+      "(OI)(CI)(F)" in msi and "(CONF_DIR," in msi and "(CONF," in msi)
+
+print("       (nicht pruefbar ohne Windows: ob die Datei danach wirklich")
+print("        zu ist. Auf dem Zielsystem nachsehen mit")
+print("        icacls C:\\ProgramData\\CO37\\agent.conf)")
+
+print(f"\nFehler: {fails}")
+sys.exit(1 if fails else 0)

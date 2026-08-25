@@ -626,6 +626,92 @@ def note_login_success(ip: Optional[str]):
         _LOGIN_FAILS.pop(ip, None)
 
 
+# ======================================================================
+# Drosselung der Agent-Anmeldung
+# ======================================================================
+# Aus der Sicherheitspruefung vom 2026-08-22 (F-08).
+#
+# /api/v1/agent/enroll ist bewusst ohne Enrollment-Token - der Schutz
+# liegt in der Freigabe durch einen Menschen. Das bleibt so. Ungeschuetzt
+# war aber die MENGE: wer die Route erreicht, konnte in einer Schleife
+# beliebig viele Hostzeilen anlegen. Jede davon kostet Speicherplatz,
+# jede erscheint im Dashboard, und in genuegender Zahl macht sie die
+# Freigabeliste unbenutzbar - der eine echte neue Host geht darin unter.
+#
+# Zwei Schranken, weil sie Unterschiedliches abdecken:
+#
+#   Die Drosselung pro Quelle begrenzt das Tempo. Sie ist grosszuegig
+#   bemessen: ein Rollout, das dreissig Hosts gleichzeitig ausbringt,
+#   kommt aus einem NAT-Netz mit einer einzigen Adresse an, und ein
+#   Anmeldevorgang, der daran scheitert, ist ein Betriebsvorfall - genau
+#   die Sorte Schaden, die eine Sicherheitsmassnahme nicht anrichten darf.
+#
+#   Die Obergrenze wartender Hosts ist die eigentliche Schranke. Sie
+#   greift unabhaengig davon, aus wie vielen Quellen die Anmeldungen
+#   kommen, und sie loest sich von selbst: wer freigibt oder entfernt,
+#   macht wieder Platz. Ein zweiter Absender hilft dem Angreifer hier
+#   nichts.
+#
+# Nicht abgedeckt: wer bereits freigegebene Hosts hat, kann sie nicht auf
+# diesem Weg vermehren - dafuer braucht es ein gueltiges Agent-Token.
+ENROLL_MAX_PER_SOURCE = 50
+ENROLL_WINDOW = timedelta(minutes=15)
+ENROLL_MAX_SOURCES = 5000
+
+# Wie viele Hosts gleichzeitig auf Freigabe warten duerfen. Wer so viele
+# auf einmal ausbringt, gibt zwischendurch frei.
+PENDING_MAX = 100
+
+_ENROLLS: dict[str, list[datetime]] = {}
+
+
+def _recent_enrolls(ip: str, now: datetime) -> list[datetime]:
+    """Anmeldungen im laufenden Fenster; raeumt dabei auf."""
+    tries = [t for t in _ENROLLS.get(ip, []) if now - t < ENROLL_WINDOW]
+    if tries:
+        _ENROLLS[ip] = tries
+    else:
+        _ENROLLS.pop(ip, None)
+    return tries
+
+
+def enroll_retry_after(ip: Optional[str]) -> Optional[int]:
+    """Wartezeit in Sekunden, wenn diese Quelle gerade gesperrt ist."""
+    if not ip:
+        return None
+    now = utcnow()
+    tries = _recent_enrolls(ip, now)
+    if len(tries) < ENROLL_MAX_PER_SOURCE:
+        return None
+    return max(1, int((tries[0] + ENROLL_WINDOW - now).total_seconds()))
+
+
+def note_enroll(ip: Optional[str]):
+    """
+    Zaehlt eine Anmeldung.
+
+    Gezaehlt wird die gelungene, nicht die abgewiesene: anders als bei der
+    Anmeldung eines Benutzers gibt es hier keinen Fehlversuch, den man
+    zaehlen koennte - jede Anfrage, die durchkommt, legt eine Zeile an.
+    """
+    if not ip:
+        return
+    now = utcnow()
+    tries = _recent_enrolls(ip, now)
+    if ip not in _ENROLLS and len(_ENROLLS) >= ENROLL_MAX_SOURCES:
+        oldest = min(_ENROLLS, key=lambda k: _ENROLLS[k][0])
+        _ENROLLS.pop(oldest, None)
+    tries.append(now)
+    _ENROLLS[ip] = tries
+
+
+def pending_count(session: Session) -> int:
+    """Wie viele Hosts warten auf Freigabe."""
+    return len(session.exec(
+        select(Host.id).where(Host.approval_state == ApprovalState.pending)
+    ).all())
+
+
 def audit(session: Session, actor: str, action: str,
           detail: str = None, request: Request = None):
     """
@@ -1522,7 +1608,20 @@ def agent_enroll(
 
     Bewusst ohne Enrollment-Token: das System ist fuer den Betrieb im
     lokalen Netz gedacht. Der Schutz liegt allein in der Freigabe.
+
+    Begrenzt ist dagegen die Menge - siehe "Drosselung der
+    Agent-Anmeldung" weiter oben.
     """
+    quelle = client_ip(request)
+    warte = enroll_retry_after(quelle)
+    if warte:
+        raise HTTPException(
+            429,
+            "Zu viele Anmeldungen von dieser Adresse. Bitte spaeter erneut "
+            "versuchen.",
+            headers={"Retry-After": str(warte)},
+        )
+
     hostname = check_hostname(payload.hostname)
     existing = session.exec(
         select(Host).where(Host.hostname == hostname)
@@ -1551,12 +1650,13 @@ def agent_enroll(
         existing.ip_address = kurz(payload.ip_address, IP_MAX)
         existing.agent_version = kurz(payload.agent_version, VERSION_MAX)
         existing.enrolled_at = utcnow()
-        existing.enrolled_from_ip = client_ip(request)
+        existing.enrolled_from_ip = quelle
         existing.last_seen = None
         session.add(existing)
         audit(session, f"agent:{hostname}", "agent.reenroll",
               "nach zurueckgezogenem Token", request)
         session.commit()
+        note_enroll(quelle)
         # Gleiche Form wie bei der Erstanmeldung - der Agent wertet nur
         # agent_token aus, aber abweichende Antworten auf denselben
         # Endpunkt sind eine Falle fuer spaeter.
@@ -1565,6 +1665,18 @@ def agent_enroll(
             "approval_state": "pending",
             "message": "Neu angemeldet. Wartet auf Freigabe im Dashboard.",
         }
+
+    # Die Obergrenze gilt nur fuer NEUE Zeilen. Die Neuanmeldung oben
+    # betrifft einen Host, den es schon gibt - sie legt nichts an, und sie
+    # abzuweisen wuerde einen bekannten Host aussperren, weil andere
+    # warten.
+    if pending_count(session) >= PENDING_MAX:
+        raise HTTPException(
+            429,
+            f"Es warten bereits {PENDING_MAX} Hosts auf Freigabe. Erst im "
+            f"Dashboard freigeben oder entfernen, dann meldet sich dieser "
+            f"Host beim naechsten Versuch an.",
+        )
 
     token = secrets.token_urlsafe(32)
     # Neuer Host ans Ende. Mit dem Vorgabewert 0 stuende er sonst vor
@@ -1582,10 +1694,16 @@ def agent_enroll(
         agent_version=kurz(payload.agent_version, VERSION_MAX),
         approval_state=ApprovalState.pending,
         enrolled_at=utcnow(),
-        enrolled_from_ip=request.client.host if request.client else None,
+        # Dieselbe Ermittlung wie in der Neuanmeldung oben und wie im
+        # Pruefprotokoll (F-10). Vorher stand hier die Adresse der
+        # Verbindung: hinter einem Reverse Proxy war das immer die des
+        # Proxys, und im Dashboard sah dann jeder Host so aus, als kaeme er
+        # vom selben Rechner.
+        enrolled_from_ip=quelle,
     )
     session.add(host)
     session.commit()
+    note_enroll(quelle)
 
     return {
         "agent_token": token,
@@ -2207,16 +2325,37 @@ def agent_source_version() -> str:
 @app.get("/api/v1/agent/code")
 def agent_code(x_agent_token: str = Header(...), session: Session = Depends(get_session)):
     """
-    Liefert den aktuellen Agent-Quellcode samt Pruefsumme.
+    Liefert den aktuellen Agent-Quellcode samt Pruefsumme und Signatur.
     Nur fuer freigegebene Hosts.
+
+    Zur Signatur (F-07 der Sicherheitspruefung vom 2026-08-22): die
+    Pruefsumme kommt aus derselben Antwort wie der Code. Wer die Antwort
+    faelschen kann, faelscht beide - sie schuetzt gegen einen
+    abgebrochenen Download, nicht gegen Manipulation. Genau die
+    Ueberlegung, die beim Update-Paket zur Signatur gefuehrt hat, gilt
+    hier: der Agent laeuft als root beziehungsweise als SYSTEM.
+
+    Die .sig-Datei entsteht beim Bauen des Pakets (build_release.py) und
+    liegt neben agent.py. Fehlt sie, wird die Antwort trotzdem
+    ausgeliefert - was daraus folgt, entscheidet der Agent: er kennt
+    seinen eigenen ausgelieferten Schluessel und weiss, ob er pruefen
+    muss.
     """
     require_approved(host_by_token(x_agent_token, session))
     if not AGENT_SRC.is_file():
         raise HTTPException(404, "agent.py nicht vorhanden")
     code = AGENT_SRC.read_bytes()
+    sig_datei = AGENT_SRC.parent / (AGENT_SRC.name + ".sig")
+    signatur = ""
+    if sig_datei.is_file():
+        try:
+            signatur = sig_datei.read_text(encoding="ascii").strip()
+        except OSError:
+            signatur = ""
     return {
         "version": agent_source_version(),
         "sha256": hashlib.sha256(code).hexdigest(),
+        "signature": signatur,
         "code": code.decode("utf-8"),
     }
 
@@ -4026,8 +4165,43 @@ def revoke_install_token(token_id: int, request: Request,
     return {"ok": True}
 
 
+def _darf_versionen_sehen(request: Optional[Request], x_session: str,
+                          session: Session) -> bool:
+    """
+    Darf dieser Aufrufer die Versionsnummern in /api/health sehen?
+
+    Aus der Sicherheitspruefung vom 2026-08-22 (F-09). Die Route muss
+    offen bleiben - der Watcher fragt sie nach jedem Update ab, und die
+    Anmeldeseite braucht die Vorgabesprache, bevor ein Benutzer bekannt
+    ist. Was sie NICHT muss, ist jedem Unangemeldeten sagen, welche
+    Fassung hier laeuft. Diese Auskunft ist fuer den Betrieb nutzlos und
+    fuer die Auswahl eines passenden Angriffs nuetzlich.
+
+    Zwei Aufrufer bekommen sie weiterhin:
+
+      Loopback - das ist der Watcher. Er laeuft auf demselben Rechner und
+      vergleicht die Version, um ein misslungenes Update zu erkennen.
+
+      Angemeldete Benutzer - die Oberflaeche zeigt die Version in der
+      Fusszeile und vergleicht sie, um ein veraltetes JavaScript zu
+      bemerken. Der Cookie geht bei fetch von selbst mit.
+
+    Das ist kein starker Schutz und soll keiner sein: wer sich anmelden
+    kann, sieht die Version ohnehin. Es nimmt nur die Auskunft aus der
+    offenen Antwort heraus.
+    """
+    if is_loopback(request):
+        return True
+    try:
+        return _session_by_token(session_token(request, x_session),
+                                 session) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @app.get("/api/health")
-def health(session: Session = Depends(get_session)):
+def health(request: Request, x_session: str = Header(default=""),
+           session: Session = Depends(get_session)):
     """
     Wird nach jedem Update vom Watcher abgefragt. Prueft ausdruecklich das
     Schema - ein Bruch muss hier auffallen und zum Rueckrollen fuehren,
@@ -4042,11 +4216,8 @@ def health(session: Session = Depends(get_session)):
         )
     # Echte Abfrage, damit auch Lesefehler auffallen
     session.exec(select(Host).limit(1)).first()
-    return {
+    antwort = {
         "status": "ok",
-        "version": update_manager.get_current_version(),
-        "agent_version": agent_source_version(),
-        "schema_version": migrate.get_version(engine),
         # Bewusst hier und nicht in einem eigenen Endpunkt: die Anmeldeseite
         # braucht die Vorgabesprache, bevor irgendein Benutzer bekannt ist,
         # und /api/health fragt die Oberflaeche ohnehin bei jedem Durchlauf
@@ -4054,6 +4225,11 @@ def health(session: Session = Depends(get_session)):
         # fuer eine Auskunft, die kein Geheimnis ist.
         "default_language": _setting(session, SET_LANGUAGE, "en"),
     }
+    if _darf_versionen_sehen(request, x_session, session):
+        antwort["version"] = update_manager.get_current_version()
+        antwort["agent_version"] = agent_source_version()
+        antwort["schema_version"] = migrate.get_version(engine)
+    return antwort
 
 
 @app.get("/api/v1/schema", dependencies=[Depends(require_admin)])

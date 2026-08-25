@@ -43,6 +43,11 @@ co37_v*.zip
 # Archiv steht eine Zeile darueber schon nicht drin.
 co37_v*.zip.sig
 co37_v*.zip.sha256
+# Dasselbe fuer die Signatur des Agent-Codes: sie entsteht beim Bauen
+# ueber genau den Stand, den das Paket enthaelt, und gehoert damit zum
+# Paket. Im Repository waere sie beim naechsten Commit an agent.py falsch.
+agent/agent.py.sig
+agent/agent.py.sha256
 *.deb
 *.msi
 packaging/cache/

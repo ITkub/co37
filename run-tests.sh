@@ -92,10 +92,21 @@ fi
 # $PY steht hier direkt drin, nicht als Platzhalter wie PORT und SESSION.
 # Eine Ersetzung waere wieder ein Treffer auf eine Teilzeichenkette -
 # das Muster, an dem hier schon mehrfach etwas gescheitert ist.
+#
+# Die Reihen enroll, health-info und agent-haertung starten ein eigenes
+# Backend im eigenen Prozess mit eigener Datenbank. Das ist Absicht und
+# kein Versehen: sie muessen Grenzen tatsaechlich erreichen (fuenfzig
+# Anmeldungen) oder von einer Adresse ausserhalb von Loopback aufrufen -
+# beides ginge gegen das gemeinsame Backend nicht, ohne die nachfolgenden
+# Reihen zu beschaedigen. Die Begruendung steht ausfuehrlich im Kopf der
+# jeweiligen Datei.
 REIHEN=(
   "deps            $PY tests/deps-test.py"
   "setup           $PY tests/setup-test.py"
   "apikey          $PY tests/apikey-test.py"
+  "enroll          $PY tests/enroll-test.py"
+  "health-info     $PY tests/health-info-test.py"
+  "agent-haertung  $PY tests/agent-haertung-test.py"
   "proxy-fallback  $PY tests/proxy-fallback-test.py"
   "license        $PY tests/license-test.py"
   "release-sig    $PY tests/release-sig-test.py"

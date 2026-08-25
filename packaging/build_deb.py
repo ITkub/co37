@@ -25,12 +25,22 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 AGENT_PY = HERE.parent / "agent" / "agent.py"
 
+# Der oeffentliche Signaturschluessel wird mit ausgeliefert, damit der
+# Agent die eigene Selbstaktualisierung pruefen kann (F-07 der
+# Sicherheitspruefung vom 2026-08-22). Er liegt im Backend - dasselbe
+# Schluesselpaar, mit dem auch die Update-Pakete signiert werden.
+#
+# Fehlt er, wird das Paket trotzdem gebaut: das ist der Stand eines
+# Quelltextes ohne Signaturschluessel. Der Agent prueft dann nicht - er
+# richtet sich danach, ob der Schluessel neben ihm liegt.
+RELEASE_KEY = HERE.parent / "backend" / "release_key.pub"
+
 CONTROL = """Package: co37-agent
 Version: {version}
 Section: admin
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-requests
+Depends: python3 (>= 3.9), python3-requests, python3-cryptography
 Maintainer: {vendor}
 Description: CO-37 Agent
  Meldet sich ausgehend beim CO-37-Backend, sucht nach Paketaktualisierungen
@@ -181,11 +191,20 @@ def build(version: str, out_dir: Path) -> Path:
 
     agent_code = AGENT_PY.read_bytes()
 
-    data_tar = _tar_gz([
+    inhalt = [
         ("usr/lib/co37/agent.py", agent_code, 0o755),
         ("usr/bin/co37-connect", ENROLL_CMD.encode(), 0o755),
         ("lib/systemd/system/co37-agent.service", SERVICE.encode(), 0o644),
-    ])
+    ]
+    # Muss neben agent.py liegen - der Agent sucht ihn dort.
+    if RELEASE_KEY.is_file():
+        inhalt.append(
+            ("usr/lib/co37/release_key.pub", RELEASE_KEY.read_bytes(), 0o644))
+    else:
+        print("Hinweis: kein backend/release_key.pub - der Agent aus diesem "
+              "Paket prueft seine Selbstaktualisierung nicht.")
+
+    data_tar = _tar_gz(inhalt)
 
     control_tar = _tar_gz([
         # Verantwortlicher steht spaeter in den Paketeigenschaften. Neutral
