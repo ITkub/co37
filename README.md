@@ -67,10 +67,13 @@ journalctl -u co37-backend -n 40 --no-pager
 
 ### 1.7 Agent-Pakete bauen
 
-Für Windows wird `wixl` gebraucht. Das Paket heißt **wixl**, nicht `msitools`:
+Für Windows wird `wixl` gebraucht. Das Paket heißt **wixl**, nicht `msitools`.
+`msitools` gehört trotzdem dazu: es bringt `msiinfo`, und damit prüft der Bau
+das fertige MSI gegen sich selbst. Ohne das Paket wird gebaut, aber nicht
+geprüft — und der Bau sagt das auch:
 
 ```
-apt install -y wixl
+apt install -y wixl msitools
 ```
 
 Dann bauen:
@@ -192,6 +195,33 @@ läuft — kein Windows-Dienst, weil ein Python-Skript ohne Wrapper vom
 Dienststeuerungs-Manager beendet würde.
 
 Das Paket ist unsigniert, Windows zeigt daher eine Warnung.
+
+**Über eine bestehende Installation** läuft dasselbe Kommando — das Paket
+entfernt die alte Fassung selbst und legt die geplante Aufgabe neu an. Die
+`agent.conf` unter `C:\ProgramData\CO37` bleibt dabei stehen, der Host behält
+also sein Token und muss nicht erneut freigegeben werden.
+
+> **Paket vor 0.36.18?** Dann bricht ein Upgrade mit **Fehler 2753** oder
+> **1721** ab und setzt sich vollständig zurück — die alte Fassung läuft danach
+> unverändert weiter.
+>
+> Ursache: `wixl` baut das MSI unter Linux und liest die Windows-Versionsangabe
+> aus `python.exe` und den übrigen Binärdateien nicht aus. In der Dateitabelle
+> des Pakets blieb die Spalte *Version* leer. Für Windows Installer schlägt
+> damit jede Datei auf der Platte, die eine Version hat, die gleichnamige im
+> Paket, die keine hat — er überspringt die 30 Binärdateien der mitgelieferten
+> Python-Umgebung. Danach entfernt er die alte Fassung und löscht dabei genau
+> diese Dateien. Zurückgelegt hat sie niemand.
+>
+> Der Abbruch war dabei der Glücksfall: er rollte alles zurück. Ohne ihn wäre
+> ein Agent ohne Python-Laufzeit übriggeblieben — eine Installation, die sauber
+> aussieht und nie wieder startet.
+>
+> Behoben in 0.36.18. Mit einem älteren Paket bleibt nur: erst in
+> *Apps & Features* deinstallieren, dann neu installieren. Das funktioniert
+> zuverlässig — betroffen ist nur der Weg über eine bestehende Installation.
+> Die `agent.conf` unter `C:\ProgramData\CO37` überlebt das Deinstallieren,
+> der Host behält sein Token.
 
 ### 3.7 Prüfen
 

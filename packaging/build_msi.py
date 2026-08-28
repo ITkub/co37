@@ -3,7 +3,7 @@
 Baut das Windows-Agentenpaket als .msi.
 
 Voraussetzungen auf dem Bausystem:
-    apt install wixl          (nicht msitools - wixl ist ein eigenes Paket)
+    apt install wixl msitools (wixl baut, msiinfo prueft das Ergebnis)
 
 Das Paket enthaelt KEIN Geheimnis. Server und Enrollment-Token werden beim
 Installieren als MSI-Eigenschaften uebergeben, damit die Datei selbst
@@ -201,15 +201,73 @@ def fetch_python() -> Path:
 
 
 def stable_guid(name: str) -> str:
-    """Reproduzierbare GUIDs, damit Aktualisierungen sauber laufen."""
+    """
+    Kennung einer Komponente. Reproduzierbar aus dem Pfad.
+
+    Bewusst OHNE die Version - obwohl am 2026-08-28 kurzzeitig anders
+    versucht. Warum die Version hier nicht hineingehoert:
+
+    Nach den Komponentenregeln von Windows Installer gehoert dieselbe
+    Datei am selben Ort immer in dieselbe Komponente. Haelt man sich daran,
+    zaehlt der Installer mit, wie viele Produkte eine Komponente benutzen.
+    Bei einem Upgrade uebernimmt die neue Fassung die Komponenten der
+    alten; RemoveExistingProducts zieht dann nur einen Verweis ab und
+    loescht nichts.
+
+    Mit der Version in der GUID entfaellt genau dieses Netz: wird eine
+    Datei aus irgendeinem Grund uebersprungen, loescht das Entfernen der
+    alten Fassung sie ersatzlos. Der Fehler, den man damit haette
+    zudecken wollen, wuerde dadurch schlimmer statt besser.
+
+    Der wirkliche Grund fuer das Ueberspringen war ein anderer - siehe
+    DATEI_VERSION weiter unten.
+    """
     return str(uuid.UUID(hashlib.md5(f"co37:{name}".encode()).hexdigest())).upper()
+
+
+# Dateiendungen, die unter Windows eine Versionsressource tragen.
+VERSIONIERT = (".exe", ".dll", ".pyd")
+
+# Was in die Spalte Version der File-Tabelle geschrieben wird.
+#
+# Der Anlass, am 2026-08-28: ein Upgrade von 0.36.12 brach mit 1721 ab,
+# weil python.exe zum Zeitpunkt der CustomAction nicht auf der Platte lag.
+# Im Protokoll davor, dreissigmal:
+#
+#     Disallowing installation of component: {…} since the same component
+#     with higher versioned keyfile exists
+#
+# Und in der File-Tabelle des Pakets, bei allen Binaerdateien:
+#
+#     python.exe  |Version=[]|
+#
+# wixl laeuft unter Linux und liest die Windows-Versionsressource nicht
+# aus. Die Spalte bleibt leer. Fuer Windows Installer schlaegt damit jede
+# Datei auf der Platte, die eine Version hat, die Datei im Paket, die
+# keine hat - er ueberspringt sie. Anschliessend entfernt
+# RemoveExistingProducts die alte Fassung samt dieser Dateien:
+#
+#     FileRemove(FileName=python.exe, ComponentId={B8EC3B81-…})
+#
+# Uebrig blieb eine Installation ohne Python-Laufzeit. Aufgefallen ist es
+# nur, weil die CustomAction python.exe braucht und mit 1721 abbrach - was
+# alles zurueckrollte und den Schaden verhinderte.
+#
+# Eine hoehere Zahl als jede echte Dateiversion (die Felder sind je 16
+# Bit breit, 65535 ist das Groesste). Damit gewinnt immer das Paket, und
+# ein Upgrade schreibt seine Binaerdateien wirklich neu.
+#
+# Die echten Versionen auszulesen wuerde nichts bringen: der Installer
+# ueberspringt auch bei GLEICHER Version. Gebraucht wird "hoeher".
+DATEI_VERSION = "65535.0.0.0"
 
 
 def build(version: str, out_dir: Path) -> Path:
     if not shutil.which("wixl"):
         raise SystemExit(
-            "wixl fehlt. Installieren mit:  apt install wixl\n"
-            "Hinweis: das Paket heisst wixl, nicht msitools."
+            "wixl fehlt. Installieren mit:  apt install wixl msitools\n"
+            "Hinweis: wixl ist ein eigenes Paket, nicht Teil von msitools -\n"
+            "msitools wird zusaetzlich fuer die Gegenprobe gebraucht."
         )
     if not AGENT_PY.is_file():
         raise SystemExit(f"agent.py nicht gefunden unter {AGENT_PY}")
@@ -294,9 +352,15 @@ def build(version: str, out_dir: Path) -> Path:
                 )
             else:
                 guid = stable_guid(rel)
+                # Nur Binaerdateien - nur die tragen unter Windows eine
+                # Versionsressource, und nur bei ihnen entsteht sonst der
+                # Vergleich "hat eine Version" gegen "hat keine". Siehe
+                # DATEI_VERSION.
+                ver = (f' DefaultVersion="{DATEI_VERSION}"'
+                       if entry.suffix.lower() in VERSIONIERT else "")
                 files_xml.append(
                     f'<Component Id="c_{ident}" Guid="{guid}">'
-                    f'<File Id="{ident}" Source="{entry}" KeyPath="yes"/>'
+                    f'<File Id="{ident}" Source="{entry}" KeyPath="yes"{ver}/>'
                     f'</Component>'
                 )
                 refs.append(f'<ComponentRef Id="c_{ident}"/>')
@@ -343,34 +407,83 @@ def build(version: str, out_dir: Path) -> Path:
       {"".join(refs)}
     </Feature>
 
-    <CustomAction Id="RegisterTask" FileKey="{hashlib.md5(b"python/python.exe").hexdigest()[:16]}"
+    <!-- Der Pfad zu python.exe kommt aus einer Eigenschaft, NICHT aus der
+         File-Tabelle.
+
+         Vorher stand hier FileKey="…python.exe" - eine CustomAction vom
+         Typ 18, "fuehre eine EXE aus der File-Tabelle aus". Die verlangt,
+         dass genau diese Datei im laufenden Vorgang installiert wird.
+
+         Bei einem Upgrade ist sie das nicht. Die Komponenten-GUIDs
+         entstehen aus dem Dateipfad und sind zwischen zwei Fassungen
+         gleich; python.exe traegt eine Dateiversion und liegt unveraendert
+         schon da. Windows Installer entscheidet dann "Disallowing
+         installation of component … since the same component with higher
+         versioned keyfile exists" und ueberspringt sie. Die Aktion findet
+         ihre EXE nicht und bricht mit Fehler 2753 ab - der ganze Vorgang
+         wird zurueckgerollt.
+
+         Beobachtet am 2026-08-26 beim ersten MSI-Upgrade ueberhaupt
+         (0.36.12 -> 0.36.14). Der Fehler steckte vorher schon drin und
+         wurde nur nie ausgeloest, weil Agents sich sonst selbst
+         aktualisieren.
+
+         Betroffen sind nur die 30 versionierten Dateien der
+         Python-Embeddable. agent.py, release_key.pub und alles unter
+         site-packages werden normal eingespielt - uebersprungen heisst
+         hier nicht fehlend, python.exe liegt danach an Ort und Stelle.
+         Es geht allein darum, wie die Aktion sie findet.
+
+         Nicht ueber Directory= geloest: wixl laesst CustomActions mit
+         diesem Attribut STILLSCHWEIGEND weg - die Tabelle bleibt leer und
+         das Paket sieht heil aus. Deshalb der Weg ueber eine Eigenschaft
+         (Typ 51 setzt sie, Typ 50 benutzt sie) und die Gegenprobe am
+         fertigen Paket weiter unten. -->
+    <CustomAction Id="SetPyExe" Property="CO37PYEXE"
+                  Value="[INSTALLDIR]python\\python.exe" Execute="immediate"/>
+    <CustomAction Id="RegisterTask" Property="CO37PYEXE"
                   ExeCommand="&quot;[INSTALLDIR]install_task.py&quot; &quot;[CO37SERVER]&quot; &quot;[CO37VERIFYSSL]&quot;"
                   Execute="deferred" Impersonate="no" Return="check"/>
-    <CustomAction Id="RemoveTask" FileKey="{hashlib.md5(b"python/python.exe").hexdigest()[:16]}"
+    <CustomAction Id="RemoveTask" Property="CO37PYEXE"
                   ExeCommand="&quot;[INSTALLDIR]uninstall_task.py&quot;"
                   Execute="deferred" Impersonate="no" Return="ignore"/>
 
+    <!-- Feste Nummern statt Before=/After=.
+
+         wixl loest Before=/After= bei eigenen Aktionen nicht verlaesslich
+         auf. Gemessen am 2026-08-26: derselbe Quellstand, zweimal gebaut,
+         SetPyExe einmal auf 1401 und einmal auf 1. In einem Minimalbeispiel
+         kam zwanzigmal von zwanzig die 1 heraus.
+
+         Die 1 waere still toedlich: sie liegt vor CostFinalize (1000), und
+         dort wird INSTALLDIR erst aufgeloest. CO37PYEXE bekaeme einen
+         unvollstaendigen Pfad, die geplante Aufgabe zeigte ins Leere - und
+         zwar nur in manchen Paketen. Ein Fehler, der vom Bau abhaengt und
+         nicht vom Code, ist der schlechteste, den man haben kann.
+
+         Mit ausdruecklicher Nummer uebernimmt wixl sie unveraendert
+         (zwanzig von zwanzig). Die Zahlen sind die Standardplaetze:
+         InstallValidate 1400, InstallInitialize 1500, RemoveFiles 3500,
+         InstallFiles 4000. -->
     <InstallExecuteSequence>
       <!-- Vor dem Einspielen der neuen Dateien die alte Fassung entfernen.
            Die geplante Aufgabe wird dabei von deren RemoveTask geloescht
            und anschliessend von RegisterTask neu angelegt. -->
       <RemoveExistingProducts After="InstallInitialize"/>
+      <!-- Nach CostFinalize, damit INSTALLDIR aufgeloest ist, und vor
+           InstallInitialize: ab da schreibt der Installer das Skript fuer
+           die aufgeschobenen Aktionen, und darin steht der Pfad dann schon
+           eingesetzt. -->
+      <Custom Action="SetPyExe" Sequence="1401"/>
       <!-- Nicht "NOT Installed": sonst laesst sich CO37SERVER nach einer
            Installation ohne Eigenschaft nie mehr nachreichen, weil die
            Aktion bei jedem weiteren Aufruf uebersprungen wird. -->
-      <Custom Action="RegisterTask" After="InstallFiles">NOT REMOVE</Custom>
-      <Custom Action="RemoveTask" Before="RemoveFiles">REMOVE="ALL"</Custom>
+      <Custom Action="RegisterTask" Sequence="4001">NOT REMOVE</Custom>
+      <Custom Action="RemoveTask" Sequence="3499">REMOVE="ALL"</Custom>
     </InstallExecuteSequence>
   </Product>
 </Wix>
 '''
-    # FileKey muss auf die tatsaechliche Kennung von python.exe zeigen
-    py_id = "f_" + hashlib.md5(b"python/python.exe").hexdigest()[:16]
-    wxs = wxs.replace(
-        f'FileKey="{hashlib.md5(b"python/python.exe").hexdigest()[:16]}"',
-        f'FileKey="{py_id}"',
-    )
-
     wxs_path = work.parent / "co37-agent.wxs"
     wxs_path.write_text(wxs, encoding="utf-8")
 
@@ -384,9 +497,117 @@ def build(version: str, out_dir: Path) -> Path:
     if res.returncode != 0 or not target.is_file():
         raise SystemExit(f"wixl fehlgeschlagen:\n{res.stderr[-2000:]}")
 
+    pruefe_paket(target)
+
     shutil.rmtree(work, ignore_errors=True)
     wxs_path.unlink(missing_ok=True)
     return target
+
+
+# Zeichenketten, die im fertigen Paket vorkommen MUESSEN.
+#
+# Der Anlass, am 2026-08-26: wixl kennt das Attribut Directory= an einer
+# CustomAction nicht und laesst die betroffenen Eintraege dann
+# STILLSCHWEIGEND weg - Rueckgabewert 0, Paket entsteht, Tabelle leer. Ein
+# Paket, das sich bauen laesst und beim Kunden nichts einrichtet, ist
+# schlimmer als eines, das gar nicht erst entsteht.
+#
+# Diese Stufe kommt ohne Werkzeug aus - sie sucht die Zeichenketten im
+# Paket. CO37PYEXE steht ausschliesslich in der CustomAction-Tabelle;
+# fehlt die Zeichenkette, ist die Tabelle leer.
+MUSS_ENTHALTEN = (
+    "CO37PYEXE",         # die Eigenschaft mit dem Pfad zu python.exe
+    "RegisterTask",      # die Aktion, die die geplante Aufgabe anlegt
+    "install_task.py",
+    "agent.py",
+)
+
+
+# Wo die eigenen Aktionen im Ablauf stehen muessen. Siehe die Begruendung
+# an der InstallExecuteSequence weiter oben.
+ERWARTETE_SEQUENZ = {"SetPyExe": 1401, "RemoveTask": 3499, "RegisterTask": 4001}
+
+
+def pruefe_paket(msi: Path):
+    """
+    Gegenprobe am fertigen Paket.
+
+    Zwei Stufen, weil nicht ueberall dasselbe Werkzeug da ist:
+
+      Immer: die Zeichenketten aus MUSS_ENTHALTEN. Das faengt eine ganz
+      weggelassene CustomAction-Tabelle.
+
+      Wenn msiinfo vorliegt (Paket msitools): zusaetzlich die tatsaechlichen
+      Nummern im Ablaufplan. Das faengt eine Aktion, die zwar da ist, aber
+      an der falschen Stelle steht - der Fall, der sich sonst erst beim
+      Kunden zeigt. Fehlt msiinfo, wird das gesagt statt stillschweigend
+      uebergangen: eine ausgelassene Pruefung, die wie eine bestandene
+      aussieht, ist schlimmer als gar keine.
+    """
+    roh = msi.read_bytes()
+
+    def drin(s: str) -> bool:
+        return s.encode("ascii") in roh or s.encode("utf-16-le") in roh
+
+    fehlend = [s for s in MUSS_ENTHALTEN if not drin(s)]
+    if fehlend:
+        msi.unlink(missing_ok=True)
+        raise SystemExit(
+            "Das gebaute MSI ist unvollstaendig - es fehlt: "
+            + ", ".join(fehlend)
+            + "\nwixl hat vermutlich etwas stillschweigend ausgelassen. "
+              "Das Paket wurde verworfen.")
+
+    if not shutil.which("msiinfo"):
+        print("Hinweis: msiinfo fehlt (apt install msitools) - der Ablaufplan "
+              "im Paket wurde NICHT geprueft.")
+        return
+
+    res = subprocess.run(["msiinfo", "export", str(msi), "InstallExecuteSequence"],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        msi.unlink(missing_ok=True)
+        raise SystemExit(f"Ablaufplan im MSI nicht lesbar: {res.stderr[-300:]}")
+
+    ist = {}
+    for zeile in res.stdout.splitlines():
+        teile = zeile.split("\t")
+        if len(teile) >= 3 and teile[2].strip().isdigit():
+            ist[teile[0]] = int(teile[2])
+
+    falsch = [f"{name}: erwartet {nr}, ist {ist.get(name, 'gar nicht da')}"
+              for name, nr in ERWARTETE_SEQUENZ.items() if ist.get(name) != nr]
+    if falsch:
+        msi.unlink(missing_ok=True)
+        raise SystemExit(
+            "Der Ablaufplan im gebauten MSI stimmt nicht:\n  "
+            + "\n  ".join(falsch)
+            + "\nDas Paket wurde verworfen.")
+
+    # Jede Binaerdatei braucht eine Version - sonst ueberspringt Windows
+    # Installer sie beim Upgrade und RemoveExistingProducts loescht sie
+    # ersatzlos. Siehe DATEI_VERSION. Das war genau der Fehler, den man
+    # dem fertigen Paket nicht ansieht: es baut sauber, installiert sich
+    # frisch einwandfrei und zerlegt sich erst beim Upgrade.
+    res = subprocess.run(["msiinfo", "export", str(msi), "File"],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        msi.unlink(missing_ok=True)
+        raise SystemExit(f"File-Tabelle im MSI nicht lesbar: {res.stderr[-300:]}")
+
+    ohne = []
+    for zeile in res.stdout.splitlines()[3:]:
+        s = zeile.split("\t")
+        if len(s) >= 5 and Path(s[2]).suffix.lower() in VERSIONIERT and not s[4].strip():
+            ohne.append(s[2])
+    if ohne:
+        msi.unlink(missing_ok=True)
+        raise SystemExit(
+            "Im gebauten MSI stehen Binaerdateien ohne Version in der "
+            "File-Tabelle:\n  " + ", ".join(ohne[:10])
+            + (f" … ({len(ohne)} insgesamt)" if len(ohne) > 10 else "")
+            + "\nEin Upgrade wuerde sie ueberspringen und anschliessend "
+              "loeschen. Das Paket wurde verworfen.")
 
 
 def agent_version() -> str:

@@ -45,8 +45,9 @@ else
   echo ">>> Windows-Paket"
   echo "    Python: $PY"
   if ! command -v wixl >/dev/null 2>&1; then
-    echo "!!! wixl fehlt. Installieren mit:  apt install wixl"
-    echo "    (Das Paket heisst wixl, nicht msitools.)"
+    echo "!!! wixl fehlt. Installieren mit:  apt install wixl msitools"
+    echo "    (Das Paket heisst wixl, nicht msitools - msitools wird"
+    echo "     zusaetzlich gebraucht, um das fertige MSI zu pruefen.)"
     echo "    Ueberspringe MSI."
   else
     "$PY" packaging/build_msi.py --version "$VERSION" --out "$OUT" || \

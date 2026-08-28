@@ -39,6 +39,7 @@ Braucht kein laufendes Backend und kein Netz.
 import base64
 import hashlib
 import importlib.util
+import inspect
 import os
 import re
 import shutil
@@ -292,6 +293,137 @@ check("build_msi.py kopiert release_key.pub ins Installationsverzeichnis",
       'work / "release_key.pub"' in msi)
 check("und bringt cryptography als Wheel mit",
       re.search(r'"idna",\s*\n?\s*"cryptography"', msi) is not None)
+
+
+# ======================================================================
+print("--- Das MSI richtet die geplante Aufgabe auch beim Upgrade ein ---")
+# Der Anlass, am 2026-08-26: das erste MSI-Upgrade ueberhaupt
+# (0.36.12 -> 0.36.14) scheiterte mit Fehler 2753 und rollte zurueck.
+#
+# Die CustomActions liefen ueber FileKey= - Typ 18, "fuehre eine EXE aus
+# der File-Tabelle aus". Das setzt voraus, dass die Datei im laufenden
+# Vorgang installiert wird. Bei einem Upgrade ist python.exe das nicht:
+# gleiche Komponenten-GUID, gleiche Dateiversion, schon vorhanden - der
+# Installer ueberspringt sie ("Disallowing installation of component …
+# since the same component with higher versioned keyfile exists") und die
+# Aktion findet ihre EXE nicht mehr.
+#
+# Die Reihe kann kein MSI installieren. Sie haelt nur fest, dass der Weg
+# ueber die File-Tabelle nicht zurueckkommt.
+# Gezielt auf das Element, nicht auf die ganze Datei: der alte Weg wird
+# oben im Kommentar erklaert, und den Namen dort zu treffen waere ein
+# Fehlalarm - der Kommentar ist genau das, was ihn fernhaelt.
+check("keine CustomAction ueber die File-Tabelle (FileKey=)",
+      re.search(r"<CustomAction[^>]*FileKey=", msi) is None)
+check("der Pfad zu python.exe kommt aus einer Eigenschaft",
+      'Property="CO37PYEXE"' in msi and r'Value="[INSTALLDIR]python' in msi)
+check("beide Aktionen benutzen sie",
+      msi.count('Property="CO37PYEXE"') == 3)   # setzen + Register + Remove
+
+# ----------------------------------------------------------------------
+# Feste Nummern im Ablaufplan
+# ----------------------------------------------------------------------
+# Zweiter Anlass am selben Tag: mit Before="InstallInitialize" vergibt wixl
+# die Nummer nicht verlaesslich. Derselbe Quellstand, zweimal gebaut - einmal
+# 1401, einmal 1. In einem Minimalbeispiel zwanzigmal von zwanzig die 1.
+#
+# Die 1 liegt vor CostFinalize (1000), und dort wird INSTALLDIR erst
+# aufgeloest. CO37PYEXE bekaeme einen unvollstaendigen Pfad, und die
+# geplante Aufgabe zeigte ins Leere - in manchen Paketen, in anderen nicht.
+# Ein Fehler, der vom Bau abhaengt statt vom Code, ist der schlechteste,
+# den man haben kann: er laesst sich nicht nachstellen.
+check("SetPyExe hat eine feste Nummer, kein Before=",
+      '<Custom Action="SetPyExe" Sequence="1401"/>' in msi)
+check("und liegt nach CostFinalize (1000) und vor InstallInitialize (1500)",
+      1000 < 1401 < 1500)
+check("RegisterTask hat eine feste Nummer",
+      '<Custom Action="RegisterTask" Sequence="4001">' in msi)
+check("RemoveTask hat eine feste Nummer",
+      '<Custom Action="RemoveTask" Sequence="3499">' in msi)
+check("keine eigene Aktion mehr ueber Before=/After=",
+      re.search(r'<Custom Action="[^"]+"\s+(Before|After)=', msi) is None)
+
+# Und die Nummern im Quelltext muessen zu denen passen, die der Bau
+# anschliessend im fertigen Paket nachliest. Zwei Zahlen, die
+# auseinanderlaufen koennen, sind eine Zeitbombe.
+for name, nr in (("SetPyExe", 1401), ("RemoveTask", 3499), ("RegisterTask", 4001)):
+    check(f"  Gegenprobe kennt {name} = {nr}",
+          re.search(rf'"{name}":\s*{nr}\b', msi) is not None)
+check("und der Bau liest den Ablaufplan wirklich aus",
+      '"InstallExecuteSequence"' in msi and "msiinfo" in msi)
+check("fehlt msiinfo, wird das gesagt statt uebergangen",
+      'shutil.which("msiinfo")' in msi and "NICHT geprueft" in msi)
+
+# Und die Gegenprobe am fertigen Paket. Ohne sie faellt genau der Fehler
+# nicht auf, der hier zwei Anlaeufe gekostet hat: wixl kennt das Attribut
+# Directory= an einer CustomAction nicht und laesst solche Eintraege
+# STILLSCHWEIGEND weg - Rueckgabewert 0, Paket entsteht, Tabelle leer.
+# ----------------------------------------------------------------------
+# Binaerdateien tragen eine Version in der File-Tabelle
+# ----------------------------------------------------------------------
+# Der eigentliche Fehler hinter 2753 und 1721, gefunden am 2026-08-28 im
+# Installationsprotokoll:
+#
+#   dreissigmal:  Disallowing installation of component: {…} since the
+#                 same component with higher versioned keyfile exists
+#   19:57:46      FileRemove(FileName=python.exe, ComponentId={B8EC3B81-…})
+#   19:57:49      CustomActionSchedule(RegisterTask, Source=…\python.exe)
+#   -> 1721, die Datei war nicht mehr da
+#
+# Und in der File-Tabelle des Pakets, bei jeder Binaerdatei: Version leer.
+# wixl laeuft unter Linux und liest die Windows-Versionsressource nicht
+# aus. Fuer Windows Installer schlaegt damit jede Datei auf der Platte,
+# die eine Version hat, die Datei im Paket, die keine hat: er
+# ueberspringt sie, und RemoveExistingProducts loescht sie anschliessend
+# ersatzlos. Nicht nur python.exe - die ganze Python-Laufzeit.
+#
+# HIER STAND ZWISCHENZEITLICH ETWAS ANDERES. Der erste Erklaerungsversuch
+# war, die Komponenten-GUIDs seien schuld, und die Version gehoere in die
+# GUID. Das Protokoll des naechsten Versuchs hat es widerlegt: auch die
+# neue GUID wurde verboten. Die GUIDs bleiben deshalb pfadbasiert - mit
+# der Version darin verlaere man ausserdem die Verweiszaehlung, die
+# ueberspringende Dateien vor dem Loeschen schuetzt.
+#
+# Aufgerufen statt im Quelltext gesucht: ein Aufruf beweist das
+# Verhalten, eine Zeichenkette beweist nur, dass jemand etwas
+# hingeschrieben hat.
+import importlib.util as _ilu  # noqa: E402
+
+_spec = _ilu.spec_from_file_location("co37_build_msi",
+                                     WURZEL / "packaging" / "build_msi.py")
+_bm = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_bm)
+
+check("es gibt eine Version fuer Binaerdateien", bool(_bm.DATEI_VERSION))
+teile = [int(x) for x in _bm.DATEI_VERSION.split(".")]
+check("sie ist hoeher als jede echte Dateiversion sein kann",
+      teile[0] == 65535, _bm.DATEI_VERSION)
+check("und syntaktisch eine Dateiversion",
+      len(teile) == 4 and all(0 <= x <= 65535 for x in teile), _bm.DATEI_VERSION)
+check("betroffen sind exe, dll und pyd",
+      set(_bm.VERSIONIERT) == {".exe", ".dll", ".pyd"}, _bm.VERSIONIERT)
+check("und der Paketbau setzt sie nur dort",
+      'DefaultVersion="{DATEI_VERSION}"' in msi
+      and "entry.suffix.lower() in VERSIONIERT" in msi)
+
+# Die Kennungen bleiben pfadbasiert - ohne Version.
+check("stable_guid nimmt nur den Pfad",
+      len(inspect.signature(_bm.stable_guid).parameters) == 1,
+      list(inspect.signature(_bm.stable_guid).parameters))
+check("und liefert dieselbe Kennung wie bisher",
+      _bm.stable_guid("python/python.exe")
+      == "B8EC3B81-F4E3-0F51-F794-0E136EEF6966",
+      _bm.stable_guid("python/python.exe"))
+
+# Und der Bau muss es am fertigen Paket nachlesen, nicht nur behaupten.
+check("das gebaute Paket wird auf fehlende Versionen geprueft",
+      '"File"' in msi and "ohne Version in der" in msi)
+
+check("das gebaute Paket wird gegengeprueft", "def pruefe_paket(" in msi)
+for zeichen in ("CO37PYEXE", "RegisterTask", "install_task.py", "agent.py"):
+    check(f"  darin verlangt: {zeichen}", f'"{zeichen}"' in msi)
+check("und ein unvollstaendiges Paket wird verworfen",
+      "msi.unlink(missing_ok=True)" in msi)
 
 
 # ======================================================================
