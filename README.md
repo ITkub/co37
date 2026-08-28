@@ -123,7 +123,7 @@ Hosts anlegen und keine Konfiguration ändern können.
 **Setup → Users → Add user.** Authentifizierung auf
 *Automation secret for machine accounts*, obige Rolle zuweisen, Secret notieren.
 
-In Checkmk 2.4 existiert **kein** Benutzer `automation` mehr von Haus aus.
+Ab Checkmk 2.4 existiert **kein** Benutzer `automation` mehr von Haus aus.
 
 ### 2.3 In CO-37 eintragen
 

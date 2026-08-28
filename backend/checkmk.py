@@ -1,5 +1,5 @@
 """
-CO-37 - Checkmk 2.4 CCE REST-API Client
+CO-37 - Checkmk REST-API Client (API 1.0)
 
 API-Version 1.0, Basis-URL:
     https://<server>/<site>/check_mk/api/1.0
