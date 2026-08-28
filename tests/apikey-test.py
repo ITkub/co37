@@ -154,6 +154,22 @@ rolle, code = versuch(sitzung="unbekannt")
 check("eine unbekannte Sitzung nicht", code == 401, code or rolle)
 
 # ----------------------------------------------------------------------
+print("--- Und keine andere Reihe setzt ihn noch ---")
+# Fuenf Reihen setzten die Variable noch, als der Token schon entfallen
+# war - wirkungslos, aber irrefuehrend: wer sie liest, haelt den Token
+# fuer lebendig. Entfernt am 2026-08-28.
+#
+# Diese Datei darf ihn setzen, und zwar genau einmal: sie beweist damit,
+# dass er nichts mehr oeffnet. Jede andere Reihe waere ein Rueckfall.
+uebrig = []
+for p in sorted((WURZEL / "tests").glob("*.py")):
+    if p.name == "apikey-test.py":
+        continue
+    if 'os.environ["CO37_ADMIN_TOKEN"]' in p.read_text(encoding="utf-8"):
+        uebrig.append(p.name)
+check("keine andere Testdatei setzt CO37_ADMIN_TOKEN", not uebrig, uebrig)
+
+# ----------------------------------------------------------------------
 print("--- Auch die Einrichtung erzeugt ihn nicht mehr ---")
 setup = (WURZEL / "setup.sh").read_text(encoding="utf-8")
 check("setup.sh erzeugt keinen Admin-Token mehr",

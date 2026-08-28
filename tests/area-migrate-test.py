@@ -53,7 +53,6 @@ conn.close()
 
 os.environ["CO37_DB"] = f"sqlite:///{DB_PATH}"
 os.environ["CO37_DATA"] = str(TMP)
-os.environ["CO37_ADMIN_TOKEN"] = "test"
 os.environ["CO37_SECRET_KEY"] = "test"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
