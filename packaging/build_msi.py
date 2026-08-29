@@ -42,7 +42,7 @@ CACHE = HERE / "cache"
 # Siehe build_deb.py - derselbe Schluessel, dieselbe Begruendung.
 RELEASE_KEY = HERE.parent / "backend" / "release_key.pub"
 
-PY_VERSION = "3.12.8"
+PY_VERSION = "3.12.14"
 PY_ZIP = f"python-{PY_VERSION}-embed-amd64.zip"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/{PY_ZIP}"
 
