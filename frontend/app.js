@@ -561,6 +561,11 @@ function renderUnit(h, i, admin){
   // zwei Meldungen zum selben Thema nebeneinander.
   else if (h.updates_require_reboot && h.updates_available > 0)
     notes.push(t("note.updates_need_reboot"));
+  // Nur Anzeige, kein Knopf mehr: das Ausrollen der Agents laeuft ueber die
+  // Einstellungen (automatisch beim Heartbeat, oder von Hand ueber "Start").
+  // Der frueher hier stehende Knopf "Agent" legte den Auftrag unmittelbar an
+  // und umging dabei sowohl die Staffelung mit Pilot-Host als auch die Sperre
+  // gegen doppelte Auftraege in _queue_selfupdate() (2026-08-29 entfernt).
   if (stale) notes.push(t("note.agent_outdated", { version: h.agent_version }));
   if (PLANNED[h.id]) notes.push(t("note.reboot_planned", {
     zeit: PLANNED[h.id].toLocaleString(zeitSprache(),
@@ -617,7 +622,6 @@ function renderUnit(h, i, admin){
              <button data-act="scan" data-id="${h.id}">${t("act.scan")}</button>
              <button data-act="patch" data-id="${h.id}">${t("act.patch")}</button>
              <button class="warn" data-act="reboot" data-id="${h.id}">${t("act.reboot")}</button>
-             ${stale && admin ? `<button data-act="agentupd" data-id="${h.id}">${t("act.agent")}</button>` : ""}
              <button data-act="detail" data-id="${h.id}">${t("act.history")}</button>`}
         ${admin ? `<button data-act="edithost" data-id="${h.id}">…</button>` : ""}
       </div>
@@ -838,7 +842,6 @@ const ACTIONS = {
   scan:       (d) => scan(+d.id),
   patch:      (d) => patch(+d.id),
   reboot:     (d) => rebootHost(+d.id),
-  agentupd:   (d) => updateAgent(+d.id),
   detail:     (d) => detail(+d.id),
   edithost:   (d) => editHost(+d.id),
   canceljob:  (d) => cancelJob(+d.id),
@@ -1007,12 +1010,6 @@ document.getElementById("rbGo").onclick = async () => {
   toast(t("msg.reboot_triggered", { minuten: grace }));
   afterAction();
 };
-
-async function updateAgent(id){
-  await api("POST", `/api/v1/hosts/${id}/jobs`, {job_type:"selfupdate", params:{}});
-  toast(t("msg.agent_update_scheduled"));
-  afterAction();
-}
 
 async function approve(id){
   try {

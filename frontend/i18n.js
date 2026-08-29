@@ -27,7 +27,6 @@ const SPRACH_COOKIE = "co37_lang";
    Lesen auffallen. Die Pruefreihe vergleicht beide Sprachen ohnehin. */
 const I18N = {
   en: {
-    "act.agent": "Agent",
     "act.approve": "Approve",
     "act.history": "History",
     "act.live": "Live",
@@ -200,7 +199,6 @@ const I18N = {
     "login.unreachable": "Server is not reachable.",
     "login.user": "Username",
     "msg.agent_update_many": "Update scheduled for {anzahl} agents",
-    "msg.agent_update_scheduled": "Agent update scheduled",
     "msg.agents_current": "All agents are up to date",
     "msg.agents_display_failed": "Showing agents failed: {fehler}",
     "msg.area_not_saved": "The area could not be saved — reverted",
@@ -538,7 +536,6 @@ const I18N = {
     "upd.uploaded": "Package waiting",
   },
   de: {
-    "act.agent": "Agent",
     "act.approve": "Freigeben",
     "act.history": "Verlauf",
     "act.live": "Live",
@@ -711,7 +708,6 @@ const I18N = {
     "login.unreachable": "Server nicht erreichbar.",
     "login.user": "Benutzername",
     "msg.agent_update_many": "Aktualisierung für {anzahl} Agents eingeplant",
-    "msg.agent_update_scheduled": "Agent-Aktualisierung eingeplant",
     "msg.agents_current": "Alle Agents sind aktuell",
     "msg.agents_display_failed": "Anzeige der Agents fehlgeschlagen: {fehler}",
     "msg.area_not_saved": "Bereich konnte nicht gespeichert werden — zurückgesetzt",
