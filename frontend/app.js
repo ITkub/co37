@@ -615,7 +615,7 @@ function renderUnit(h, i, admin){
              : `<span style="color:var(--muted-2);font-size:11px">${t("note.pending_approval")}</span>`)
           : `${act ? `<button class="primary" data-act="live" data-id="${act.id}" data-title="${esc(h.display_name||h.hostname)}">${t("act.live")}</button>` : ""}
              <button data-act="scan" data-id="${h.id}">${t("act.scan")}</button>
-             <button data-act="patch" data-id="${h.id}" ${upd?"":"disabled"}>${t("act.patch")}</button>
+             <button data-act="patch" data-id="${h.id}">${t("act.patch")}</button>
              <button class="warn" data-act="reboot" data-id="${h.id}">${t("act.reboot")}</button>
              ${stale && admin ? `<button data-act="agentupd" data-id="${h.id}">${t("act.agent")}</button>` : ""}
              <button data-act="detail" data-id="${h.id}">${t("act.history")}</button>`}
@@ -957,8 +957,15 @@ async function patch(id){
   // stand das erst im Bericht nach dem Scan, und dort auch nur
   // missverstaendlich.
   const willReboot = h.updates_require_reboot ? t("ask.will_reboot") + "\n" : "";
-  if (!confirm(t("ask.patch", { anzahl: h.updates_available, host: h.hostname })
-               + "\n\n" + willReboot + policy)) return;
+  // Ohne (aktuellen) Scan-Stand ist "{anzahl} Updates" nur eine Vermutung -
+  // patch_windows()/patch_linux() ermitteln beim Patchen ohnehin live, was
+  // ansteht. Knopf bleibt deshalb immer aktiv (frueher: gesperrt ohne
+  // updates_available), die Frage nennt dann keine Zahl, die schon beim
+  // Klicken veraltet sein kann.
+  const frage = h.updates_available > 0
+    ? t("ask.patch", { anzahl: h.updates_available, host: h.hostname })
+    : t("ask.patch_unknown", { host: h.hostname });
+  if (!confirm(frage + "\n\n" + willReboot + policy)) return;
   await api("POST", `/api/v1/hosts/${id}/jobs`, {job_type:"patch", params:{}});
   toast(t("msg.patch_scheduled"));
   afterAction();
