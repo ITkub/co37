@@ -23,6 +23,7 @@ Installation:
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,7 +97,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.36.20"
+WATCHER_VERSION = "0.37.0"
 WATCHER_INFO = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 
@@ -488,7 +489,15 @@ def build_packages(log_lines: list[dict] = None) -> tuple[bool, list[dict]]:
         if not shutil.which("wixl"):
             lines.append(eintrag("pkg.log.no_msi_wixl"))
         elif "python.org" in out or "Embeddable" in out:
-            lines.append(eintrag("pkg.log.no_msi_python"))
+            # Den erwarteten Dateinamen aus der eigenen Meldung von
+            # build_msi.py lesen statt ihn hier zu wiederholen - sonst
+            # veraltet er beim naechsten Anheben von PY_VERSION lautlos,
+            # so wie es der fest eingetragenen Fassung in i18n.js
+            # passiert ist (2026-08-29 gefunden: nannte noch 3.12.8,
+            # obwohl laengst auf eine neuere Zahl gestellt).
+            treffer = re.search(r"python-[\d.]+-embed-amd64\.zip", out)
+            datei = treffer.group(0) if treffer else "python-<version>-embed-amd64.zip"
+            lines.append(eintrag("pkg.log.no_msi_python", datei=datei))
         else:
             lines.append(eintrag("pkg.log.no_msi_other"))
 

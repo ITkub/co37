@@ -42,7 +42,14 @@ CACHE = HERE / "cache"
 # Siehe build_deb.py - derselbe Schluessel, dieselbe Begruendung.
 RELEASE_KEY = HERE.parent / "backend" / "release_key.pub"
 
-PY_VERSION = "3.12.14"
+# 3.12.10 war die letzte 3.12.x-Fassung mit Windows-Binärdateien - ab
+# 3.12.11 liefert python.org nur noch Quelltext-Tarballs (Sicherheits-
+# fixe bis 10/2028, aber ohne Embeddable). Vor jeder Anhebung dieser
+# Zahl im FTP-Verzeichnis der Zielversion pruefen, ob es dort ueberhaupt
+# noch eine "*-embed-amd64.zip" gibt - sonst bricht der MSI-Bau am
+# Herunterladen ab, das DEB baut trotzdem weiter (2026-08-29 erlebt,
+# beim Versuch auf 3.12.14 zu heben).
+PY_VERSION = "3.12.10"
 PY_ZIP = f"python-{PY_VERSION}-embed-amd64.zip"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/{PY_ZIP}"
 
