@@ -1,2 +1,38 @@
+# Die Python-Bibliotheken des WINDOWS-Agents.
+#
+# WER DIESE DATEI LIEST: ausschliesslich packaging/build_msi.py, ueber
+# "pip install -r". Was hier steht, landet in Lib/site-packages der
+# mitgelieferten Embeddable und laeuft auf dem Zielsystem als SYSTEM.
+#
+# WER SIE NICHT LIEST: das .deb. Dort kommen die Bibliotheken aus den
+# Paketquellen der Distribution ("Depends: python3-requests,
+# python3-cryptography" in build_deb.py) und haengen an der Systempflege,
+# nicht an dieser Datei. Auch setup.sh und der Watcher fassen sie nicht
+# an - die bedienen backend/requirements.txt.
+#
+# Bis 0.37.2 las sie NIEMAND: build_msi.py zaehlte die Paketnamen selbst
+# auf, ohne Versionen. Damit war jeder Bau ein anderer, es gab kein
+# Verzeichnis des Ausgelieferten, und ein Pin hier war eine Notiz, die
+# wie eine Absicherung aussah. Gefunden bei der Sicherheitspruefung am
+# 2026-08-29 (F-14), nachdem tags zuvor an genau dieser Datei ein Befund
+# "behoben" worden war, der das ausgelieferte Paket nie erreicht hat.
+#
+# ALLES gepinnt, auch was nur mittelbar hereinkommt: cffi und pycparser
+# haengen an cryptography, certifi/charset-normalizer/idna an requests.
+# Bliebe eines davon offen, waere die Luecke wieder da, nur kleiner.
+# build_msi.py bricht ab, wenn nach dem Installieren etwas in
+# site-packages liegt, das hier nicht steht, oder in einer anderen
+# Fassung. Ein neuer mittelbarer Abhaengiger faellt damit beim Bauen auf
+# und nicht beim Kunden.
+#
+# Beim Anheben: pip-audit ueber diese Datei laufen lassen und den
+# Windows-Agent danach einmal wirklich installieren. Stand geprueft am
+# 2026-08-29 - pip-audit meldet null Befunde.
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+cryptography==50.0.1
+idna==3.19
+pycparser==3.0
 requests==2.34.2
 urllib3==2.7.0

@@ -291,8 +291,11 @@ check("und setzt python3-cryptography als Abhaengigkeit",
 msi = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
 check("build_msi.py kopiert release_key.pub ins Installationsverzeichnis",
       'work / "release_key.pub"' in msi)
+# cryptography steht seit 0.37.3 nicht mehr als Name in build_msi.py,
+# sondern in agent/requirements.txt - siehe der F-14-Abschnitt unten.
 check("und bringt cryptography als Wheel mit",
-      re.search(r'"idna",\s*\n?\s*"cryptography"', msi) is not None)
+      "cryptography==" in (WURZEL / "agent" / "requirements.txt")
+      .read_text(encoding="utf-8"))
 
 
 # ======================================================================
@@ -424,6 +427,101 @@ for zeichen in ("CO37PYEXE", "RegisterTask", "install_task.py", "agent.py"):
     check(f"  darin verlangt: {zeichen}", f'"{zeichen}"' in msi)
 check("und ein unvollstaendiges Paket wird verworfen",
       "msi.unlink(missing_ok=True)" in msi)
+
+
+# ======================================================================
+# F-14 - die Bibliotheken im MSI kommen aus einer gepinnten Datei
+# ======================================================================
+print("--- Was an Bibliotheken ins Windows-Paket wandert ---")
+# Der Anlass, 2026-08-29: build_msi.py zaehlte die Paketnamen selbst auf,
+# ohne Versionen, und agent/requirements.txt las niemand. Jeder Bau holte
+# damit, was PyPI gerade anbot - signiert mit dem Release-Schluessel und
+# auf jedem Windows-Host als SYSTEM ausgefuehrt. Tags zuvor war an genau
+# dieser Datei ein Befund "behoben" worden, der das Paket nie erreicht hat.
+#
+# Diese Reihe haelt beide Haelften fest: dass die Datei gelesen wird, und
+# dass der Bau das Ergebnis dagegenprueft.
+req_pfad = WURZEL / "agent" / "requirements.txt"
+req_text = req_pfad.read_text(encoding="utf-8")
+
+check("build_msi.py kennt den Pfad zu agent/requirements.txt",
+      'AGENT_REQ = HERE.parent / "agent" / "requirements.txt"' in msi)
+check("und installiert darueber, nicht ueber eine eigene Namensliste",
+      '"-r", str(AGENT_REQ)' in msi)
+# Die alte Liste darf nicht danebenstehen bleiben - zwei Quellen fuer
+# denselben Inhalt sind genau der Fehler, um den es hier geht.
+check("die frueher fest eingetragene Namensliste ist weg",
+      re.search(r'"requests",\s*"urllib3",\s*"certifi"', msi) is None)
+
+# Jede Zeile mit ==, sonst waere die Luecke nur kleiner statt zu.
+# Steht bewusst VOR dem Aufruf von lies_pins: die Funktion beendet bei
+# einer losen Zeile den Prozess (so soll der Bau sich verhalten), und ein
+# Test, der mittendrin aussteigt, meldet den Rest nicht mehr.
+lose = [z for z in req_text.splitlines()
+        if z.split("#", 1)[0].strip() and "==" not in z]
+check("keine Zeile ohne feste Fassung", not lose, lose)
+
+# Aufgerufen statt gesucht: die Funktionen sollen sich richtig verhalten,
+# nicht nur vorhanden sein.
+try:
+    pins = _bm.lies_pins(req_text)
+    check("requirements.txt laesst sich lesen", len(pins) >= 8, len(pins))
+except SystemExit as e:
+    pins = {}
+    check("requirements.txt laesst sich lesen", False, e)
+for paket in ("requests", "urllib3", "cryptography",
+              "certifi", "charset-normalizer", "idna", "cffi", "pycparser"):
+    check(f"  gepinnt: {paket}", paket in pins, pins.get(paket))
+
+# Eine unscharfe Angabe muss den Bau anhalten, nicht durchrutschen.
+try:
+    _bm.lies_pins("requests>=2.0\n")
+    check("eine Zeile mit >= wird abgewiesen", False)
+except SystemExit:
+    check("eine Zeile mit >= wird abgewiesen", True)
+try:
+    _bm.lies_pins("requests\n")
+    check("ein blosser Paketname wird abgewiesen", False)
+except SystemExit:
+    check("ein blosser Paketname wird abgewiesen", True)
+check("Kommentare und Leerzeilen stoeren nicht",
+      _bm.lies_pins("# nur ein Hinweis\n\nrequests==2.34.2\n")
+      == {"requests": "2.34.2"})
+
+# Namen nach PEP 503 - charset_normalizer und charset-normalizer sind
+# dasselbe Paket, und die .dist-info-Ordner schreiben es mit Unterstrich.
+check("Paketnamen werden vergleichbar gemacht",
+      _bm.normname("Charset_Normalizer") == "charset-normalizer",
+      _bm.normname("Charset_Normalizer"))
+
+# Der Vergleich selbst, in allen vier Ausgaengen.
+gleich = {"requests": "2.34.2", "urllib3": "2.7.0"}
+check("gleicher Stand wird nicht beanstandet",
+      _bm.pruefe_vendorstand(gleich, dict(gleich)) == [])
+check("ein fehlendes Paket faellt auf",
+      len(_bm.pruefe_vendorstand(gleich, {"requests": "2.34.2"})) == 1)
+check("ein zusaetzliches Paket faellt auf",
+      len(_bm.pruefe_vendorstand(gleich, {**gleich, "cffi": "2.1.1"})) == 1)
+check("eine abweichende Fassung faellt auf",
+      len(_bm.pruefe_vendorstand(gleich, {**gleich, "urllib3": "2.3.0"})) == 1)
+
+# Und das Lesen der .dist-info-Ordner, an echten Verzeichnissen.
+_site = TMP / "site-packages"
+_site.mkdir(parents=True, exist_ok=True)
+(_site / "requests-2.34.2.dist-info").mkdir(exist_ok=True)
+(_site / "charset_normalizer-3.5.1.dist-info").mkdir(exist_ok=True)
+(_site / "requests").mkdir(exist_ok=True)          # kein dist-info, ignorieren
+check("site-packages wird richtig ausgelesen",
+      _bm.lies_installiert(_site)
+      == {"requests": "2.34.2", "charset-normalizer": "3.5.1"},
+      _bm.lies_installiert(_site))
+
+# Der Bau muss die Pruefung auch anwenden, nicht nur koennen.
+check("der Bau ruft die Gegenprobe auf", "pruefe_vendorstand(pins, installiert)" in msi)
+check("und bricht bei Abweichung ab",
+      re.search(r"if maengel:\s*\n\s*raise SystemExit", msi) is not None)
+check("der Inhalt wird ins Bauprotokoll geschrieben",
+      "Mitgelieferte Bibliotheken" in msi)
 
 
 # ======================================================================

@@ -27,6 +27,7 @@ Aufruf:
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 AGENT_PY = HERE.parent / "agent" / "agent.py"
+AGENT_REQ = HERE.parent / "agent" / "requirements.txt"
 CACHE = HERE / "cache"
 
 # Siehe build_deb.py - derselbe Schluessel, dieselbe Begruendung.
@@ -232,6 +234,82 @@ def stable_guid(name: str) -> str:
     return str(uuid.UUID(hashlib.md5(f"co37:{name}".encode()).hexdigest())).upper()
 
 
+# ----------------------------------------------------------------------
+# Was an Bibliotheken ins Paket wandert
+# ----------------------------------------------------------------------
+# Bis 0.37.2 zaehlte der pip-Aufruf weiter unten die Paketnamen selbst
+# auf, ohne Versionen, und agent/requirements.txt las niemand. Jeder Bau
+# holte damit, was PyPI in diesem Augenblick als neueste Fassung anbot;
+# zwei Bauten derselben CO-37-Version konnten verschiedene Agenten
+# ergeben, und zu einem fertigen MSI gab es kein Verzeichnis dessen, was
+# darin steckt. Was dort landet, wird mit dem Release-Schluessel signiert
+# und laeuft auf jedem Windows-Host als SYSTEM.
+#
+# Jetzt kommt die Liste aus agent/requirements.txt, und nach dem
+# Installieren wird gegengeprueft. Der Vergleich ist die eigentliche
+# Absicherung: ein Pin, den niemand nachhaelt, faellt sonst genauso
+# lautlos aus wie die Datei vorher.
+
+
+def normname(name: str) -> str:
+    """Paketnamen nach PEP 503 vergleichbar machen."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def lies_pins(text: str) -> dict[str, str]:
+    """
+    Liest name==version aus einer requirements.txt.
+
+    Alles andere ist ein Fehler und wird als solcher gemeldet - eine Zeile
+    ohne "==" (etwa ">=" oder ein blosser Name) waere genau die Luecke,
+    die hier geschlossen werden soll.
+    """
+    pins: dict[str, str] = {}
+    for roh in text.splitlines():
+        zeile = roh.split("#", 1)[0].strip()
+        if not zeile:
+            continue
+        treffer = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)", zeile)
+        if not treffer:
+            raise SystemExit(
+                f"agent/requirements.txt: Zeile ohne feste Fassung: {zeile!r}"
+            )
+        pins[normname(treffer.group(1))] = treffer.group(2)
+    return pins
+
+
+def lies_installiert(site_dir: Path) -> dict[str, str]:
+    """Liest aus den .dist-info-Ordnern, was wirklich in site-packages liegt."""
+    gefunden: dict[str, str] = {}
+    for eintrag in sorted(site_dir.glob("*.dist-info")):
+        name, _, fassung = eintrag.name[: -len(".dist-info")].rpartition("-")
+        if name and fassung:
+            gefunden[normname(name)] = fassung
+    return gefunden
+
+
+def pruefe_vendorstand(pins: dict[str, str],
+                       installiert: dict[str, str]) -> list[str]:
+    """
+    Vergleicht die Pins mit dem Installierten. Leere Liste heisst in Ordnung.
+
+    Beide Richtungen zaehlen. Fehlt etwas, ist das Paket unvollstaendig;
+    liegt etwas zusaetzlich da, ist ein mittelbarer Abhaengiger neu
+    hinzugekommen und ungepinnt mitgereist - der Fall, der ohne diese
+    Pruefung erst beim Kunden auffaellt.
+    """
+    maengel = []
+    for name in sorted(set(pins) | set(installiert)):
+        soll, ist = pins.get(name), installiert.get(name)
+        if ist is None:
+            maengel.append(f"{name}=={soll} steht in requirements.txt, fehlt aber")
+        elif soll is None:
+            maengel.append(f"{name}=={ist} liegt im Paket, steht aber nirgends")
+        elif soll != ist:
+            maengel.append(f"{name}: erwartet {soll}, installiert {ist}")
+    return maengel
+
+
 # Dateiendungen, die unter Windows eine Versionsressource tragen.
 VERSIONIERT = (".exe", ".dll", ".pyd")
 
@@ -312,6 +390,21 @@ def build(version: str, out_dir: Path) -> Path:
 
     site_dir = work / "python" / "Lib" / "site-packages"
     site_dir.mkdir(parents=True, exist_ok=True)
+
+    if not AGENT_REQ.is_file():
+        raise SystemExit(f"Fehlt: {AGENT_REQ}")
+    # Erst lesen, dann installieren: eine Zeile ohne feste Fassung soll den
+    # Bau anhalten, bevor irgendetwas heruntergeladen ist.
+    pins = lies_pins(AGENT_REQ.read_text(encoding="utf-8"))
+    if not pins:
+        raise SystemExit(f"{AGENT_REQ} nennt keine Pakete")
+
+    # Die Liste kommt aus agent/requirements.txt, nicht aus dieser Datei -
+    # sonst steht sie an zwei Stellen und nur eine wird gepflegt. Darin
+    # steckt auch cryptography, die der Agent fuer die Signaturpruefung
+    # der Selbstaktualisierung braucht (F-07); unter Linux kommt sie aus
+    # python3-cryptography, im Embeddable gibt es kein pip.
+    #
     # Ausdruecklich Windows-Wheels anfordern. Ohne --platform wuerde pip die
     # Pakete fuer das Bausystem (Linux) holen, die unter Windows nicht laufen.
     res = subprocess.run(
@@ -320,15 +413,30 @@ def build(version: str, out_dir: Path) -> Path:
          "--platform", "win_amd64",
          "--python-version", ".".join(PY_VERSION.split(".")[:2]),
          "--only-binary=:all:",
-         # cryptography fuer die Signaturpruefung der Selbstaktualisierung
-         # (F-07). Unter Linux kommt sie aus python3-cryptography; im
-         # Embeddable gibt es kein pip, also muss sie hier mit hinein.
-         "requests", "urllib3", "certifi", "charset-normalizer", "idna",
-         "cryptography"],
+         "-r", str(AGENT_REQ)],
         capture_output=True, text=True,
     )
     if res.returncode != 0:
         raise SystemExit(f"pip fehlgeschlagen: {res.stderr[-600:]}")
+
+    # Gegenprobe am Ergebnis, nicht an der Absicht - dieselbe Regel wie
+    # beim fertigen MSI weiter unten. Faengt zwei Faelle: ein Pin, der
+    # nicht angekommen ist, und einen neuen mittelbaren Abhaengigen, der
+    # ungepinnt mitgereist waere.
+    installiert = lies_installiert(site_dir)
+    maengel = pruefe_vendorstand(pins, installiert)
+    if maengel:
+        raise SystemExit(
+            "Der Inhalt von site-packages passt nicht zu "
+            "agent/requirements.txt:\n  " + "\n  ".join(maengel)
+            + "\nEntweder die Datei anpassen oder klaeren, woher das kommt."
+        )
+
+    # Ins Bauprotokoll, damit zu jedem Paket nachlesbar ist, was darin
+    # steckt. Ohne diese Zeile gibt es auf "welche urllib3 laeuft beim
+    # Kunden" keine Antwort ausser: auf dem Zielsystem nachsehen.
+    print("    Mitgelieferte Bibliotheken: "
+          + ", ".join(f"{n}=={v}" for n, v in sorted(installiert.items())))
 
     shutil.copy(AGENT_PY, work / "agent.py")
     # Muss neben agent.py liegen - der Agent sucht ihn dort.
