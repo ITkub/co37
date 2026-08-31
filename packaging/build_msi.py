@@ -44,14 +44,40 @@ CACHE = HERE / "cache"
 # Siehe build_deb.py - derselbe Schluessel, dieselbe Begruendung.
 RELEASE_KEY = HERE.parent / "backend" / "release_key.pub"
 
-# 3.12.10 war die letzte 3.12.x-Fassung mit Windows-Binärdateien - ab
-# 3.12.11 liefert python.org nur noch Quelltext-Tarballs (Sicherheits-
-# fixe bis 10/2028, aber ohne Embeddable). Vor jeder Anhebung dieser
-# Zahl im FTP-Verzeichnis der Zielversion pruefen, ob es dort ueberhaupt
-# noch eine "*-embed-amd64.zip" gibt - sonst bricht der MSI-Bau am
-# Herunterladen ab, das DEB baut trotzdem weiter (2026-08-29 erlebt,
-# beim Versuch auf 3.12.14 zu heben).
-PY_VERSION = "3.12.10"
+# Die Python-Laufzeit, die im MSI mitgeliefert wird und auf dem Zielsystem
+# als SYSTEM laeuft.
+#
+# BEIM ANHEBEN NICHT NUR DIE ZAHL ANSEHEN, SONDERN DEN ZWEIG:
+#
+# python.org baut Windows-Binaerdateien nur waehrend der Bugfix-Phase
+# eines Zweigs (rund zwei Jahre), danach gibt es zu den Sicherheits-
+# versionen ausschliesslich Quelltext. Wer auf einem Zweig in der
+# Sicherheitsphase bleibt, liefert eine eingefrorene Laufzeit aus, und
+# zwar dauerhaft - es kommt dort nie wieder eine Embeddable nach.
+#
+#   3.12  Sicherheitsphase seit 3.12.11, letzte Embeddable war 3.12.10
+#         (April 2025). Ende der Pflege 10/2028, ohne Binaerdateien.
+#   3.13  Bugfix nur noch bis etwa 10/2026 - als Ziel zu kurz, man
+#         staende in wenigen Wochen wieder hier.
+#   3.14  Bugfix bis 10/2027, Pflege bis 10/2030. Deshalb hier.
+#
+# Vorgehen vor jeder Anhebung, in dieser Reihenfolge:
+#   1. https://devguide.python.org/versions/ - ist der Zielzweig noch
+#      "bugfix"? Wenn nicht, ist es der falsche Zweig, nicht nur die
+#      falsche Zahl.
+#   2. https://www.python.org/ftp/python/<version>/ - gibt es dort eine
+#      "*-embed-amd64.zip"? Fehlt sie, bricht der MSI-Bau am Herunter-
+#      laden ab (das DEB baut trotzdem weiter - 2026-08-29 so erlebt,
+#      beim Versuch auf 3.12.14 zu heben, wo es keine gibt).
+#   3. Den pip-Aufruf weiter unten mit der neuen Nebenversion trocken
+#      laufen lassen: gibt es fuer alle Pakete aus agent/requirements.txt
+#      ein passendes Rad? Fehlt eines, meldet sich die Gegenprobe.
+#
+# Am 2026-08-31 fuer 3.14 durchgespielt: alle acht Pakete loesen sich zu
+# denselben Fassungen auf wie unter 3.12 - cffi und charset-normalizer
+# mit echten cp314-Raedern, cryptography ueber abi3. requirements.txt
+# musste dafuer nicht angefasst werden.
+PY_VERSION = "3.14.7"
 PY_ZIP = f"python-{PY_VERSION}-embed-amd64.zip"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/{PY_ZIP}"
 

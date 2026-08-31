@@ -525,6 +525,38 @@ check("der Inhalt wird ins Bauprotokoll geschrieben",
 
 
 # ======================================================================
+# F-15 - die mitgelieferte Python-Laufzeit
+# ======================================================================
+print("--- Die Python-Laufzeit im Windows-Paket ---")
+# Der Zweig laesst sich von hier aus nicht pruefen (kein Netz im Testlauf,
+# und eine fest eingetragene Liste toter Zweige waere genau die Fehlerart,
+# die uns F-14 eingebracht hat). Was hier geprueft wird, ist der andere
+# Teil: dass eine Anhebung nicht halb passieren kann.
+check("PY_VERSION ist eine dreiteilige Zahl",
+      re.fullmatch(r"\d+\.\d+\.\d+", _bm.PY_VERSION) is not None,
+      _bm.PY_VERSION)
+check("Dateiname und Adresse werden daraus abgeleitet",
+      'PY_ZIP = f"python-{PY_VERSION}-embed-amd64.zip"' in msi
+      and "{PY_VERSION}/{PY_ZIP}" in msi)
+# Sonst zeigt PY_VERSION auf die eine Nebenversion und pip holt Raeder
+# fuer eine andere - der Fehler faellt dann erst auf dem Zielsystem auf.
+check("pip bekommt die Nebenversion aus PY_VERSION",
+      '".".join(PY_VERSION.split(".")[:2])' in msi)
+
+# Und die Meldung im Watcher muss den tatsaechlichen Dateinamen noch
+# treffen. Genau hier stand bis 0.37.0 eine fest eingetragene Fassung,
+# die nach einer Anhebung auf die veraltete Datei zeigte.
+watcher = (WURZEL / "update_watcher.py").read_text(encoding="utf-8")
+_muster = re.search(r're\.search\(r"([^"]+)", out\)', watcher)
+check("der Watcher liest den Dateinamen ueber einen Ausdruck",
+      _muster is not None)
+if _muster:
+    check("und der Ausdruck trifft die aktuelle PY_ZIP",
+          re.fullmatch(_muster.group(1), _bm.PY_ZIP) is not None,
+          _bm.PY_ZIP)
+
+
+# ======================================================================
 # F-06 - nur statisch, siehe Kopf dieser Datei
 # ======================================================================
 print("--- Rechte an agent.conf (statisch) ---")

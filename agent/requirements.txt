@@ -28,6 +28,13 @@
 # Beim Anheben: pip-audit ueber diese Datei laufen lassen und den
 # Windows-Agent danach einmal wirklich installieren. Stand geprueft am
 # 2026-08-29 - pip-audit meldet null Befunde.
+#
+# Beim Wechsel der Python-Nebenversion (PY_VERSION in build_msi.py) den
+# pip-Aufruf mit der neuen Zahl trocken laufen lassen: die Raeder muessen
+# fuer die Ziel-ABI vorliegen. Am 2026-08-31 fuer 3.14 geprueft - dieselben
+# acht Fassungen wie unter 3.12, cffi und charset-normalizer mit echten
+# cp314-Raedern, cryptography ueber abi3 (cp311-abi3 gilt auch fuer 3.14).
+# Die Datei musste dafuer nicht geaendert werden.
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.1
