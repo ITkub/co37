@@ -40,6 +40,7 @@ import base64
 import hashlib
 import importlib.util
 import inspect
+import ast
 import os
 import re
 import shutil
@@ -650,6 +651,183 @@ check("und zwar auf Ordner und Datei",
 print("       (nicht pruefbar ohne Windows: ob die Datei danach wirklich")
 print("        zu ist. Auf dem Zielsystem nachsehen mit")
 print("        icacls C:\\ProgramData\\CO37\\agent.conf)")
+
+
+# ======================================================================
+# Ein Paket ohne Signaturschluessel entsteht nicht aus Versehen (F-44)
+# ======================================================================
+# Bis 0.37.9 stand dort nur ein print(). Ein Hinweis auf stdout geht im
+# Bauprotokoll unter, und dem fertigen Paket sieht man den Unterschied
+# nicht an - seine Agenten nehmen dann jeden Code an, den ihr Server
+# ihnen schickt. Dieselbe Art Fehler wie die von wixl stillschweigend
+# weggelassene CustomAction.
+print()
+print("--- Kein stiller Bau ohne release_key.pub (F-44) ---")
+for name, inhalt in (("build_deb.py", deb), ("build_msi.py", msi)):
+    check(f"{name} bricht ohne Schluessel ab",
+          "raise SystemExit(" in inhalt and "release_key.pub fehlt" in inhalt)
+    check(f"{name} laesst den Weg ohne Signatur ausdruecklich zu",
+          "CO37_OHNE_SIGNATUR" in inhalt)
+    check(f"{name} weist nicht mehr nur hin",
+          'print("Hinweis: kein backend/release_key.pub' not in inhalt)
+
+# ======================================================================
+# tools/ wird nicht ausgeliefert (F-45)
+# ======================================================================
+# make-license.py sagt in seiner zweiten Zeile selbst: "Gehoert NICHT auf
+# den Server und nicht in das Auslieferungspaket - build_release.sh nimmt
+# tools/ bewusst nicht mit." Beide Baustrecken nahmen es mit. Kein
+# Schluesselmaterial betroffen, aber sign-release.py --init lag damit auf
+# jedem Kundensystem - und eine falsche Aussage im Quelltext ist das,
+# woran man sich spaeter orientiert.
+print()
+print("--- tools/ bleibt draussen (F-45) ---")
+check("build_release.py packt tools/ nicht ein",
+      '"tools"' not in bau.split("VERZEICHNISSE =")[1].split("]")[0])
+_sh = (WURZEL / "build_release.sh").read_text(encoding="utf-8")
+_zip = _sh.split("zip -rq")[1].split("-x")[0] if "zip -rq" in _sh else ""
+check("build_release.sh packt tools/ nicht ein", "tools" not in _zip, _zip.strip())
+check("die Geheimnissuche durchsucht tools/ weiterhin",
+      "tests tools ." in _sh or "tools" in _sh.split("GEHEIM=")[1].split("\n")[0])
+
+# ======================================================================
+# agent.conf laesst sich nicht vorbelegen (F-46)
+# ======================================================================
+# C:\ProgramData erlaubt jedem Benutzer, ein Unterverzeichnis anzulegen
+# und darin zu schreiben. Ein lokaler Benutzer konnte also vor der
+# Installation eine agent.conf hinlegen; das Installationsskript las sie,
+# BEVOR icacls die Rechte setzt, und uebernahm daraus alles. Ohne
+# CO37SERVER auf der Befehlszeile - der Weg fuer eine Wiederinstallation -
+# galt dann sein 'server'-Eintrag, und der Agent sprach als SYSTEM mit
+# dem falschen Server.
+print()
+print("--- Vorbelegte agent.conf wird nicht uebernommen (F-46) ---")
+# Ueber den Syntaxbaum des erzeugten Skripts, nicht per
+# Zeichenkettensuche: die erste Fassung dieser Pruefung suchte
+# "existing = uebernommen" im Quelltext und blieb gruen, als die Zeile
+# auskommentiert wurde - der Text steht dann ja immer noch da. Dieselbe
+# Falle wie bei F-27.
+_marker = "TASK_SCRIPT = r" + "'''"
+_ts = msi.split(_marker, 1)[1].split("'''", 1)[0]
+_tsbaum = ast.parse(_ts)
+_zuweisungen = [k for k in ast.walk(_tsbaum) if isinstance(k, ast.Assign)]
+_ersetzt = [k for k in _zuweisungen
+            if any(isinstance(z, ast.Name) and z.id == "existing"
+                   for z in k.targets)
+            and isinstance(k.value, ast.Name) and k.value.id == "uebernommen"]
+check("aus einer vorhandenen Konfiguration wird nur das Token uebernommen",
+      len(_ersetzt) == 1, len(_ersetzt))
+check("das Token ueberlebt eine Neuinstallation weiterhin",
+      'if existing.get("token")' in _ts)
+
+# Und die Wirkung: 'server' aus einer vorbelegten Datei darf nicht
+# gewinnen. Das Skript laeuft hier nicht (es braucht Windows), aber die
+# Reihenfolge im Baum laesst sich pruefen - die Ersetzung muss VOR der
+# Auswertung von sys.argv stehen.
+_pos_ersetzt = _ersetzt[0].lineno if _ersetzt else 10 ** 6
+_pos_server = min([k.lineno for k in ast.walk(_tsbaum)
+                   if isinstance(k, ast.Assign)
+                   and any(isinstance(z, ast.Subscript) for z in k.targets)
+                   and "server" in ast.dump(k)] or [0])
+check("die Ersetzung steht vor dem Setzen von server",
+      _pos_ersetzt < _pos_server, f"{_pos_ersetzt} < {_pos_server}")
+
+# ======================================================================
+# Windows-Hilfsprogramme mit vollem Pfad (F-47)
+# ======================================================================
+# Agent und Installationsskript laufen als SYSTEM. CreateProcess
+# durchsucht bei einem blossen Namen unter anderem das aktuelle
+# Verzeichnis und PATH - beides muss nicht dem gehoeren, dem der Prozess
+# gehoert. Ob das auf einem konkreten Windows ausnutzbar ist, laesst sich
+# von hier nicht klaeren; der volle Pfad kostet nichts.
+print()
+print("--- Volle Pfade fuer Windows-Hilfsprogramme (F-47) ---")
+check("der Agent bildet den System32-Pfad", "def _sys32" in agent_quelle)
+check("der Agent ruft powershell ueber die Konstante auf",
+      "POWERSHELL = _sys32(" in agent_quelle
+      and '"powershell.exe", "-NoProfile"' not in agent_quelle)
+check("der Agent ruft shutdown ueber die Konstante auf",
+      "SHUTDOWN = _sys32(" in agent_quelle
+      and '["shutdown.exe"' not in agent_quelle)
+check("faellt auf den blossen Namen zurueck, wenn die Datei fehlt",
+      "return str(pfad) if pfad.is_file() else name" in agent_quelle)
+check("das Installationsskript benutzt volle Pfade",
+      "SCHTASKS = str(SYS32" in msi and "ICACLS = str(SYS32" in msi)
+check("keine blossen schtasks-Aufrufe mehr im MSI-Bau",
+      '["schtasks", ' not in msi and '"schtasks", "/Create"' not in msi)
+
+# ======================================================================
+# Private Schluessel entstehen mit 0600 (F-35)
+# ======================================================================
+# Bis 0.37.9 stand dort write_bytes() und DANACH chmod(0600). Zwischen
+# beiden lag die Datei mit der Umask-Vorgabe auf der Platte, ueblich
+# 0644, in einem Verzeichnis mit 0755. Wer den Release-Schluessel in
+# diesem Fenster liest, kann Code als root auf jedem Kundensystem
+# ausfuehren. Genau derselbe Fall wird in setup.sh mit 'umask 177'
+# richtig geloest.
+print()
+print("--- Private Schluessel entstehen zu (F-35) ---")
+import importlib.util as _iu  # noqa: E402
+
+# Ueber den Syntaxbaum: eine Zeichenkettensuche nach "0o600" faende den
+# Wert auch in einem chmod() NACH dem Schreiben - und genau das ist der
+# Befund. Geprueft wird deshalb, dass der Modus am os.open() haengt und
+# dass in der Funktion ueberhaupt kein chmod auf die Zieldatei mehr
+# vorkommt.
+for werkzeug in ("sign-release.py", "make-license.py"):
+    _q = (WURZEL / "tools" / werkzeug).read_text(encoding="utf-8")
+    _fn = next((k for k in ast.walk(ast.parse(_q))
+                if isinstance(k, ast.FunctionDef)
+                and k.name == "schluessel_schreiben"), None)
+    check(f"{werkzeug} hat schluessel_schreiben()", _fn is not None)
+    if _fn:
+        _open = [k for k in ast.walk(_fn) if isinstance(k, ast.Call)
+                 and isinstance(k.func, ast.Attribute) and k.func.attr == "open"]
+        check(f"{werkzeug} legt die Datei mit os.open an", len(_open) == 1)
+        check(f"{werkzeug} gibt den Modus 0600 beim Anlegen mit",
+              bool(_open) and len(_open[0].args) >= 3
+              and getattr(_open[0].args[2], "value", None) == 0o600,
+              ast.dump(_open[0]) if _open else "")
+        check(f"{werkzeug} setzt die Rechte der Datei nicht erst hinterher",
+              not [k for k in ast.walk(_fn) if isinstance(k, ast.Call)
+                   and isinstance(k.func, ast.Attribute)
+                   and k.func.attr == "chmod"
+                   and "parent" not in ast.dump(k)])
+        check(f"{werkzeug} schreibt die Datei nicht mit write_bytes",
+              not [k for k in ast.walk(_fn) if isinstance(k, ast.Call)
+                   and isinstance(k.func, ast.Attribute)
+                   and k.func.attr == "write_bytes"])
+    check(f"{werkzeug} setzt die Rechte nicht erst hinterher",
+          "PRIVAT.chmod(0o600)" not in _q)
+
+# Und die Wirkung, unter einer Umask, die den Fehler sichtbar machen
+# wuerde.
+_spec = _iu.spec_from_file_location("sr_haertung", WURZEL / "tools" / "sign-release.py")
+_m = _iu.module_from_spec(_spec)
+try:
+    _spec.loader.exec_module(_m)
+except SystemExit:
+    pass
+_alt = os.umask(0o022)
+try:
+    _d = Path(tempfile.mkdtemp()) / "co37"
+    _z = _d / "release-private.pem"
+    _m.schluessel_schreiben(_z, b"-----BEGIN PRIVATE KEY-----\n")
+    check("der Schluessel liegt mit 0600 auf der Platte",
+          oct(_z.stat().st_mode & 0o777) == "0o600",
+          oct(_z.stat().st_mode & 0o777))
+    check("das Verzeichnis darueber ist 0700",
+          oct(_d.stat().st_mode & 0o777) == "0o700",
+          oct(_d.stat().st_mode & 0o777))
+    try:
+        _m.schluessel_schreiben(_z, b"neu")
+        _ueberschrieben = True
+    except FileExistsError:
+        _ueberschrieben = False
+    check("ein vorhandener Schluessel wird nicht ueberschrieben",
+          not _ueberschrieben)
+finally:
+    os.umask(_alt)
 
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

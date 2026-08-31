@@ -208,5 +208,50 @@ req = fake_request(peer="192.0.2.77", headers={"x-forwarded-for": "203.0.113.9"}
 check("von fremder Adresse wird die Kopfzeile ignoriert",
       main.client_ip(req) == "192.0.2.77", main.client_ip(req))
 
+# ------------------------------------------- X-Forwarded-Proto, dieselbe
+#                                             Leserichtung (F-32)
+#
+# Die Korrektur aus F-21 wurde in der Schwesterfunktion nicht mitgezogen:
+# request_is_https() nahm bis 0.37.9 weiter proto.split(",")[0], den
+# ERSTEN Eintrag. Haengt der Proxy an, gewinnt damit der vom Aufrufer
+# geschickte Wert - und die Funktion meldet "verschluesselt" fuer eine
+# unverschluesselte Anfrage. Daran haengen der HTTPS-Zwang, das Loeschen
+# der Bestaetigungsfrist beim Anmelden und last_seen_secure; die
+# Fehlrichtung ist also die falsche.
+print("--- X-Forwarded-Proto wird von rechts gelesen (F-32) ---")
+configure(trusted=PROXY, https_only=False)
+
+req = fake_request(peer=PROXY, headers={"x-forwarded-proto": "https"})
+check("einzelnes https zaehlt", main.request_is_https(req) is True)
+
+req = fake_request(peer=PROXY, headers={"x-forwarded-proto": "http"})
+check("einzelnes http zaehlt", main.request_is_https(req) is False)
+
+# Der Angriff: der Aufrufer behauptet https, der Proxy haengt seine
+# Sicht ('http') hinten an.
+req = fake_request(peer=PROXY,
+                   headers={"x-forwarded-proto": "https, http"})
+check("vorangestelltes https zaehlt nicht",
+      main.request_is_https(req) is False, "https, http")
+
+# Und die Gegenrichtung, damit die Pruefung nicht einfach 'immer False'
+# belohnt: echtes https hinter einem angehaengten Eintrag.
+req = fake_request(peer=PROXY,
+                   headers={"x-forwarded-proto": "http, https"})
+check("angehaengtes https zaehlt", main.request_is_https(req) is True,
+      "http, https")
+
+req = fake_request(peer=PROXY, headers={"x-forwarded-proto": "  "})
+check("leere Kopfzeile gilt als unverschluesselt",
+      main.request_is_https(req) is False)
+
+req = fake_request(peer=PROXY, headers={"x-forwarded-proto": "HTTPS"})
+check("Grossschreibung zaehlt genauso",
+      main.request_is_https(req) is True)
+
+req = fake_request(peer="192.0.2.77", headers={"x-forwarded-proto": "https"})
+check("von fremder Adresse wird die Kopfzeile ignoriert",
+      main.request_is_https(req) is False)
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

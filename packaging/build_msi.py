@@ -22,7 +22,7 @@ beim Systemstart als SYSTEM laeuft. Ein Python-Skript laesst sich nicht
 ohne Wrapper als echter Dienst betreiben - der SCM wuerde es beenden.
 
 Aufruf:
-    python3 build_msi.py --version 0.2.1 --out ../data/packages
+    python3 build_msi.py --version 0.2.1 --out ../state/packages
 """
 import argparse
 import hashlib
@@ -94,6 +94,18 @@ import sys
 from pathlib import Path
 
 INSTALL_DIR = Path(sys.argv[0]).resolve().parent
+
+# Windows-Hilfsprogramme mit vollem Pfad aufrufen (F-47 der Pruefung vom
+# 2026-08-31). Dieses Skript laeuft als SYSTEM aus einer CustomAction.
+# CreateProcess durchsucht bei einem blossen Namen unter anderem das
+# aktuelle Verzeichnis und PATH - beides muss nicht dem gehoeren, dem der
+# Prozess gehoert. Ob das auf einem konkreten Windows wirklich
+# ausnutzbar ist, haengt am Arbeitsverzeichnis der Aufgabe und daran, ob
+# ein PATH-Eintrag beschreibbar ist; der volle Pfad kostet nichts und
+# macht die Frage gegenstandslos.
+SYS32 = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32"
+ICACLS = str(SYS32 / "icacls.exe")
+SCHTASKS = str(SYS32 / "schtasks.exe")
 CONF_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "CO37"
 CONF = CONF_DIR / "agent.conf"
 
@@ -113,12 +125,31 @@ if CONF.exists():
             k, _, v = line.partition("=")
             existing[k.strip()] = v.strip()
 
+# Aus einer vorhandenen Konfiguration wird NUR das Token uebernommen
+# (F-46 der Pruefung vom 2026-08-31).
+#
+# C:\\ProgramData erlaubt jedem Benutzer, ein Unterverzeichnis anzulegen
+# und darin zu schreiben. Ein lokaler Benutzer konnte also vor der
+# Installation eine agent.conf hinlegen, und dieses Skript las sie -
+# bevor icacls die Rechte setzt. Ohne CO37SERVER auf der
+# msiexec-Befehlszeile (der Weg fuer eine Wiederinstallation, den das
+# Skript ausdruecklich zulaesst) galt dann sein 'server'-Eintrag, und
+# der Agent sprach als SYSTEM mit dem falschen Server. Keine
+# Codeeinschleusung - release_key.pub liegt in Program Files -, aber
+# Auftragssteuerung (patch, reboot), also dieselbe Folge wie F-26.
+#
+# Das Token darf bleiben: es ueberlebt so eine Neuinstallation, ohne dass
+# der Host wieder auf "wartet auf Freigabe" faellt, und ein
+# untergeschobenes heilt sich selbst (401 -> Neuanmeldung).
+uebernommen = {}
+if existing.get("token"):
+    uebernommen["token"] = existing["token"]
+existing = uebernommen
+
 if server:
     existing["server"] = server
 if verify.lower() == "false":
     existing["verify_ssl"] = "false"
-else:
-    existing.pop("verify_ssl", None)
 
 # Ohne Serveradresse ist der Agent nicht lauffaehig. Lieber die
 # Installation scheitern lassen, als eine Aufgabe zu hinterlassen, die
@@ -148,7 +179,7 @@ CONF.write_text("\n".join(out) + "\n", encoding="utf-8")
 # Windows anders, und ein Befehl mit dem falschen Namen scheitert still.
 for ziel, rechte in ((CONF_DIR, "(OI)(CI)(F)"), (CONF, "(F)")):
     subprocess.run(
-        ["icacls", str(ziel), "/inheritance:r",
+        [ICACLS, str(ziel), "/inheritance:r",
          "/grant:r", f"*S-1-5-18:{rechte}", f"*S-1-5-32-544:{rechte}"],
         capture_output=True,
     )
@@ -156,11 +187,11 @@ for ziel, rechte in ((CONF_DIR, "(OI)(CI)(F)"), (CONF, "(F)")):
 python_exe = INSTALL_DIR / "python" / "pythonw.exe"
 agent_py = INSTALL_DIR / "agent.py"
 
-subprocess.run(["schtasks", "/Delete", "/TN", "CO37Agent", "/F"],
+subprocess.run([SCHTASKS, "/Delete", "/TN", "CO37Agent", "/F"],
                capture_output=True)
 
 res = subprocess.run([
-    "schtasks", "/Create",
+    SCHTASKS, "/Create",
     "/TN", "CO37Agent",
     "/TR", f'"{python_exe}" "{agent_py}"',
     # Alle 5 Minuten statt nur ONSTART. Ein ONSTART-Ausloeser allein
@@ -199,7 +230,8 @@ if ($r.Interval -ne 'PT5M' -or $r.StopAtDurationEnd) {
 }
 """
 chk = subprocess.run(
-    ["powershell.exe", "-NoProfile", "-NonInteractive",
+    [str(SYS32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"),
+     "-NoProfile", "-NonInteractive",
      "-ExecutionPolicy", "Bypass", "-Command", FIX_REPETITION],
     capture_output=True, text=True,
 )
@@ -209,12 +241,19 @@ if chk.returncode != 0:
     sys.stderr.write("Warnung: 5-Minuten-Wiederholung nicht gesetzt.\n")
     sys.stderr.write(chk.stderr)
 
-subprocess.run(["schtasks", "/Run", "/TN", "CO37Agent"], capture_output=True)
+subprocess.run([SCHTASKS, "/Run", "/TN", "CO37Agent"], capture_output=True)
 '''
 
-UNINSTALL_SCRIPT = r'''import subprocess
-subprocess.run(["schtasks", "/End", "/TN", "CO37Agent"], capture_output=True)
-subprocess.run(["schtasks", "/Delete", "/TN", "CO37Agent", "/F"],
+UNINSTALL_SCRIPT = r'''import os
+import subprocess
+from pathlib import Path
+
+# Voller Pfad, wie im Installationsskript (F-47).
+SCHTASKS = str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+               / "System32" / "schtasks.exe")
+
+subprocess.run([SCHTASKS, "/End", "/TN", "CO37Agent"], capture_output=True)
+subprocess.run([SCHTASKS, "/Delete", "/TN", "CO37Agent", "/F"],
                capture_output=True)
 '''
 
@@ -468,9 +507,28 @@ def build(version: str, out_dir: Path) -> Path:
     # Muss neben agent.py liegen - der Agent sucht ihn dort.
     if RELEASE_KEY.is_file():
         shutil.copy(RELEASE_KEY, work / "release_key.pub")
+    elif os.environ.get("CO37_OHNE_SIGNATUR") == "ja":
+        print("!!! kein backend/release_key.pub - der Agent aus diesem Paket "
+              "prueft seine Selbstaktualisierung NICHT. Ausdruecklich "
+              "erlaubt ueber CO37_OHNE_SIGNATUR=ja.")
     else:
-        print("Hinweis: kein backend/release_key.pub - der Agent aus diesem "
-              "Paket prueft seine Selbstaktualisierung nicht.")
+        # Abbrechen statt hinweisen (F-44 der Pruefung vom 2026-08-31).
+        #
+        # Ein Hinweis auf stdout geht im Bauprotokoll unter, und dem
+        # fertigen Paket sieht man den Unterschied nicht an - seine
+        # Agenten nehmen dann jeden Code an, den ihr Server ihnen
+        # schickt. Dieselbe Art Fehler wie die von wixl stillschweigend
+        # weggelassene CustomAction: ein Bau, der eine
+        # Sicherheitseigenschaft leise fallen laesst, ist schlimmer als
+        # einer, der abbricht.
+        #
+        # Der Weg fuer einen Stand ohne Signaturschluessel bleibt offen,
+        # er muss nur ausgesprochen werden.
+        raise SystemExit(
+            "backend/release_key.pub fehlt. Agenten aus diesem Paket "
+            "wuerden ihre Selbstaktualisierung nicht pruefen.\n"
+            "Schluessel anlegen:  python3 tools/sign-release.py --init\n"
+            "Oder ausdruecklich ohne:  CO37_OHNE_SIGNATUR=ja ...")
     (work / "install_task.py").write_text(TASK_SCRIPT, encoding="utf-8")
     (work / "uninstall_task.py").write_text(UNINSTALL_SCRIPT, encoding="utf-8")
 
@@ -631,6 +689,17 @@ def build(version: str, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"co37-agent-{version}.msi"
 
+    # wixl schreibt die Datei selbst, hier laesst sich kein O_NOFOLLOW
+    # setzen (F-29 der Pruefung vom 2026-08-31). Also vorher nachsehen:
+    # eine Verknuepfung unter dem erwarteten Paketnamen wuerde den Bau
+    # als root an eine frei gewaehlte Stelle schreiben lassen. Seit
+    # 0.37.10 liegt das Ziel in state/ und gehoert root - das hier ist
+    # die zweite Schranke, falls der Ausgabeort je wieder wandert.
+    if target.is_symlink() or out_dir.is_symlink():
+        raise SystemExit(
+            f"{target} oder das Zielverzeichnis ist eine Verknuepfung. "
+            f"Der Bau laeuft als root und schreibt nicht hindurch.")
+
     res = subprocess.run(
         ["wixl", "-v", "--arch", "x64", "-o", str(target), str(wxs_path)],
         capture_output=True, text=True,
@@ -762,7 +831,7 @@ def agent_version() -> str:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default=agent_version())
-    ap.add_argument("--out", default=str(HERE.parent / "data" / "packages"))
+    ap.add_argument("--out", default=str(HERE.parent / "state" / "packages"))
     args = ap.parse_args()
 
     path = build(args.version, Path(args.out))

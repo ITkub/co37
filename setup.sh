@@ -56,7 +56,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS
 echo ">>> Benutzer und Verzeichnisse"
 id -u co37 >/dev/null 2>&1 || \
   useradd -r -s /usr/sbin/nologin -d "$BASE" co37
-mkdir -p "$BASE"/{data,data/update,update_backups,state,db_backups}
+mkdir -p "$BASE"/{data,data/update,update_backups,state,state/packages,db_backups}
 
 # ---------------------------------------------------------------------
 # Virtualenv
@@ -115,6 +115,15 @@ chmod 700 "$BASE/data"
 # Verknuepfung ab, root schreibt hindurch und uebereignet anschliessend
 # per chown das Ziel (Sicherheitspruefung 2026-08-31, F-18).
 chmod 755 "$BASE/state"
+
+# Die fertigen Agent-Pakete liegen seit 0.37.10 ebenfalls hier und nicht
+# mehr unter data/. Grund ist derselbe: build_packages.sh laeuft als root
+# und schreibt mit open(ziel,"wb") hinein - lag das Verzeichnis in
+# co37-Gebiet, genuegte eine Verknuepfung unter dem erwarteten
+# Paketnamen, um root an eine frei gewaehlte Stelle schreiben zu lassen,
+# ausgeloest durch eine einzige Datei im Eingang (F-29).
+# Lesbar fuer alle, damit das Backend ausliefern kann.
+chmod 755 "$BASE/state/packages"
 
 # Die taegliche Sicherung laeuft als root. Ihr Ziel darf deshalb nicht in
 # data/ liegen - sqlite3 ".backup" folgt einer Verknuepfung und legt die

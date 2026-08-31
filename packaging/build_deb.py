@@ -12,7 +12,7 @@ Installieren uebergeben:
     CO37_SERVER=http://192.168.1.10:8080 apt-get install -y ./co37-agent.deb
 
 Aufruf:
-    python3 build_deb.py --version 0.2.1 --out ../data/packages
+    python3 build_deb.py --version 0.2.1 --out ../state/packages
 """
 import argparse
 import gzip
@@ -185,6 +185,38 @@ def _ar_member(name: str, data: bytes) -> bytes:
     return out
 
 
+
+def sicher_schreiben(ziel: Path, daten: bytes):
+    """
+    Datei anlegen, ohne einer Verknuepfung zu folgen (F-29 der Pruefung
+    vom 2026-08-31).
+
+    Dieses Skript laeuft als root, wenn der Watcher es startet. Ein
+    blankes open(ziel, "wb") folgt einer Verknuepfung, die jemand unter
+    dem erwarteten Paketnamen abgelegt hat - root schreibt dann dorthin,
+    wohin sie zeigt.
+
+    Seit 0.37.10 liegt das Ziel in state/ und gehoert root, der Weg ist
+    also schon oben zu. Das hier ist die zweite Schranke: wer den
+    Ausgabeort spaeter einmal verlegt, soll die Luecke nicht mit
+    verlegen.
+
+    O_TRUNC statt O_EXCL, damit ein zweiter Bau dieselbe Fassung
+    ueberschreiben darf - eine vorhandene Verknuepfung weist O_NOFOLLOW
+    ohnehin ab.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(ziel, flags, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(daten)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
 def build(version: str, out_dir: Path) -> Path:
     if not AGENT_PY.is_file():
         raise SystemExit(f"agent.py nicht gefunden unter {AGENT_PY}")
@@ -200,9 +232,28 @@ def build(version: str, out_dir: Path) -> Path:
     if RELEASE_KEY.is_file():
         inhalt.append(
             ("usr/lib/co37/release_key.pub", RELEASE_KEY.read_bytes(), 0o644))
+    elif os.environ.get("CO37_OHNE_SIGNATUR") == "ja":
+        print("!!! kein backend/release_key.pub - der Agent aus diesem Paket "
+              "prueft seine Selbstaktualisierung NICHT. Ausdruecklich "
+              "erlaubt ueber CO37_OHNE_SIGNATUR=ja.")
     else:
-        print("Hinweis: kein backend/release_key.pub - der Agent aus diesem "
-              "Paket prueft seine Selbstaktualisierung nicht.")
+        # Abbrechen statt hinweisen (F-44 der Pruefung vom 2026-08-31).
+        #
+        # Ein Hinweis auf stdout geht im Bauprotokoll unter, und dem
+        # fertigen Paket sieht man den Unterschied nicht an - seine
+        # Agenten nehmen dann jeden Code an, den ihr Server ihnen
+        # schickt. Dieselbe Art Fehler wie die von wixl stillschweigend
+        # weggelassene CustomAction: ein Bau, der eine
+        # Sicherheitseigenschaft leise fallen laesst, ist schlimmer als
+        # einer, der abbricht.
+        #
+        # Der Weg fuer einen Stand ohne Signaturschluessel bleibt offen,
+        # er muss nur ausgesprochen werden.
+        raise SystemExit(
+            "backend/release_key.pub fehlt. Agenten aus diesem Paket "
+            "wuerden ihre Selbstaktualisierung nicht pruefen.\n"
+            "Schluessel anlegen:  python3 tools/sign-release.py --init\n"
+            "Oder ausdruecklich ohne:  CO37_OHNE_SIGNATUR=ja ...")
 
     data_tar = _tar_gz(inhalt)
 
@@ -224,11 +275,12 @@ def build(version: str, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"co37-agent_{version}_all.deb"
 
-    with open(target, "wb") as f:
-        f.write(b"!<arch>\n")
-        f.write(_ar_member("debian-binary", b"2.0\n"))
-        f.write(_ar_member("control.tar.gz", control_tar))
-        f.write(_ar_member("data.tar.gz", data_tar))
+    sicher_schreiben(target, b"".join([
+        b"!<arch>\n",
+        _ar_member("debian-binary", b"2.0\n"),
+        _ar_member("control.tar.gz", control_tar),
+        _ar_member("data.tar.gz", data_tar),
+    ]))
 
     return target
 
@@ -244,7 +296,7 @@ def agent_version() -> str:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default=agent_version())
-    ap.add_argument("--out", default=str(HERE.parent / "data" / "packages"))
+    ap.add_argument("--out", default=str(HERE.parent / "state" / "packages"))
     args = ap.parse_args()
 
     path = build(args.version, Path(args.out))

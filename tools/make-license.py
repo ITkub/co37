@@ -63,6 +63,30 @@ VORSATZ = "CO37-"
 # base64url ohne Auffuellzeichen: der Schluessel wandert per Mail und
 # wird von Hand eingefuegt. '+' und '/' werden dabei oft zerstoert, '='
 # am Ende laesst manches Formular weg.
+
+def schluessel_schreiben(ziel: Path, pem: bytes):
+    """
+    Privaten Schluessel mit 0600 anlegen - von Anfang an (F-35 der
+    Pruefung vom 2026-08-31).
+
+    Bis 0.37.9 stand hier write_bytes() und danach chmod(0600). Zwischen
+    beiden lag die Datei mit der Umask-Vorgabe auf der Platte, ueblich
+    0644, in einem Verzeichnis mit 0755. Wer in diesem Fenster liest, hat
+    den Lizenzschluessel.
+
+    Genau derselbe Fall wird in setup.sh fuenfzig Zeilen nach der
+    secret.key-Stelle mit 'umask 177' richtig geloest; hier fehlte er.
+    """
+    ziel.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(ziel.parent, 0o700)
+    except OSError:
+        # Unter Windows wirkungslos, siehe den Hinweis beim Anlegen.
+        pass
+    fd = os.open(ziel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(pem)
+
 def _b64(roh: bytes) -> str:
     return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
 
@@ -123,11 +147,7 @@ def init():
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    PRIVAT.write_bytes(pem)
-    try:
-        PRIVAT.chmod(0o600)
-    except OSError:
-        pass
+    schluessel_schreiben(PRIVAT, pem)
 
     roh = privat.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)

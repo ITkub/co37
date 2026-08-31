@@ -241,5 +241,22 @@ if bash:
 else:
     print("       (bash nicht gefunden - Syntaxpruefung ausgelassen)")
 
+
+# ======================================================================
+# Die Agent-Pakete liegen im Ausgang, nicht im Eingang (F-29)
+# ======================================================================
+# build_packages.sh laeuft als root - der Watcher startet es - und
+# build_deb.py schrieb mit open(ziel,"wb") hinein. Lag das Zielverzeichnis
+# wie bis 0.37.9 unter data/, gehoerte es co37: eine Verknuepfung unter
+# dem erwarteten Paketnamen genuegte, und root schrieb an eine frei
+# gewaehlte Stelle. Ausgeloest wurde der Bau durch eine einzige Datei im
+# Eingang, ohne Paket und ohne Signatur.
+check("state/packages wird angelegt",
+      re.search(r"mkdir -p .*state/packages", inhalt) is not None)
+check("state/packages ist lesbar, aber nicht fuer co37 beschreibbar",
+      'chmod 755 "$BASE/state/packages"' in inhalt)
+check("die Pakete liegen nicht unter data/",
+      "$BASE/data/packages" not in inhalt)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

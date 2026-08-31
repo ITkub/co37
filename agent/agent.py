@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.9"
+AGENT_VERSION = "0.37.10"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -342,6 +342,28 @@ def run_streaming(cmd: list[str], sink: LogSink, timeout=7200,
 # Windows meist cp850. Python dekodiert die Ausgabe als UTF-8, wodurch
 # jeder Umlaut als Ersatzzeichen ankam. Statt beim Dekodieren zu raten,
 # wird die Ausgabekodierung im Skript festgelegt.
+# Windows-Hilfsprogramme mit vollem Pfad (F-47 der Pruefung vom
+# 2026-08-31). Der Agent laeuft als SYSTEM. CreateProcess durchsucht bei
+# einem blossen Namen unter anderem das aktuelle Verzeichnis und PATH -
+# beides muss nicht dem gehoeren, dem der Prozess gehoert. Ob das auf
+# einem konkreten Windows ausnutzbar ist, haengt am Arbeitsverzeichnis
+# der geplanten Aufgabe und daran, ob ein PATH-Eintrag beschreibbar ist;
+# das laesst sich ohne Windows nicht abschliessend klaeren. Der volle
+# Pfad kostet nichts und macht die Frage gegenstandslos.
+#
+# Faellt auf den blossen Namen zurueck, wenn die Datei nicht dort liegt -
+# ein Agent, der wegen eines ungewoehnlichen Windows gar nichts mehr tut,
+# waere der schlechtere Tausch.
+def _sys32(name: str) -> str:
+    if not IS_WINDOWS:
+        return name
+    pfad = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / name
+    return str(pfad) if pfad.is_file() else name
+
+
+POWERSHELL = _sys32("WindowsPowerShell\\v1.0\\powershell.exe")
+SHUTDOWN = _sys32("shutdown.exe")
+
 PS_UTF8 = (
     "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
     "$OutputEncoding = [Text.Encoding]::UTF8\n"
@@ -351,7 +373,7 @@ PS_UTF8 = (
 def powershell_streaming(script: str, sink: LogSink, timeout=7200,
                          progress_prefix: str = None) -> int:
     return run_streaming(
-        ["powershell.exe", "-NoProfile", "-NonInteractive",
+        [POWERSHELL, "-NoProfile", "-NonInteractive",
          "-ExecutionPolicy", "Bypass", "-Command", PS_UTF8 + script],
         sink, timeout=timeout, progress_prefix=progress_prefix,
     )
@@ -359,7 +381,7 @@ def powershell_streaming(script: str, sink: LogSink, timeout=7200,
 
 def powershell(script: str, timeout=3600) -> tuple[int, str]:
     return run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive",
+        [POWERSHELL, "-NoProfile", "-NonInteractive",
          "-ExecutionPolicy", "Bypass", "-Command", PS_UTF8 + script],
         timeout=timeout,
     )
@@ -804,7 +826,7 @@ def trigger_reboot(delay_seconds: int = 30):
     global REBOOT_PENDING
     REBOOT_PENDING = True
     if IS_WINDOWS:
-        run(["shutdown.exe", "/r", "/t", str(delay_seconds),
+        run([SHUTDOWN, "/r", "/t", str(delay_seconds),
              "/c", "CO-37: Neustart nach Update", "/d", "p:2:17"])
     else:
         minutes = max(1, delay_seconds // 60)
@@ -857,7 +879,7 @@ def boot_time() -> float:
     # Epoch-Zeitpunkt wird konstruiert statt aus einer Zeichenkette
     # gelesen, damit die Landeseinstellung keine Rolle spielt.
     code, out = run([
-        "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+        POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
         "[int64]((((Get-CimInstance Win32_OperatingSystem)"
         ".LastBootUpTime.ToUniversalTime()) - "
         "(New-Object DateTime 1970,1,1,0,0,0,([DateTimeKind]::Utc)))"
@@ -1320,7 +1342,7 @@ def restart_self_detached():
         # BREAKAWAY loest ihn daraus. Erlaubt das Job-Objekt kein
         # Ausbrechen, scheitert CreateProcess - dann ohne den Zusatz.
         DETACHED, NEW_GROUP, BREAKAWAY = 0x00000008, 0x00000200, 0x01000000
-        cmd = ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
+        cmd = [POWERSHELL, "-NoProfile", "-WindowStyle", "Hidden",
                "-Command", helper]
         for flags in (DETACHED | NEW_GROUP | BREAKAWAY, DETACHED | NEW_GROUP):
             try:

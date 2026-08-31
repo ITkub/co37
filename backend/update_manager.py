@@ -42,7 +42,8 @@ INCOMING_SIG = UPDATE_DIR / "incoming.sig"
 # in einem Verzeichnis, das co37 gehoert; damit war jeder Schreibzugriff des
 # als root laufenden Watchers eine Rechteausweitung (F-18, 2026-08-31).
 STATUS_FILE = UPDATE_DIR / "status.json"
-STATUS_WATCHER = Path(os.getenv("CO37_BASE", "/opt/co37")) / "state" / "status.json"
+STATE_DIR = Path(os.getenv("CO37_BASE", "/opt/co37")) / "state"
+STATUS_WATCHER = STATE_DIR / "status.json"
 
 PROBE_DIR = UPDATE_DIR / "_probe"
 PROBE_ZIP = UPDATE_DIR / "_probe.zip"
@@ -243,6 +244,23 @@ def validate_and_store_update(file_bytes: bytes, filename: str,
 
     new_version = (root / "backend" / "VERSION").read_text().strip()
 
+    # Rueckschritt schon hier abweisen (F-28 der Pruefung vom 2026-08-31).
+    #
+    # Die eigentliche Schranke sitzt im Watcher - der ist die Instanz, die
+    # als root einspielt, und nur was dort geprueft wird, ist geprueft.
+    # Diese Pruefung ist die Hoeflichkeit fuer den Menschen davor: sonst
+    # laedt jemand ein aelteres Paket hoch, sieht "bereit", loest aus und
+    # findet den Grund erst im Protokoll des Watchers.
+    aktuell = get_current_version()
+    if _aelter(new_version, aktuell):
+        cleanup()
+        raise ValueError(
+            f"Das Paket ist Fassung {new_version}, installiert ist "
+            f"{aktuell}. Ein aelteres Paket kann Luecken zurueckbringen, "
+            f"die in dieser Fassung geschlossen sind. Ist das gewollt, "
+            f"muss die Rueckstufung auf dem Server einmalig freigegeben "
+            f"werden: als root 'touch {STATE_DIR / 'allow_downgrade'}'.")
+
     INCOMING_ZIP.unlink(missing_ok=True)
     shutil.move(str(PROBE_ZIP), str(INCOMING_ZIP))
     shutil.rmtree(PROBE_DIR, ignore_errors=True)
@@ -267,6 +285,27 @@ def validate_and_store_update(file_bytes: bytes, filename: str,
     }
     _write_status(status)
     return status
+
+
+
+def _version_tupel(text: str) -> tuple:
+    """Wie im Watcher: '0.37.10' -> (0, 37, 10), nicht als Zeichenkette."""
+    teile = []
+    for stueck in (text or "").strip().split("."):
+        ziffern = ""
+        for zeichen in stueck:
+            if not zeichen.isdigit():
+                break
+            ziffern += zeichen
+        teile.append(int(ziffern) if ziffern else -1)
+    return tuple(teile)
+
+
+def _aelter(paket: str, installiert: str) -> bool:
+    """Ist das Paket aelter als der installierte Stand?"""
+    if not paket or not installiert:
+        return False
+    return _version_tupel(paket) < _version_tupel(installiert)
 
 
 def trigger_update() -> dict:

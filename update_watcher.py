@@ -63,6 +63,10 @@ DATA_DIR = BASE / "data"
 # Deshalb ein Verzeichnis, in dem co37 gar nichts anlegen kann.
 UPDATE_DIR = DATA_DIR / "update"        # Eingang, co37 schreibt
 STATE_DIR = BASE / "state"              # Ausgang, nur root schreibt
+# Einmalige Freigabe fuer ein gewolltes Zurueckrollen (F-28). Liegt in
+# state/ und nicht im Eingang: co37 darf sie nicht anlegen koennen,
+# sonst waere die Schranke keine.
+DOWNGRADE_OK = STATE_DIR / "allow_downgrade"
 
 INCOMING_ZIP = UPDATE_DIR / "incoming.zip"
 
@@ -145,7 +149,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.37.9"
+WATCHER_VERSION = "0.37.10"
 WATCHER_INFO = STATE_DIR / "watcher.json"
 WATCHER_INFO_ALT = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
@@ -647,7 +651,13 @@ def build_packages(log_lines: list[dict] = None) -> tuple[bool, list[dict]]:
     """
     lines = log_lines if log_lines is not None else []
     builder = BASE / "build_packages.sh"
-    pkg_dir = DATA_DIR / "packages"
+    # Ausgang, nicht Eingang (F-29 der Pruefung vom 2026-08-31). Bis
+    # 0.37.9 lag das Verzeichnis unter data/ und gehoerte co37, waehrend
+    # dieses Skript als root laeuft - build_deb.py schreibt mit
+    # open(ziel, "wb") und folgt dabei einer Verknuepfung. Eine einzige
+    # Datei im Eingang (build_request.json) genuegte, um root dazu zu
+    # bringen, an eine frei gewaehlte Stelle zu schreiben.
+    pkg_dir = STATE_DIR / "packages"
 
     if not builder.is_file():
         lines.append(eintrag("pkg.log.script_missing"))
@@ -689,19 +699,14 @@ def build_packages(log_lines: list[dict] = None) -> tuple[bool, list[dict]]:
         else:
             lines.append(eintrag("pkg.log.no_msi_other"))
 
-    # Die neuen Pakete gehoeren root - build_packages.sh laeuft als root.
-    # Lesen genuegt dem Backend, aber unter data/ soll durchgehend co37
-    # stehen, wie ueberall sonst dort.
+    # KEIN chown auf co37 mehr (F-29).
     #
-    # Stand bis 0.36.5 HINTER einem 'return' und lief damit nie. Solange
-    # das ganze Verzeichnis co37 gehoerte, fiel das nicht auf; seit $BASE
-    # root gehoert, waere es aufgefallen. Dagegen gibt es jetzt eine
-    # Pruefung: tests/watcher-sig-test.py sucht Anweisungen hinter einem
-    # 'return' im ganzen Watcher.
-    try:
-        run(["chown", "-R", "co37:co37", str(pkg_dir)], timeout=60)
-    except Exception:  # noqa: BLE001
-        pass
+    # Bis 0.37.9 stand hier ein 'chown -R co37:co37' auf das
+    # Paketverzeichnis - richtig, solange es unter data/ lag, wo
+    # durchgehend co37 steht. Seit die Pakete nach state/ gebaut werden,
+    # waere es das Gegenteil: es gaebe co37 genau das Schreibrecht
+    # zurueck, dessen Fehlen die Absicherung ist. Das Backend braucht nur
+    # Lesen, und state/ ist 0755.
     return True, lines
 
 
@@ -728,6 +733,88 @@ def handle_build_request():
 
 
 # ----------------------------------------------------------------------
+
+def _version_tupel(text: str) -> tuple:
+    """
+    '0.37.10' -> (0, 37, 10). Nicht als Zeichenkette vergleichen: dort
+    stuende '0.37.9' hinter '0.37.10'.
+
+    Von jedem Stueck zaehlen die fuehrenden Ziffern; ein Zusatz wird
+    abgeschnitten, '0.38.0-rc1' gilt also als GLEICH mit '0.38.0' und
+    damit als einspielbar. Das ist Absicht - dieselbe Fassung noch einmal
+    einzuspielen muss gehen, sonst liesse sich ein misslungenes Update
+    nicht wiederholen. Ein Stueck ganz ohne Ziffern wird -1 und sortiert
+    nach unten.
+
+    Faelschen laesst sich die Zahl ohnehin nicht: sie steht in
+    backend/VERSION im Paket, und darueber laeuft die Signatur.
+    """
+    teile = []
+    for stueck in (text or "").strip().split("."):
+        ziffern = ""
+        for zeichen in stueck:
+            if not zeichen.isdigit():
+                break
+            ziffern += zeichen
+        teile.append(int(ziffern) if ziffern else -1)
+    return tuple(teile)
+
+
+def pruefe_kein_rueckschritt(neue_version: str):
+    """
+    Ein aelteres Paket wird nicht eingespielt (F-28 der Pruefung vom
+    2026-08-31).
+
+    Die Signatur beweist die HERKUNFT einer Datei, nicht dass sie noch
+    aktuell ist. Jede je ausgestellte Signatur gilt unbefristet - und
+    Pakete werden verteilt und archiviert (tools/archiv-pakete.py gibt
+    es genau dafuer). Wer Code als co37 ausfuehrt, legte also einfach ein
+    echtes, gueltig signiertes altes Paket in den Eingang und setzte den
+    Status auf 'triggered'. Der Watcher prueft, findet alles in Ordnung,
+    und spielt als root eine Fassung ein, in der die Befunde von damals
+    noch offen sind - F-19 zum Beispiel, und damit beliebiger Code als
+    root. Ueber MANAGED_DIRS und agent_autoroll geht die Rueckstufung
+    danach auf die ganze Flotte.
+
+    Der Rueckfallschutz faengt das nicht ab: migrate.verify() meldet nur
+    FEHLENDE Spalten, und ein aelteres Backend findet gegen ein neueres
+    Schema alle seine eigenen.
+
+    Die Versionsnummer selbst ist nicht faelschbar - sie steht in
+    backend/VERSION im Paket, und ueber dessen Pruefsumme laeuft die
+    Signatur. Es fehlte allein der Vergleich.
+
+    Gewollt zurueckrollen geht weiter, braucht aber eine Hand am Server:
+    eine Datei state/allow_downgrade, und die kann nur root anlegen.
+    Sie gilt genau einmal.
+    """
+    aktuell = ""
+    try:
+        aktuell = (BASE / "backend" / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        # Kein Vergleichswert - dann nicht blockieren. Eine Erstinstallation
+        # oder ein kaputter Stand soll sich einspielen lassen.
+        return
+
+    if not aktuell or _version_tupel(neue_version) >= _version_tupel(aktuell):
+        return
+
+    if DOWNGRADE_OK.exists():
+        # Verbraucht, damit die Freigabe nicht dauerhaft stehen bleibt.
+        try:
+            DOWNGRADE_OK.unlink()
+        except OSError:
+            pass
+        log(f"Rueckschritt {aktuell} -> {neue_version} ausdruecklich freigegeben")
+        return
+
+    raise RuntimeError(
+        f"Rueckschritt abgelehnt: das Paket ist {neue_version}, installiert "
+        f"ist {aktuell}. Ein aelteres Paket kann Luecken zurueckbringen, die "
+        f"in dieser Fassung geschlossen sind. Gewollt? Dann als root "
+        f"'touch {DOWNGRADE_OK}' und erneut ausloesen."
+    )
+
 def do_update():
     status = read_status()
     status["state"] = "running"
@@ -785,6 +872,9 @@ def do_update():
         # Nach dem Auspacken, vor dem Einspielen: der Vertrauensanker
         # bleibt, wie er ist.
         pruefe_schluessel(root)
+
+        # Und kein Rueckschritt.
+        pruefe_kein_rueckschritt(new_version)
 
         append_log(status, "upd.log.swap")
         self_changed = swap_in_new_code(root)

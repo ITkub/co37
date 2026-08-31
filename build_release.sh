@@ -70,7 +70,7 @@ fi
 
 rm -f "$OUT"
 zip -rq "$OUT" \
-  backend frontend agent packaging tests tools \
+  backend frontend agent packaging tests \
   update_watcher.py \
   setup.sh build_packages.sh build_release.sh migrate_to_co37.sh README.md \
   REVERSE-PROXY.md GITHUB.md LICENSE run-tests.sh .gitignore .gitattributes \

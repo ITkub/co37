@@ -50,6 +50,35 @@ PROJEKT = Path(__file__).resolve().parent.parent
 OEFFENTLICH = PROJEKT / "backend" / "release_key.pub"
 
 
+
+def schluessel_schreiben(ziel: Path, pem: bytes):
+    """
+    Privaten Schluessel mit 0600 anlegen - von Anfang an (F-35 der
+    Pruefung vom 2026-08-31).
+
+    Bis 0.37.9 stand hier write_bytes() und danach chmod(0600). Zwischen
+    beiden lag die Datei mit der Umask-Vorgabe auf der Platte, ueblich
+    0644, in einem Verzeichnis mit 0755. Wer in diesem Fenster liest, hat
+    den Schluessel - und mit dem Release-Schluessel Code als root auf
+    jedem Kundensystem.
+
+    Genau derselbe Fall wird in setup.sh fuenfzig Zeilen nach der
+    secret.key-Stelle mit 'umask 177' richtig geloest; hier fehlte er.
+
+    O_EXCL: eine vorhandene Datei wird nicht ueberschrieben. Die Aufrufer
+    pruefen das ohnehin vorher, aber ein Schluessel ist nichts, was man
+    versehentlich ersetzt.
+    """
+    ziel.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(ziel.parent, 0o700)
+    except OSError:
+        # Unter Windows wirkungslos, siehe den Hinweis beim Anlegen.
+        pass
+    fd = os.open(ziel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(pem)
+
 def _b64(roh: bytes) -> str:
     return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
 
@@ -84,14 +113,10 @@ def init():
 
     HOME.mkdir(parents=True, exist_ok=True)
     privat = Ed25519PrivateKey.generate()
-    PRIVAT.write_bytes(privat.private_bytes(
+    schluessel_schreiben(PRIVAT, privat.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption()))
-    try:
-        PRIVAT.chmod(0o600)
-    except OSError:
-        pass
 
     roh = privat.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)

@@ -142,5 +142,62 @@ with Session(main.engine) as s:
     due, why = main.patch_due(h6, session=s)
     check("Hoechstzahl erreicht -> kein Nachschlag", not due, why)
 
+
+# ======================================================================
+# Zeitumstellung: der Termin verschiebt sich nicht (F-40)
+# ======================================================================
+# localnow() gab bis 0.37.9 datetime.now().astimezone() zurueck - das
+# heftet einen FESTEN Versatz an, den von jetzt, keine Zonenregel.
+# _schedule_due() blickt aber bis zu acht Tage zurueck und rechnet
+# Termine dieser Tage mit dem heutigen Versatz nach UTC um. Ueber eine
+# Zeitumstellung hinweg ist das Ergebnis eine Stunde daneben, und je nach
+# Richtung wird ein Termin doppelt oder gar nicht als faellig erkannt -
+# bei einem Zeitplan mit Neustart also unter Umstaenden ein zweiter
+# Neustart.
+print("--- Termine ueber die Zeitumstellung (F-40) ---")
+import utctime  # noqa: E402
+
+_zone = utctime._system_zone()
+check("die Zeitzone des Servers ist benannt, nicht nur ein Versatz",
+      _zone is not None, _zone)
+
+if _zone is not None:
+    # Der Fall selbst, unabhaengig von der eingestellten Systemzone:
+    # ein Termin auf der anderen Seite einer Umstellung.
+    from zoneinfo import ZoneInfo  # noqa: E402
+    berlin = ZoneInfo("Europe/Berlin")
+
+    vorher = datetime(2026, 3, 25, 12, 0, tzinfo=berlin)   # noch CET (+01)
+    termin = (vorher - timedelta(days=-5)).replace(hour=3, minute=0,
+                                                   second=0, microsecond=0)
+    check("der Termin traegt den Versatz SEINES Tages",
+          termin.utcoffset() == timedelta(hours=2), termin)
+    check("und rechnet damit richtig nach UTC",
+          termin.astimezone(timezone.utc)
+          == datetime(2026, 3, 30, 1, 0, tzinfo=timezone.utc),
+          termin.astimezone(timezone.utc))
+
+    # Die Gegenprobe: mit einem festen Versatz - so wie vorher - kaeme
+    # eine Stunde zu spaet heraus.
+    fest = vorher.astimezone(timezone(timedelta(hours=1)))
+    fest_termin = (fest - timedelta(days=-5)).replace(hour=3, minute=0,
+                                                      second=0, microsecond=0)
+    check("mit festem Versatz waere es eine Stunde daneben",
+          fest_termin.astimezone(timezone.utc)
+          - termin.astimezone(timezone.utc) == timedelta(hours=1),
+          fest_termin.astimezone(timezone.utc))
+
+    # Und im Herbst, in der anderen Richtung.
+    herbst = datetime(2026, 10, 22, 12, 0, tzinfo=berlin)   # noch CEST (+02)
+    h_termin = (herbst - timedelta(days=-4)).replace(hour=3, minute=0,
+                                                     second=0, microsecond=0)
+    check("nach der Rueckstellung gilt wieder +01:00",
+          h_termin.utcoffset() == timedelta(hours=1), h_termin)
+
+check("localnow() liefert eine Zeitzone mit Regel, keinen festen Versatz",
+      not isinstance(main.localnow().tzinfo, timezone)
+      if _zone is not None else True,
+      type(main.localnow().tzinfo).__name__)
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

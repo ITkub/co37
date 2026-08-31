@@ -24,6 +24,7 @@ Braucht kein Backend und kein Netz.
 import base64
 import importlib.util
 import shutil
+import os
 import sys
 import tempfile
 import zipfile
@@ -233,9 +234,21 @@ check("restore_backup setzt die Eigentuemer",
 check("kein chown von BASE auf co37 mehr im Quelltext",
       'chown", "-R", "co37:co37", str(BASE)' not in quelle)
 
-# Die frisch gebauten Agent-Pakete gehoeren danach co37.
-check("build_packages setzt den Eigentuemer der Pakete",
-      'chown", "-R", "co37:co37", str(pkg_dir)' in quelle)
+# Die Agent-Pakete werden nach state/ gebaut, nicht nach data/ (F-29).
+#
+# Bis 0.37.9 lag das Ziel unter data/, gehoerte damit co37, und
+# build_packages.sh laeuft als root: open(ziel,"wb") in build_deb.py folgt
+# einer Verknuepfung, die dort jemand unter dem erwarteten Paketnamen
+# ablegt. Ausgeloest wurde der Bau durch eine einzige Datei im Eingang.
+# Damit schrieb root an eine frei gewaehlte Stelle - dasselbe Muster wie
+# F-18 und F-20.
+#
+# Die alte Pruefung an dieser Stelle verlangte das Gegenteil: einen chown
+# der Pakete auf co37. Das war richtig, solange sie unter data/ lagen.
+check("Pakete werden nach state/ gebaut, nicht nach data/",
+      'pkg_dir = STATE_DIR / "packages"' in quelle)
+check("kein chown der Pakete auf co37 mehr",
+      'chown", "-R", "co37:co37", str(pkg_dir)' not in quelle)
 
 # ======================================================================
 # Kein toter Code hinter einem return
@@ -498,6 +511,121 @@ check("Signatur wird geschrieben",
       "INCOMING_SIG.write_text(signature" in um_quelle)
 check("Abbruch raeumt die Signatur weg",
       um_quelle.count("INCOMING_SIG.unlink(missing_ok=True)") >= 2)
+
+# ======================================================================
+# Kein Rueckschritt auf ein aelteres Paket (F-28)
+# ======================================================================
+# Die Signatur beweist die Herkunft einer Datei, nicht dass sie noch
+# aktuell ist. Jede je ausgestellte Signatur gilt unbefristet, und alte
+# Pakete werden verteilt und archiviert. Wer Code als co37 ausfuehrt,
+# legte also ein ECHTES, gueltig signiertes altes Paket in den Eingang -
+# der Watcher prueft, findet alles in Ordnung, und spielt als root eine
+# Fassung ein, in der die Befunde von damals noch offen sind. Ueber F-19
+# ist das dann beliebiger Code als root, und ueber MANAGED_DIRS plus
+# agent_autoroll geht die Rueckstufung auf die ganze Flotte.
+print()
+print("--- Rueckschritt wird abgelehnt (F-28) ---")
+
+watcher.STATE_DIR = BASE / "state"
+watcher.DOWNGRADE_OK = BASE / "state" / "allow_downgrade"
+(BASE / "state").mkdir(parents=True, exist_ok=True)
+(BASE / "backend" / "VERSION").write_text("0.37.10\n", encoding="utf-8")
+
+
+def rueckschritt(version):
+    """True, wenn das Paket abgelehnt wird."""
+    try:
+        watcher.pruefe_kein_rueckschritt(version)
+        return False
+    except RuntimeError:
+        return True
+
+
+check("Zeichenkettenvergleich reicht nicht: 0.37.9 < 0.37.10",
+      watcher._version_tupel("0.37.9") < watcher._version_tupel("0.37.10"))
+check("aelteres Paket wird abgelehnt", rueckschritt("0.37.5"))
+check("viel aelteres Paket wird abgelehnt", rueckschritt("0.36.3"))
+check("gleiche Fassung ist erlaubt", not rueckschritt("0.37.10"))
+check("neuere Fassung ist erlaubt", not rueckschritt("0.38.0"))
+check("Sprung in die naechste Hauptzahl ist erlaubt", not rueckschritt("1.0.0"))
+
+# Die Freigabe liegt in state/ und nicht im Eingang: koennte co37 sie
+# anlegen, waere die Schranke keine.
+check("die Freigabedatei liegt nicht in einem Verzeichnis von co37",
+      watcher.DATA_DIR not in Path(watcher.DOWNGRADE_OK).parents,
+      watcher.DOWNGRADE_OK)
+
+watcher.DOWNGRADE_OK.write_text("", encoding="utf-8")
+check("mit Freigabe geht der Rueckschritt", not rueckschritt("0.37.5"))
+check("die Freigabe ist danach verbraucht",
+      not watcher.DOWNGRADE_OK.exists())
+check("der naechste Versuch wird wieder abgelehnt", rueckschritt("0.37.5"))
+
+# Ohne Vergleichswert nicht blockieren - eine Erstinstallation oder ein
+# kaputter Stand soll sich einspielen lassen.
+(BASE / "backend" / "VERSION").unlink()
+check("ohne installierte Fassung wird nicht blockiert",
+      not rueckschritt("0.1.0"))
+(BASE / "backend" / "VERSION").write_text("0.37.10\n", encoding="utf-8")
+
+# Der Aufruf muss auch wirklich in do_update() stehen - ueber den
+# Syntaxbaum, weil eine Zeichenkettensuche den Kommentar oben findet.
+_du = next((k for k in ast.walk(ast.parse(quelle))
+            if isinstance(k, ast.FunctionDef) and k.name == "do_update"), None)
+check("do_update() gefunden", _du is not None)
+check("do_update() ruft pruefe_kein_rueckschritt() auf",
+      _du is not None and "pruefe_kein_rueckschritt" in _aufrufe(_du))
+
+# ======================================================================
+# Der Paketbau schreibt nicht in Gebiet von co37 (F-29)
+# ======================================================================
+print()
+print("--- Paketbau schreibt nach state/ (F-29) ---")
+
+bp = (WURZEL / "build_packages.sh").read_text(encoding="utf-8")
+check("build_packages.sh baut nach state/", 'CO37_STATE' in bp and
+      '/packages"' in bp)
+check("build_packages.sh baut nicht mehr nach data/",
+      'CO37_DATA:-$(pwd)/data}/packages' not in bp)
+check("build_packages.sh weist ein verknuepftes Zielverzeichnis ab",
+      '-L "$OUT"' in bp)
+
+deb = (WURZEL / "packaging" / "build_deb.py").read_text(encoding="utf-8")
+check("build_deb.py schreibt ohne Verknuepfungen zu folgen",
+      "O_NOFOLLOW" in deb)
+check("build_deb.py benutzt kein blankes open(target, 'wb') mehr",
+      'with open(target, "wb")' not in deb)
+
+msi = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+check("build_msi.py prueft das Ziel auf eine Verknuepfung",
+      "target.is_symlink()" in msi)
+
+# Und die Wirkung, nicht nur der Wortlaut: eine Verknuepfung unter dem
+# erwarteten Paketnamen darf nicht durchgeschrieben werden.
+sys.path.insert(0, str(WURZEL / "packaging"))
+import build_deb as _bd  # noqa: E402
+
+_pkg = TMP / "pkgziel"
+_pkg.mkdir()
+_opfer = TMP / "opfer.txt"
+_opfer.write_text("ORIGINAL", encoding="utf-8")
+os.symlink(_opfer, _pkg / "co37-agent_0.0.1_all.deb")
+try:
+    _bd.sicher_schreiben(_pkg / "co37-agent_0.0.1_all.deb", b"BOESE")
+    _durch = True
+except OSError:
+    _durch = False
+check("Schreiben durch eine Verknuepfung wird abgewiesen", not _durch)
+check("die Zieldatei ist unveraendert",
+      _opfer.read_text(encoding="utf-8") == "ORIGINAL")
+# Gegenprobe: eine echte Datei muss geschrieben werden, sonst prueft das
+# hier nur, dass gar nichts mehr geht.
+_bd.sicher_schreiben(_pkg / "echt.deb", b"!<arch>\n")
+check("eine echte Datei wird geschrieben",
+      (_pkg / "echt.deb").read_bytes() == b"!<arch>\n")
+_bd.sicher_schreiben(_pkg / "echt.deb", b"zweiter Bau")
+check("ein zweiter Bau darf ueberschreiben",
+      (_pkg / "echt.deb").read_bytes() == b"zweiter Bau")
 
 # ======================================================================
 print()

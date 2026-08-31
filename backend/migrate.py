@@ -61,7 +61,11 @@ logger = logging.getLogger(__name__)
 #    unberuehrt, sie duerfen es ueber ihre Rolle. Wer einem vorhandenen
 #    'user'-Konto das Recht geben will, hakt es danach in der
 #    Benutzerverwaltung an.
-SCHEMA_VERSION = 18
+# 19: eindeutiger Index ueber lower(hostname). Keine neue Spalte, deshalb
+#    faellt er bei verify() nicht auf - die Zahl steht hier trotzdem, weil
+#    ein Rueckschritt auf 18 den Index nicht kennt und ein Doppeleintrag
+#    dann wieder entstehen kann. Siehe _hostname_index().
+SCHEMA_VERSION = 19
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -140,6 +144,11 @@ def migrate(engine: Engine) -> dict:
         report["notes"].append("Neue Datenbank, keine Migration notwendig")
         _set_version(engine, SCHEMA_VERSION)
         return report
+
+    # Auch auf einer frischen Anlage noetig: create_all() legt die
+    # Tabellen an, aber keinen Index ueber lower(hostname) - den kennt
+    # SQLModel nicht. Deshalb hier und nicht bei den Spalten.
+    _hostname_index(engine, report)
 
     with engine.begin() as conn:
         for table, columns in EXPECTED_COLUMNS.items():
@@ -254,6 +263,42 @@ def migrate(engine: Engine) -> dict:
 
     _set_version(engine, SCHEMA_VERSION)
     return report
+
+
+def _hostname_index(engine: Engine, report: dict):
+    """
+    Eindeutiger Index auf den kleingeschriebenen Hostnamen (F-33 der
+    Pruefung vom 2026-08-31).
+
+    Die Pruefung in main.py allein reicht nicht: enroll und heartbeat sind
+    synchrone Routen und laufen nebenlaeufig im Threadpool. Zwischen dem
+    'gibt es den Namen schon?' und dem Schreiben liegt kein Schloss - zwei
+    gleichzeitige Anfragen auf denselben Namen kommen beide durch. Das
+    faengt nur die Datenbank ab.
+
+    Ueber lower(), nicht ueber die Spalte selbst: SQLite vergleicht TEXT
+    mit '=' unter Beachtung der Gross- und Kleinschreibung, ein Index auf
+    'hostname' liesse 'DC01' neben 'dc01' also weiter zu.
+
+    Ein bereits vorhandenes Paar dieser Art laesst den Index scheitern.
+    Dann bricht die Migration NICHT ab: die Anlage laeuft weiter, die
+    Pruefung in main.py greift, und im Bericht steht, was zu tun ist.
+    Ein Update, das wegen zweier aehnlicher Hostnamen nicht einspielt,
+    waere die schlechtere Antwort - es liesse die Anlage auf einem Stand
+    mit offenen Befunden stehen.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_host_hostname_nocase "
+                "ON host (lower(hostname))"
+            ))
+    except Exception as exc:  # noqa: BLE001
+        report["notes"].append(
+            "Hostnamen sind nicht eindeutig (Gross-/Kleinschreibung): "
+            f"{exc}. Doppelte Eintraege im Dashboard entfernen, danach "
+            "greift der eindeutige Index beim naechsten Start."
+        )
 
 
 def _set_version(engine: Engine, version: int):

@@ -18,12 +18,63 @@ Schreiben nach UTC um und heftet die Zeitzone beim Lesen wieder an. Das
 Dateiformat bleibt dabei unveraendert - bestehende Datenbanken laufen ohne
 Umschreiben weiter.
 """
+import os
 from datetime import datetime, timezone, tzinfo
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import DateTime, TypeDecorator
 
 UTC = timezone.utc
+
+
+def _system_zone() -> Optional[tzinfo]:
+    """
+    Die BENANNTE Zeitzone des Servers, oder None.
+
+    Warum benannt und nicht der Versatz (F-40 der Pruefung vom
+    2026-08-31): datetime.now().astimezone() heftet ein festes
+    timezone(timedelta(...)) an - den Versatz, der JETZT gilt, keine
+    Zonenregel. Die Terminrechnung in main.py blickt aber bis zu acht
+    Tage zurueck und rechnet Termine dieser Tage mit dem heutigen Versatz
+    nach UTC um. Ueber eine Zeitumstellung hinweg ist das Ergebnis eine
+    Stunde daneben:
+
+        jetzt   2026-03-25 12:00:00+01:00
+        CO-37   2026-03-30 03:00:00+01:00 -> UTC 02:00
+        richtig 2026-03-30 03:00:00+02:00 -> UTC 01:00
+
+    Je nach Richtung wird ein Termin dadurch doppelt oder gar nicht als
+    faellig erkannt - bei einem Zeitplan mit Neustart also unter
+    Umstaenden ein zweiter Neustart. Zweimal im Jahr, und nur fuer
+    Termine, die mit dem Nachlauf ueber die Umstellung reichen.
+
+    Reihenfolge: TZ aus der Umgebung, sonst das Ziel von /etc/localtime,
+    sonst /etc/timezone. Findet sich nichts, gibt die Funktion None
+    zurueck und der Aufrufer bleibt beim festen Versatz - das ist der
+    Stand von vorher und immer noch besser als abzustuerzen.
+    """
+    name = (os.environ.get("TZ") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            pass
+
+    try:
+        ziel = os.path.realpath("/etc/localtime")
+        if "/zoneinfo/" in ziel:
+            return ZoneInfo(ziel.split("/zoneinfo/", 1)[1])
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        pass
+
+    try:
+        with open("/etc/timezone", encoding="ascii") as fh:
+            return ZoneInfo(fh.read().strip())
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        pass
+
+    return None
 
 
 # ----------------------------------------------------------------------
@@ -35,11 +86,23 @@ def utcnow() -> datetime:
 
 
 def localnow() -> datetime:
-    """Jetzt, in der Zeitzone des Servers, mit Zeitzone."""
+    """
+    Jetzt, in der Zeitzone des Servers, mit Zeitzone.
+
+    Mit der BENANNTEN Zone, wenn sie sich ermitteln laesst - sonst
+    rechnet jede Terminverschiebung ueber eine Zeitumstellung hinweg
+    falsch. Siehe _system_zone().
+    """
+    zone = _system_zone()
+    if zone is not None:
+        return datetime.now(zone)
     return datetime.now().astimezone()
 
 
 def local_tz() -> tzinfo:
+    zone = _system_zone()
+    if zone is not None:
+        return zone
     return datetime.now().astimezone().tzinfo
 
 

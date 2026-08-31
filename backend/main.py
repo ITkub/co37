@@ -28,7 +28,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, PlainSerializer
 from typing_extensions import Annotated
-from sqlalchemy import or_
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import joblog
@@ -49,8 +50,48 @@ from models import (
 DB_URL = os.getenv("CO37_DB", "sqlite:///./co37.db")
 AGENT_OFFLINE_AFTER = int(os.getenv("CO37_OFFLINE_SECONDS", "180"))
 DATA_DIR = Path(os.getenv("CO37_DATA", "/opt/co37/data"))
-PKG_DIR = DATA_DIR / "packages"
+
+# state/ ist die Gegenrichtung zu data/: dorthin schreibt der als root
+# laufende Watcher, und das Backend liest nur. Siehe setup.sh.
+STATE_DIR = Path(__file__).resolve().parent.parent / "state"
+
+# Die fertigen Agent-Pakete (F-29 der Pruefung vom 2026-08-31).
+#
+# Bis 0.37.9 lag das Verzeichnis unter data/ und gehoerte damit co37 -
+# waehrend build_packages.sh als root laeuft und mit open(ziel, "wb")
+# hineinschreibt. Das folgt einer Verknuepfung. co37 konnte also unter
+# dem erwarteten Paketnamen einen Link auf eine beliebige Datei legen und
+# den Bau mit einer einzigen Datei im Eingang (build_request.json)
+# ausloesen - root schrieb dann dorthin. Dasselbe Muster wie F-18 und
+# F-20, nur eine Ebene weiter: nicht was der Watcher schreibt, sondern
+# was das Bauskript schreibt.
+#
+# Gleiche Antwort wie damals, und aus demselben Grund strukturell statt
+# per O_NOFOLLOW an der einzelnen Schreibstelle: solange das
+# ELTERNverzeichnis co37 gehoert, laesst sich der ganze Eintrag umhaengen.
+PKG_DIR = STATE_DIR / "packages"
+
+# Wo die Pakete bis 0.37.9 lagen. Nur noch zum Lesen, fuer die eine
+# Runde zwischen Einspielen und dem ersten Neubau.
+PKG_DIR_ALT = DATA_DIR / "packages"
+
 AGENT_SRC = Path(__file__).resolve().parent.parent / "agent" / "agent.py"
+
+
+def paketverzeichnis() -> Path:
+    """
+    Das Verzeichnis, aus dem Pakete ausgeliefert werden.
+
+    Nach dem Einspielen von 0.37.10 ist state/packages noch leer, bis der
+    Watcher einmal gebaut hat. Solange dort nichts liegt, wird der alte
+    Ort gelesen - sonst zeigte die Oberflaeche fuer eine Runde gar keine
+    Pakete an.
+    """
+    if PKG_DIR.is_dir() and any(PKG_DIR.glob("co37-agent*")):
+        return PKG_DIR
+    if PKG_DIR_ALT.is_dir() and any(PKG_DIR_ALT.glob("co37-agent*")):
+        return PKG_DIR_ALT
+    return PKG_DIR
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
 
@@ -330,6 +371,28 @@ def verify_password(password: str, stored: str) -> bool:
     return secrets.compare_digest(dk.hex(), hash_hex)
 
 
+# Vergleichs-Hash fuer unbekannte Benutzernamen (F-37 der Pruefung vom
+# 2026-08-31).
+#
+# Bis 0.37.9 stand in login() 'hash_password("x")' - der Hash wurde bei
+# JEDEM Versuch mit unbekanntem Namen neu gebildet. Damit lief scrypt
+# zweimal statt einmal, und die Maszahme tat das Gegenteil dessen, was ihr
+# Kommentar versprach:
+#
+#     bekanntes Konto  : 41.5 ms  (1x scrypt)
+#     unbekanntes Konto: 83.0 ms  (2x scrypt)
+#
+# Gemessen am 2026-08-31. 41 ms Unterschied sind aus dem Netz ablesbar -
+# die Antwortzeit verriet also genau die Kontonamen, die sie verbergen
+# sollte. In der Pruefung davor stand diese Stelle unter "geprueft und in
+# Ordnung": gelesen wurde die Absicht, nicht gezaehlt wurde, wie oft
+# scrypt laeuft.
+#
+# Einmal beim Start gebildet, danach nur noch verglichen. Der Wert ist
+# kein Geheimnis - er gehoert zu keinem Konto.
+BLIND_HASH = hash_password(secrets.token_urlsafe(32))
+
+
 def _setting(session: Session, key: str, default: str = "") -> str:
     row = session.get(Setting, key)
     return row.value if row else default
@@ -555,7 +618,31 @@ def request_is_https(request: Optional[Request]) -> bool:
         return False
     if via_trusted_proxy(request):
         proto = request.headers.get("x-forwarded-proto", "")
-        return proto.split(",")[0].strip().lower() == "https"
+        # VON RECHTS, aus demselben Grund wie bei client_ip() (F-32 der
+        # Pruefung vom 2026-08-31). Bis 0.37.9 stand hier
+        # proto.split(",")[0] - der erste Eintrag. Die Korrektur aus F-21
+        # wurde in dieser Schwesterfunktion nicht mitgezogen, obwohl sie
+        # zwanzig Zeilen darueber steht und ausfuehrlich begruendet ist.
+        #
+        # Haengt der Proxy an, gewinnt sonst der vom Aufrufer geschickte
+        # Wert, und request_is_https() meldet "verschluesselt" fuer eine
+        # unverschluesselte Anfrage. Daran haengen der HTTPS-Zwang, das
+        # Loeschen der Bestaetigungsfrist beim Anmelden und
+        # last_seen_secure - die Fehlrichtung ist also die falsche.
+        #
+        # Rechts steht, was der letzte Proxy selbst gesehen hat. Ersetzt
+        # er die Kopfzeile (der dokumentierte Normalfall), ist es der
+        # einzige Eintrag und die Antwort dieselbe.
+        #
+        # Was sich hier NICHT loesen laesst: ein Proxy, der die Kopfzeile
+        # gar nicht setzt. Dann steht dort unveraendert, was der Aufrufer
+        # geschickt hat, und keine Leserichtung hilft. Deshalb steht die
+        # Anforderung in REVERSE-PROXY.md ausdruecklich fuer beide
+        # Kopfzeilen.
+        eintraege = [e.strip() for e in proto.split(",") if e.strip()]
+        if eintraege:
+            return eintraege[-1].lower() == "https"
+        return False
     return request.url.scheme == "https"
 
 
@@ -894,14 +981,36 @@ def require_login(
     Oberflaeche weglaesst, ist keiner.
     """
     who = authenticate(x_session, session, request)
+    pw_zwang_pruefen(who, request)
+    return who
+
+
+def pw_zwang_pruefen(who: "Principal", request: Request):
+    """
+    Setzt den erzwungenen Passwortwechsel durch.
+
+    Steht als eigene Funktion da, weil require_login() nicht der einzige
+    Weg in die Anwendung ist: die Paketroute stellt die Anmeldung mit
+    authenticate() selbst fest und lief damit an der Durchsetzung vorbei
+    (F-39 der Pruefung vom 2026-08-31). Wirkung dort war gering - die
+    Agent-Pakete enthalten kein Geheimnis -, aber die Aussage "jede Route"
+    stimmte nicht, und das ist der Teil, der zaehlt.
+
+    Verglichen wird scope["path"] und nicht url.path: das ist der Wert,
+    auf dem der Router selbst arbeitet. url.path wird aus der
+    Host-Kopfzeile mit aufgebaut, und genau daraus entstand
+    CVE-2026-48710 in Starlette - Middleware sah einen anderen Pfad als
+    der Router. Unser Pin (1.6.0) liegt ueber der behobenen Fassung und
+    haelt, nachgestellt am 2026-08-31; scope["path"] kostet nichts und
+    macht die Frage gegenstandslos.
+    """
     if who.user and who.user.must_change_password \
-            and request.url.path not in PW_FREI:
+            and request.scope.get("path", request.url.path) not in PW_FREI:
         raise HTTPException(
             403,
             "Das Anfangspasswort muss zuerst geaendert werden.",
             headers={"X-CO37-Password-Change": "required"},
         )
-    return who
 
 
 # Laengste Downtime, die ueber die Schnittstelle gesetzt werden kann.
@@ -1289,7 +1398,37 @@ def check_hostname(name: str) -> str:
             "Ungueltiger Hostname. Erlaubt sind Buchstaben, Ziffern, Punkt, "
             "Bindestrich und Unterstrich, hoechstens 63 Zeichen.",
         )
+    # Abschliessender Punkt: HOSTNAME_RE laesst ihn durch, weil der Punkt
+    # in der Zeichenklasse steht. 'dc01.' ist damit eine andere
+    # Zeichenkette als 'dc01', bezeichnet aber denselben Host - in der
+    # Freigabeliste standen dann zwei Eintraege, die sich nur um ein
+    # kaum sichtbares Zeichen unterscheiden (F-33 der Pruefung vom
+    # 2026-08-31).
+    if name.endswith("."):
+        raise HTTPException(
+            400, "Ungueltiger Hostname: er darf nicht auf einen Punkt enden.")
     return name
+
+
+def hostname_belegt(session: Session, name: str, ausser_id: Optional[int] = None):
+    """
+    Gibt es diesen Hostnamen schon - unabhaengig von Gross- und
+    Kleinschreibung?
+
+    Bis 0.37.9 war der Vergleich ein blankes SQL-'=' auf einer Spalte
+    ohne COLLATE NOCASE. 'DC01' und 'dc01' galten damit als zwei
+    verschiedene Hosts, obwohl DNS und Windows sie nicht unterscheiden -
+    die Pruefung aus F-23 griff also nur bei bytegleichen Namen, und in
+    der Freigabeliste standen wieder zwei nicht unterscheidbare Eintraege
+    (F-33 der Pruefung vom 2026-08-31).
+
+    Die Schreibweise selbst bleibt erhalten: wer seinen Host 'DC01'
+    nennt, sieht ihn so. Verglichen wird kleingeschrieben.
+    """
+    query = select(Host).where(func.lower(Host.hostname) == name.lower())
+    if ausser_id is not None:
+        query = query.where(Host.id != ausser_id)
+    return session.exec(query).first()
 
 
 # ----------------------------------------------------------------------
@@ -1328,6 +1467,30 @@ def kurz(wert, grenze: int) -> str:
     text = "" if wert is None else str(wert)
     text = "".join(c for c in text if c == " " or c.isprintable())
     return text.strip()[:grenze]
+
+
+# Paketversionen sind laenger als Agent-Versionen: Debian kennt
+# "1:2.4.52-1ubuntu4.6", Windows haengt Build-Nummern an. 120 Zeichen
+# schneiden nichts Echtes ab und begrenzen trotzdem.
+PKG_VERSION_MAX = 120
+
+
+def _groesse(wert):
+    """
+    Paketgroesse aus einer Agent-Meldung: eine nicht-negative Ganzzahl
+    oder nichts.
+
+    Bis 0.37.9 ging der Wert ungeprueft in die Spalte - der Agent
+    bestimmt ihn frei, und ein dict oder eine 200 KB lange Zeichenkette
+    landete genauso darin (F-34).
+    """
+    try:
+        zahl = int(wert)
+    except (TypeError, ValueError):
+        return None
+    # Ueber ein Petabyte ist kein Paket. Nach unten gibt es keine
+    # negativen Groessen.
+    return zahl if 0 <= zahl <= 10 ** 15 else None
 
 
 def kurze_gruende(werte) -> list:
@@ -1373,6 +1536,20 @@ class AgentJobReport(BaseModel):
     error: Optional[str] = None
     result: dict = {}
     reboot_required: Optional[bool] = None
+
+
+# Wieviele Pakete ein Scan hoechstens melden darf (F-34 der Pruefung vom
+# 2026-08-31).
+#
+# Die Liste war unbegrenzt, und anders als beim Heartbeat - der mit
+# kurz() und FELD_MAX sorgfaeltige Schranken hat - griff hier keine
+# einzige. Ein uebernommener Agent konnte damit die gemeinsame
+# SQLite-Datei volllaufen lassen; die Wirkung traf die ganze Anlage, nicht
+# nur seinen eigenen Host, und das ist die Grenze, um die es geht.
+#
+# 5000 ist reichlich: ein frisch aufgesetztes Debian meldet einige
+# hundert, ein lange nicht gepflegter Windows-Server einige Dutzend.
+SCAN_MAX_UPDATES = 5000
 
 
 class AgentScanResult(BaseModel):
@@ -1697,9 +1874,7 @@ def agent_enroll(
         )
 
     hostname = check_hostname(payload.hostname)
-    existing = session.exec(
-        select(Host).where(Host.hostname == hostname)
-    ).first()
+    existing = hostname_belegt(session, hostname)
     if existing and existing.agent_token_hash:
         raise HTTPException(
             409,
@@ -1776,7 +1951,19 @@ def agent_enroll(
         enrolled_from_ip=quelle,
     )
     session.add(host)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # Zwei Anmeldungen desselben Namens zur selben Zeit. Die Pruefung
+        # oben sah beide Male nichts, der eindeutige Index (Schemaversion
+        # 19) laesst nur eine durch. Dieselbe Antwort geben wie die
+        # Pruefung oben - ein 500 waere hier nur die Innensicht.
+        session.rollback()
+        raise HTTPException(
+            409,
+            f"'{hostname}' ist bereits angemeldet. Fuer eine "
+            f"Neuanmeldung den Host zuerst im Dashboard entfernen.",
+        )
     note_enroll(quelle)
 
     return {
@@ -1815,12 +2002,13 @@ def agent_heartbeat(
     # Freigabeliste standen dann zwei nicht unterscheidbare 'dc01', und die
     # Freigabe durch einen Menschen - nach F-08 der GESAMTE Schutz der
     # offenen Anmelderoute - wurde zur Muenzwurf-Frage.
+    #
+    # Seit 0.37.10 vergleicht hostname_belegt() ohne Ruecksicht auf Gross-
+    # und Kleinschreibung (F-33) - 'DC01' neben 'dc01' war bis dahin
+    # erlaubt und in der Liste genauso wenig zu unterscheiden.
     neuer_name = check_hostname(payload.hostname)
     if neuer_name != host.hostname:
-        belegt = session.exec(
-            select(Host).where(Host.hostname == neuer_name,
-                               Host.id != host.id)
-        ).first()
+        belegt = hostname_belegt(session, neuer_name, ausser_id=host.id)
         if belegt:
             # Kein 4xx: ein Heartbeat, der scheitert, nimmt den Host aus dem
             # Betrieb. Der alte Name bleibt einfach stehen, und im Protokoll
@@ -1829,9 +2017,30 @@ def agent_heartbeat(
                   f"nach {kurz(neuer_name, FELD_MAX)} - Name ist vergeben",
                   request)
         else:
-            audit(session, f"agent:{host.hostname}", "host.rename",
-                  f"nach {neuer_name}", request)
-            host.hostname = neuer_name
+            # Der eindeutige Index (Schemaversion 19) kann hier zuschlagen,
+            # wenn zwei Agenten gleichzeitig auf denselben Namen wechseln -
+            # die Pruefung oben und das Schreiben sind nicht dasselbe
+            # Ereignis. Ohne Sicherungspunkt kaeme der Fehler erst beim
+            # commit() weit unten an und der ganze Heartbeat endete in
+            # einem 500.
+            #
+            # Mit begin_nested() faellt nur die Umbenennung zurueck. Der
+            # Host behaelt seinen alten Namen, der Heartbeat laeuft
+            # normal weiter, und im Protokoll steht der Grund - genau wie
+            # im Fall oben, nur dass der Name erst im Rennen belegt wurde.
+            alt = host.hostname
+            try:
+                with session.begin_nested():
+                    host.hostname = neuer_name
+                    session.flush()
+            except IntegrityError:
+                host.hostname = alt
+                audit(session, f"agent:{alt}", "host.rename.denied",
+                      f"nach {kurz(neuer_name, FELD_MAX)} - Name wurde "
+                      f"zeitgleich vergeben", request)
+            else:
+                audit(session, f"agent:{alt}", "host.rename",
+                      f"nach {neuer_name}", request)
     host.os_type = payload.os_type
     host.os_version = kurz(payload.os_version, FELD_MAX)
     host.ip_address = kurz(payload.ip_address, IP_MAX)
@@ -1982,11 +2191,24 @@ def agent_heartbeat(
     # .replace(tzinfo=None): der Vergleich mit job.started_at warf dann den
     # TypeError, fuer den utctime.py gerade gebaut ist - beim Agent kam er
     # als 500 an, und der Heartbeat schlug dauerhaft fehl.
-    booted_at = (
-        from_timestamp(payload.boot_time)
-        if payload.boot_time and payload.boot_time > 0
-        else None
-    )
+    # Plausibilitaetsband um boot_time (F-41 der Pruefung vom 2026-08-31).
+    #
+    # from_timestamp() ist datetime.fromtimestamp() und wirft bei grossen
+    # Werten - 1e18 gibt OSError, 1e30 OverflowError. Das fing niemand ab:
+    # ein Agent, der einmal Unsinn meldet, bekam bei jedem Heartbeat einen
+    # 500 und fiel damit aus dem Betrieb. Ein Wert weit in der Zukunft
+    # bricht ausserdem ohne Fehler alle laufenden Auftraege des Hosts ab
+    # (siehe die Schleife unten).
+    #
+    # Ausserhalb des Bandes wird der Wert verworfen, nicht der Heartbeat:
+    # boot_time ist eine Hilfsangabe, kein Grund, einen Host stillzulegen.
+    booted_at = None
+    if payload.boot_time and payload.boot_time > 0:
+        jetzt = now.timestamp()
+        # Nach unten das Jahr 2000, nach oben eine Stunde Vorlauf fuer
+        # Uhren, die nicht genau gehen.
+        if 946684800 < payload.boot_time < jetzt + 3600:
+            booted_at = from_timestamp(payload.boot_time)
 
     for job in session.exec(
         select(Job).where(
@@ -2100,22 +2322,33 @@ def agent_scan_result(
 
     security = 0
     will_need_reboot = False
-    for upd in payload.updates:
+
+    # Kuerzen statt abweisen, wie beim Heartbeat: ein 422 liesse den
+    # Auftrag scheitern, und der Scan waere fuer diesen Host dauerhaft
+    # kaputt, sobald einmal zu viel gemeldet wird. updates_available
+    # zaehlt danach das Gekuerzte - sonst zeigte die Uebersicht eine Zahl,
+    # zu der die Liste darunter nicht passt.
+    gemeldet = payload.updates[:SCAN_MAX_UPDATES]
+
+    for upd in gemeldet:
         pkg = UpdatePackage(
             host_id=host.id,
             package_id=str(upd.get("id", ""))[:255],
             title=str(upd.get("title", ""))[:500],
-            current_version=upd.get("current_version"),
-            new_version=upd.get("new_version"),
+            # Bis 0.37.9 ungekuerzt und ungeprueft uebernommen (F-34).
+            current_version=kurz(upd.get("current_version"),
+                                 PKG_VERSION_MAX) or None,
+            new_version=kurz(upd.get("new_version"),
+                             PKG_VERSION_MAX) or None,
             is_security=bool(upd.get("is_security", False)),
             requires_reboot=bool(upd.get("requires_reboot", False)),
-            size_bytes=upd.get("size_bytes"),
+            size_bytes=_groesse(upd.get("size_bytes")),
         )
         security += int(pkg.is_security)
         will_need_reboot = will_need_reboot or pkg.requires_reboot
         session.add(pkg)
 
-    host.updates_available = len(payload.updates)
+    host.updates_available = len(gemeldet)
     host.security_updates = security
     host.reboot_required = payload.reboot_required
     host.reboot_reasons = kurze_gruende(payload.reboot_reasons)
@@ -2127,7 +2360,10 @@ def agent_scan_result(
     host.last_scan = utcnow()
     session.add(host)
     session.commit()
-    return {"ok": True, "stored": len(payload.updates)}
+    # 'truncated' sagt dem Agenten, dass nicht alles angekommen ist -
+    # sonst sieht er nur eine Zahl, die nicht zu seiner passt.
+    return {"ok": True, "stored": len(gemeldet),
+            "truncated": len(payload.updates) > len(gemeldet)}
 
 
 class AgentJobLog(BaseModel):
@@ -2590,7 +2826,40 @@ def advance_agent_rollout(session: Session):
             session.commit()
             return
 
-        if pilot.agent_version == version:
+        started = _setting(session, "agent_roll_started")
+        begin = utcnow()
+        if started:
+            try:
+                begin = datetime.fromisoformat(started)
+            except ValueError:
+                pass
+
+        # Der Pilot gilt erst als erfolgreich, wenn ZWEI Dinge stimmen:
+        # er meldet die neue Fassung, UND es gibt einen in diesem
+        # Durchlauf abgeschlossenen selfupdate-Auftrag (F-43 der Pruefung
+        # vom 2026-08-31).
+        #
+        # Bis 0.37.9 genuegte die gemeldete Fassung. Die setzt der Agent
+        # im Heartbeat frei - ein Host, dessen Aktualisierung schief ging
+        # und der danach Unsinn meldet, gab damit die ganze Flotte frei.
+        # Genau das soll die Staffelung verhindern: "damit trifft ein
+        # fehlerhaftes Rollout zunaechst nur ein System".
+        #
+        # Was das NICHT leistet: gegen einen uebernommenen Piloten hilft
+        # es nicht. Der bestimmt beide Angaben - die gemeldete Fassung
+        # und den Bericht, aus dem der Auftragszustand entsteht.
+        # Ausgerollt wird ohnehin nur signierter Servercode, es geht also
+        # um Verfuegbarkeit, nicht um Codeeinschleusung.
+        fertig = session.exec(
+            select(Job).where(
+                Job.host_id == pilot.id,
+                Job.job_type == JobType.selfupdate,
+                Job.state == JobState.done,
+                Job.created_at >= begin,
+            ).order_by(Job.created_at.desc())
+        ).first()
+
+        if pilot.agent_version == version and fertig:
             targets = [h for h in stale_agents(session, version) if h.id != pilot.id]
             count = sum(_queue_selfupdate(session, h) for h in targets)
             _set(session, "agent_roll_state", "rest" if count else "done")
@@ -2600,14 +2869,6 @@ def advance_agent_rollout(session: Session):
                  f"Pilot {pilot.hostname} erfolgreich, keine weiteren offen")
             session.commit()
             return
-
-        started = _setting(session, "agent_roll_started")
-        begin = utcnow()
-        if started:
-            try:
-                begin = datetime.fromisoformat(started)
-            except ValueError:
-                pass
 
         # Nur Fehlschlaege aus DIESEM Durchlauf zaehlen. Ohne den Zeitbezug
         # wuerde ein alter fehlgeschlagener Auftrag jedes spaetere Ausrollen
@@ -3057,7 +3318,24 @@ def create_job(
     # setzt und damit Wartungsfenster UND Neustartrichtlinie uebergeht.
     #
     # Scan und Patch bleiben fuer jeden Angemeldeten - das ist der Alltag.
-    if payload.job_type == JobType.reboot and not who.may_reboot:
+    #
+    # Geprueft wird die WIRKUNG, nicht die Bezeichnung (F-30 der Pruefung
+    # vom 2026-08-31). Bis 0.37.9 hing die Pruefung an job_type == reboot.
+    # Ein Patch-Auftrag mit reboot_after setzt weiter unten aber genau
+    # dieselben Flaggen - reboot_if_needed und manual - und startet den
+    # Host damit ebenso neu, an Wartungsfenster und Richtlinie vorbei.
+    # Die Rechteschranke aus 0.37.7 stand also nur vor einer von zwei
+    # Tueren. Gefunden wurde es nicht, weil reboot_after weder in der
+    # Oberflaeche noch in einer Testreihe vorkam.
+    #
+    # Wer hier eine dritte Tuer einbaut, gehoert in diese Liste. Der Test
+    # dazu steht in roles-test.py und zaehlt die Wege ab, nicht die
+    # Auftragsarten.
+    will_neustarten = (
+        payload.job_type == JobType.reboot
+        or (payload.job_type == JobType.patch and payload.reboot_after)
+    )
+    if will_neustarten and not who.may_reboot:
         raise HTTPException(
             403,
             "Dieses Konto darf keine Neustarts ausloesen. Ein Administrator "
@@ -3140,7 +3418,20 @@ def create_job(
         if scheduled <= utcnow() - timedelta(minutes=1):
             raise HTTPException(400, "Der Zeitpunkt liegt in der Vergangenheit")
 
+    # Dieselbe Obergrenze wie in set_downtime (F-31 der Pruefung vom
+    # 2026-08-31). Sie stand bis 0.37.9 nur dort, und agent_pre_reboot
+    # reicht den Wert von hier unveraendert an Checkmk weiter - ueber
+    # diesen Weg liessen sich die neun Jahre also doch setzen, und noch
+    # dazu ohne Eintrag 'downtime.set' im Pruefprotokoll.
+    #
+    # Abweisen und nicht stillschweigend kappen: ein gekappter Wert sieht
+    # aus wie ein angenommener.
     if payload.downtime_minutes is not None:
+        if payload.downtime_minutes > DOWNTIME_MAX_MINUTES:
+            raise HTTPException(
+                400,
+                f"Downtime ist auf {DOWNTIME_MAX_MINUTES // (24 * 60)} Tage "
+                f"begrenzt.")
         params["downtime_minutes"] = max(1, payload.downtime_minutes)
 
     # Verfallszeitpunkt nur fuer Neustarts. Ein Scan oder Patch schadet auch
@@ -3234,23 +3525,47 @@ def last_jobs(session: Session = Depends(get_session)):
     fehlgeschlagen markiert wird, ohne den Zeitstempel zu setzen) - dann
     created_at als Behelf, sonst faellt der Auftrag beim Sortieren ans Ende
     und wuerde nie als der juengste erkannt.
+
+    Sortiert wird in SQL und nur so weit gelesen, bis jeder Host einmal
+    vorkommt (F-38 der Pruefung vom 2026-08-31). Bis 0.37.9 stand hier
+    ein select(Job) OHNE limit: jeder Aufruf las die vollstaendige
+    Auftragstabelle samt der Spalten log und result in den Speicher und
+    sortierte in Python. Die Oberflaeche fragt diese Route laufend ab,
+    und die Tabelle waechst mit der Laufzeit - list_jobs (le=500) und
+    list_audit (le=1000) machen es richtig, hier fehlte es.
     """
-    jobs = session.exec(
-        select(Job).where(Job.state.in_([JobState.done, JobState.failed]))
+    # Naive UTC-Zeitstempel in fester Breite: die Sortierung in SQLite
+    # stimmt mit der zeitlichen ueberein (siehe UTCDateTime).
+    zeitpunkt = func.coalesce(Job.finished_at, Job.created_at)
+
+    # Grosszuegig, aber endlich. Es geht um den juengsten Auftrag je Host;
+    # 50 je Host reichen auch dann, wenn ein einzelner Host viel Betrieb
+    # hatte, und die Schleife bricht ohnehin ab, sobald alle Hosts drin
+    # sind.
+    hosts = session.exec(select(func.count(Host.id))).one()
+    grenze = max(500, (hosts or 0) * 50)
+
+    zeilen = session.exec(
+        select(Job.host_id, Job.job_type, Job.state, zeitpunkt)
+        .where(Job.state.in_([JobState.done, JobState.failed]))
+        .order_by(zeitpunkt.desc())
+        .limit(grenze)
     ).all()
-    jobs.sort(key=lambda j: j.finished_at or j.created_at, reverse=True)
+
     gesehen = set()
     ergebnis = []
-    for j in jobs:
-        if j.host_id in gesehen:
+    for host_id, job_type, state, wann in zeilen:
+        if host_id in gesehen:
             continue
-        gesehen.add(j.host_id)
+        gesehen.add(host_id)
         ergebnis.append({
-            "host_id": j.host_id,
-            "job_type": j.job_type.value,
-            "state": j.state.value,
-            "finished_at": ensure_utc(j.finished_at or j.created_at),
+            "host_id": host_id,
+            "job_type": job_type.value,
+            "state": state.value,
+            "finished_at": ensure_utc(wann),
         })
+        if hosts and len(gesehen) >= hosts:
+            break
     return ergebnis
 
 
@@ -3561,7 +3876,8 @@ def list_packages():
     want = agent_source_version()
     result = {"agent_version": want, "linux": None, "windows": None, "mismatch": []}
 
-    if not PKG_DIR.is_dir():
+    pkg_dir = paketverzeichnis()
+    if not pkg_dir.is_dir():
         return result
 
     def info(f):
@@ -3576,7 +3892,7 @@ def list_packages():
         }
 
     for suffix, key in ((".deb", "linux"), (".msi", "windows")):
-        found = [f for f in PKG_DIR.glob(f"co37-agent*{suffix}") if f.is_file()]
+        found = [f for f in pkg_dir.glob(f"co37-agent*{suffix}") if f.is_file()]
         if not found:
             continue
         # Das zuletzt gebaute gewinnt - unabhaengig von der Benennung
@@ -3602,9 +3918,7 @@ def list_packages():
 # update_watcher.py - bis 0.37.5 lag beides in einem Verzeichnis, das co37
 # gehoert, und war damit eine Rechteausweitung nach root (F-18).
 BUILD_REQUEST = DATA_DIR / "update" / "build_request.json"
-# Dasselbe Verzeichnis wie BASE_DIR weiter unten; hier eigenstaendig
-# gebildet, weil BASE_DIR erst spaeter definiert wird.
-STATE_DIR = Path(__file__).resolve().parent.parent / "state"
+# STATE_DIR steht ganz oben, bei DATA_DIR.
 BUILD_STATUS = STATE_DIR / "build_status.json"
 # Wo der Stand bis 0.37.5 lag. Nur noch zum Lesen, fuer die eine Runde,
 # in der ein alter Watcher noch dorthin geschrieben hat.
@@ -3692,11 +4006,17 @@ def download_package(name: str, request: Request,
     """
     if not consume_install_token(x_install_token, session, request):
         # Kein gueltiges Token: dann muss es eine Anmeldung sein.
-        require_admin(authenticate(x_session, session, request))
+        #
+        # Der Passwortzwang gilt hier genauso (F-39). Diese Route stellt
+        # die Anmeldung selbst fest, statt an require_login zu haengen -
+        # sie war deshalb die einzige, die daran vorbeilief.
+        wer = authenticate(x_session, session, request)
+        pw_zwang_pruefen(wer, request)
+        require_admin(wer)
 
     if "/" in name or "\\" in name or name.startswith("."):
         raise HTTPException(400, "Ungueltiger Name")
-    path = PKG_DIR / name
+    path = paketverzeichnis() / name
     if not path.is_file():
         raise HTTPException(404, "Paket nicht vorhanden. Mit build_packages.sh erzeugen.")
     return FileResponse(path, filename=name, media_type="application/octet-stream")
@@ -3811,7 +4131,8 @@ def diagnostics():
 
     # Pakete
     want = agent_source_version()
-    pkgs = sorted(PKG_DIR.glob("co37-agent*")) if PKG_DIR.is_dir() else []
+    _pd = paketverzeichnis()
+    pkgs = sorted(_pd.glob("co37-agent*")) if _pd.is_dir() else []
     names = [p.name for p in pkgs]
     has_deb = any(f"_{want}_" in n for n in names)
     has_msi = any(n.endswith(".msi") and want in n for n in names)
@@ -3950,17 +4271,38 @@ def login(payload: LoginIn, request: Request,
             headers={"Retry-After": str(wait)},
         )
 
+    # Den Versuch zaehlen, BEVOR geprueft wird (F-36 der Pruefung vom
+    # 2026-08-31).
+    #
+    # Bis 0.37.9 stand note_login_failure() erst hinter der
+    # Passwortpruefung. Der Zaehler kannte damit nur ABGESCHLOSSENE
+    # Versuche: gleichzeitig eintreffende Anfragen passierten die Schranke
+    # oben alle, bevor eine von ihnen gezaehlt war. Fuenf gleichzeitige
+    # Versuche kosteten also keinen einzigen Zaehlschritt, und dazwischen
+    # liegen zwei scrypt-Aufrufe zu je 16 MiB in einer synchronen Route -
+    # die belegt einen Arbeiter aus dem Threadpool, aus dem auch die
+    # Agent-Routen bedient werden. Der Kommentar oben begruendet
+    # ausfuehrlich, warum hier nicht verzoegert wird; derselbe Gedanke
+    # gilt fuer den unbegrenzten Andrang vor dem Zaehler.
+    #
+    # Eine gelungene Anmeldung loescht den Zaehler unten wieder, wer sein
+    # Passwort kennt merkt also nichts davon.
+    versuche = note_login_failure(ip)
+
     user = session.exec(
         select(User).where(User.username == payload.username)
     ).first()
 
     # Auch bei unbekanntem Benutzer das Passwort pruefen, damit sich aus
-    # der Antwortzeit nicht ablesen laesst, welche Namen es gibt.
-    stored = user.password_hash if user else hash_password("x")
+    # der Antwortzeit nicht ablesen laesst, welche Namen es gibt. Der
+    # Vergleichs-Hash steht fest und wird NICHT hier gebildet - sonst
+    # laeuft scrypt zweimal und die Antwortzeit verraet gerade das, was
+    # sie verbergen soll (F-37, siehe BLIND_HASH).
+    stored = user.password_hash if user else BLIND_HASH
     ok = verify_password(payload.password, stored)
 
     if not user or not ok or user.disabled:
-        fails = note_login_failure(ip)
+        fails = versuche
         audit(session, payload.username or "?", "login.failed",
               "Benutzer unbekannt, gesperrt oder Passwort falsch", request)
         # Nur beim Ueberschreiten einmal vermerken, nicht bei jedem
@@ -4534,11 +4876,26 @@ def health(request: Request, x_session: str = Header(default=""),
     """
     ok, missing = migrate.verify(engine)
     if not ok:
-        raise HTTPException(
-            503,
-            {"status": "schema_mismatch", "missing": missing,
-             "hint": "Datenbank passt nicht zum Programmstand."},
-        )
+        # Die Liste der fehlenden Tabellen und Spalten ist eine
+        # Beschreibung des Datenmodells und ging bis 0.37.9 an jeden
+        # Unangemeldeten (F-42 der Pruefung vom 2026-08-31). Der
+        # Fehlerpfad lief an der Schranke vorbei, die _darf_versionen_-
+        # sehen() fuer den Normalfall zieht.
+        #
+        # Der Watcher fragt ueber Loopback und bekommt sie weiterhin - er
+        # braucht sie, um einen Schemabruch im Protokoll zu benennen.
+        inhalt = {"status": "schema_mismatch",
+                  "hint": "Datenbank passt nicht zum Programmstand."}
+        try:
+            # Die Sitzungspruefung liest die Datenbank, und die ist hier
+            # gerade das Problem. Scheitert sie, bleibt die Liste weg -
+            # das ist die sichere Richtung.
+            darf = _darf_versionen_sehen(request, x_session, session)
+        except Exception:  # noqa: BLE001
+            darf = is_loopback(request)
+        if darf:
+            inhalt["missing"] = missing
+        raise HTTPException(503, inhalt)
     # Echte Abfrage, damit auch Lesefehler auffallen
     session.exec(select(Host).limit(1)).first()
     antwort = {

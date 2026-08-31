@@ -24,7 +24,19 @@ from pathlib import Path
 HIER = Path(__file__).resolve().parent
 
 # Verzeichnisse und Dateien, die ins Paket gehoeren.
-VERZEICHNISSE = ["backend", "frontend", "agent", "packaging", "tests", "tools"]
+# tools/ ist NICHT dabei (F-45 der Pruefung vom 2026-08-31).
+#
+# make-license.py sagt in seiner zweiten Zeile selbst: "Gehoert NICHT auf
+# den Server und nicht in das Auslieferungspaket" - und wurde trotzdem
+# mitgeliefert, hier und in build_release.sh. Kein Schluesselmaterial
+# betroffen (pruefe_keine_geheimnisse haelt *.pem heraus), aber
+# sign-release.py --init lag damit auf jedem Kundensystem, und eine
+# falsche Aussage im Quelltext ist das, woran man sich spaeter orientiert.
+#
+# Der Watcher fasst tools/ ohnehin nicht an: MANAGED_DIRS kennt nur
+# backend, frontend, agent und packaging. Ein bereits installiertes
+# tools/ bleibt also stehen und muss von Hand weg.
+VERZEICHNISSE = ["backend", "frontend", "agent", "packaging", "tests"]
 DATEIEN = [
     "update_watcher.py", "setup.sh", "build_packages.sh",
     "build_release.sh", "build_release.py", "migrate_to_co37.sh",

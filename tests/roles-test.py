@@ -393,6 +393,32 @@ if hid:
     check("ohne Recht: Patch erlaubt", code == 200, code)
     code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "reboot"}, hdr=usr)
     check("ohne Recht: Neustart abgewiesen", code == 403, code)
+
+    # ------------------------------------------------------------------
+    # Der zweite Weg zum Neustart (F-30 der Pruefung vom 2026-08-31)
+    # ------------------------------------------------------------------
+    # Bis 0.37.9 hing die Rechtepruefung an job_type == reboot. Ein
+    # Patch-Auftrag mit reboot_after setzt aber genau dieselben Flaggen -
+    # reboot_if_needed und manual - und manual uebergeht in
+    # agent_pre_reboot() Wartungsfenster UND Neustartrichtlinie. Ein
+    # beliebiges Konto der Rolle 'user' konnte damit einen
+    # Produktivserver mitten am Tag neu starten.
+    #
+    # Die Zeile "ohne Recht: Patch erlaubt" drei Zeilen weiter oben stand
+    # schon da. Genau daneben war die Luecke: geprueft wurde 'Patch', und
+    # 'Patch mit Neustart' ist etwas anderes. reboot_after kam weder in
+    # der Oberflaeche noch in einer Testreihe vor.
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                   {"job_type": "patch", "reboot_after": True}, hdr=usr)
+    check("ohne Recht: Patch MIT Neustart abgewiesen", code == 403, code)
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                   {"job_type": "patch", "reboot_after": True,
+                    "set_downtime": False}, hdr=usr)
+    check("ohne Recht: auch ohne Downtime abgewiesen", code == 403, code)
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                   {"job_type": "patch", "reboot_after": False}, hdr=usr)
+    check("ohne Recht: Patch ohne Neustart weiterhin erlaubt",
+          code == 200, code)
     # Die Selbstaktualisierung ist keine Bedienhandlung: sie laeuft
     # automatisch beim Heartbeat und von Hand ueber die Einstellungen,
     # beide Wege mit Staffelung und Doppel-Auftrag-Sperre.
@@ -432,6 +458,26 @@ if hid:
         code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "reboot"},
                        hdr=usr2)
         check("mit Recht: Neustart erlaubt", code == 200, code)
+        code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                       {"job_type": "patch", "reboot_after": True},
+                       hdr=usr2)
+        check("mit Recht: Patch mit Neustart erlaubt", code == 200, code)
+
+        # ------------------------------------------- Downtime-Obergrenze
+        # DOWNTIME_MAX_MINUTES wurde bis 0.37.9 nur in set_downtime
+        # durchgesetzt. create_job() kappte nur nach unten, und
+        # agent_pre_reboot() reicht den Wert unveraendert an Checkmk -
+        # ueber diesen Weg liessen sich die neun Jahre also doch setzen,
+        # von einem Konto ohne Administratorrechte und ohne Eintrag
+        # 'downtime.set' im Pruefprotokoll (F-31).
+        code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                       {"job_type": "patch", "reboot_after": True,
+                        "downtime_minutes": 5000000}, hdr=usr2)
+        check("Downtime ueber der Woche wird abgewiesen", code == 400, code)
+        code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                       {"job_type": "patch", "reboot_after": True,
+                        "downtime_minutes": 7 * 24 * 60}, hdr=usr2)
+        check("genau eine Woche ist noch erlaubt", code == 200, code)
 
         code, _ = call(f"/api/v1/users/{tester['id']}/rechte",
                        {"may_reboot": False}, method="PATCH", hdr=adm)
@@ -645,6 +691,126 @@ check("Anmeldung wird nach mehreren Fehlversuchen gedrosselt", code == 429, code
 code, _ = call("/api/v1/login", {"username": "admin", "password": ADMIN_PW})
 check("auch richtige Zugangsdaten sind waehrend der Sperre abgewiesen",
       code == 429, code)
+
+# ======================================================================
+# Die Rechteschranke zaehlt Wege ab, nicht Auftragsarten
+# ======================================================================
+# Ueber den Syntaxbaum und nicht per Zeichenkettensuche: die Begruendung
+# steht hier gleich mehrfach im Kommentar, eine Suche nach 'reboot_after'
+# faende sie dort und bliebe gruen, auch wenn die Pruefung selbst wieder
+# an job_type haengt. Dieselbe Falle wie bei F-27, wo eine Suche den
+# auskommentierten Aufruf fand.
+#
+# Die Regel dahinter (F-30): wer eine Rechtepruefung an eine BEZEICHNUNG
+# haengt, muss alle Wege zu dieser WIRKUNG aufzaehlen. Kommt ein dritter
+# Weg dazu, faellt diese Pruefung um.
+print("--- Rechteschranke deckt alle Wege zum Neustart ---")
+import ast  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+quelle = (Path(__file__).resolve().parent.parent
+          / "backend" / "main.py").read_text(encoding="utf-8")
+baum = ast.parse(quelle)
+create_job = next((k for k in ast.walk(baum)
+                   if isinstance(k, ast.FunctionDef) and k.name == "create_job"),
+                  None)
+check("create_job() gefunden", create_job is not None)
+
+if create_job:
+    # Der Ausdruck, der ueber may_reboot entscheidet: das 'if', dessen
+    # Rumpf may_reboot nennt.
+    wache = None
+    for knoten in ast.walk(create_job):
+        if isinstance(knoten, ast.If) and "may_reboot" in ast.dump(knoten.test):
+            wache = knoten
+            break
+    check("die Rechtepruefung haengt an einem if mit may_reboot",
+          wache is not None)
+
+    if wache:
+        # Alles, was in die Bedingung einfliesst - auch ueber eine
+        # Zwischenvariable wie 'will_neustarten'.
+        namen = set()
+        for knoten in ast.walk(wache.test):
+            if isinstance(knoten, ast.Name):
+                namen.add(knoten.id)
+            if isinstance(knoten, ast.Attribute):
+                namen.add(knoten.attr)
+
+        # Zwischenvariablen aufloesen: deren Zuweisung mit einsammeln.
+        for knoten in ast.walk(create_job):
+            if isinstance(knoten, ast.Assign):
+                ziele = {z.id for z in knoten.targets if isinstance(z, ast.Name)}
+                if ziele & namen:
+                    for tief in ast.walk(knoten.value):
+                        if isinstance(tief, ast.Name):
+                            namen.add(tief.id)
+                        if isinstance(tief, ast.Attribute):
+                            namen.add(tief.attr)
+
+        check("die Bedingung nennt reboot_after", "reboot_after" in namen, namen)
+        check("die Bedingung nennt weiterhin die Auftragsart",
+              "job_type" in namen, namen)
+
+
+# ======================================================================
+# Der Passwortzwang gilt auch fuer die Paketroute (F-39)
+# ======================================================================
+# must_change_password wird in require_login() durchgesetzt. Die
+# Paketroute stellt die Anmeldung mit authenticate() selbst fest und lief
+# damit als einzige daran vorbei. Wirkung gering - die Pakete enthalten
+# kein Geheimnis -, aber die Aussage "jede Route" stimmte nicht.
+print("--- Der Passwortzwang hat kein Loch mehr (F-39) ---")
+_dl = next((k for k in ast.walk(baum) if isinstance(k, ast.FunctionDef)
+            and k.name == "download_package"), None)
+check("download_package() gefunden", _dl is not None)
+if _dl:
+    _rufe = {k.func.id for k in ast.walk(_dl)
+             if isinstance(k, ast.Call) and isinstance(k.func, ast.Name)}
+    check("die Paketroute setzt den Passwortzwang durch",
+          "pw_zwang_pruefen" in _rufe, sorted(_rufe))
+
+# Jede Route, die authenticate() selbst aufruft, muss das tun. Diese
+# Pruefung faengt auch die naechste solche Route ab.
+_ohne = []
+for _fn in ast.walk(baum):
+    if not isinstance(_fn, ast.FunctionDef):
+        continue
+    if _fn.name in ("require_login", "require_admin", "pw_zwang_pruefen",
+                    "authenticate", "_darf_versionen_sehen"):
+        continue
+    _r = {k.func.id for k in ast.walk(_fn)
+          if isinstance(k, ast.Call) and isinstance(k.func, ast.Name)}
+    if "authenticate" in _r and "pw_zwang_pruefen" not in _r:
+        _ohne.append(_fn.name)
+check("keine Route stellt die Anmeldung ohne den Passwortzwang fest",
+      not _ohne, _ohne)
+
+# ======================================================================
+# /api/v1/jobs/last laedt nicht die ganze Tabelle (F-38)
+# ======================================================================
+# Die Oberflaeche fragt die Route laufend ab. Bis 0.37.9 stand dort ein
+# select(Job) ohne limit: jeder Aufruf las alle jemals abgeschlossenen
+# Auftraege samt der Spalten log und result in den Speicher und sortierte
+# in Python. list_jobs (le=500) und list_audit (le=1000) machen es
+# richtig, hier fehlte es.
+print("--- jobs/last hat eine Obergrenze (F-38) ---")
+_lj = next((k for k in ast.walk(baum) if isinstance(k, ast.FunctionDef)
+            and k.name == "last_jobs"), None)
+check("last_jobs() gefunden", _lj is not None)
+if _lj:
+    _methoden = {k.func.attr for k in ast.walk(_lj)
+                 if isinstance(k, ast.Call) and isinstance(k.func, ast.Attribute)}
+    check("die Abfrage ist begrenzt", "limit" in _methoden, sorted(_methoden))
+    check("sortiert wird in SQL, nicht in Python",
+          "order_by" in _methoden and "sort" not in _methoden,
+          sorted(_methoden))
+    # Und sie liefert weiterhin, was sie soll.
+    code, letzte = call("/api/v1/jobs/last", hdr=adm)
+    check("die Route antwortet weiterhin", code == 200, code)
+    check("je Host hoechstens ein Eintrag",
+          isinstance(letzte, list)
+          and len({e["host_id"] for e in letzte}) == len(letzte), letzte)
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

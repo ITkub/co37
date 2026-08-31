@@ -25,7 +25,25 @@ if [ -z "$VERSION" ]; then
   echo "!!! AGENT_VERSION konnte nicht aus agent/agent.py gelesen werden."
   exit 1
 fi
-OUT="${CO37_DATA:-$(pwd)/data}/packages"
+# Ausgang, nicht Eingang (F-29 der Pruefung vom 2026-08-31). Dieses
+# Skript laeuft als root - der Watcher startet es. Lag das Ziel wie bis
+# 0.37.9 unter data/, gehoerte es co37, und open(ziel,"wb") in
+# build_deb.py folgte einer dort abgelegten Verknuepfung. Damit konnte
+# co37 root dazu bringen, eine beliebige Datei zu ueberschreiben - ohne
+# Paket, ohne Signatur, nur mit einer Datei im Eingang.
+#
+# CO37_STATE ueberschreibt das Ziel fuer Testlaeufe; ohne die Variable
+# liegt es neben diesem Skript.
+OUT="${CO37_STATE:-$(pwd)/state}/packages"
+
+# Zuerst pruefen, dann anlegen. Ein Verzeichnis, das eine Verknuepfung
+# IST, waere derselbe Hebel eine Ebene hoeher, und mkdir -p laeuft darauf
+# ohne Fehler durch - bei einer ins Leere zeigenden Verknuepfung legt es
+# sogar das Ziel an.
+if [ -L "$OUT" ]; then
+  echo "!!! $OUT ist eine Verknuepfung. Abbruch."
+  exit 1
+fi
 mkdir -p "$OUT"
 
 # Aeltere Agent-Pakete entfernen. Sie enthalten eine alte agent.py und

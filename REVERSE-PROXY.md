@@ -71,11 +71,18 @@ Nötig ist, dass der Proxy diese Kopfzeilen setzt:
 | Kopfzeile | Wert |
 |---|---|
 | `X-Forwarded-For` | Adresse des ursprünglichen Aufrufers, **am Ende angehängt** |
-| `X-Forwarded-Proto` | `https` |
+| `X-Forwarded-Proto` | `https` — **gesetzt, nicht durchgereicht** |
 | `Host` | der DNS-Name, unverändert |
 
 Die meisten Proxys tun das von sich aus. Nach dem Einrichten prüfen —
 siehe Abschnitt 6.
+
+**Beide Kopfzeilen müssen wirklich vom Proxy kommen.** Ein Proxy, der
+`X-Forwarded-Proto` gar nicht setzt, reicht durch, was der Aufrufer
+geschickt hat — und der behauptet dann `https`, obwohl die Verbindung
+unverschlüsselt ist. Daran hängt der HTTPS-Zwang. Das lässt sich in CO-37
+nicht auffangen: ohne eigenen Wert des Proxys steht in der Kopfzeile
+nichts als die Behauptung des Aufrufers.
 
 ### Warum „am Ende angehängt" hier steht
 
@@ -98,6 +105,14 @@ dieselbe Erfindung.
 Beide Verhaltensweisen funktionieren jetzt. Wer die Wahl hat, lässt den
 Proxy anhängen (`$proxy_add_x_forwarded_for`) — dann bleibt die Kette
 nachvollziehbar.
+
+Für `X-Forwarded-Proto` gilt seit 0.37.10 dasselbe: auch dort wird **von
+rechts** gelesen. Die Korrektur von 0.37.7 hatte diese Schwesterfunktion
+nicht mitgenommen — bis dahin gewann bei einer angehängten Kopfzeile der
+vom Aufrufer geschickte Wert, und `https` ließ sich damit behaupten
+(F-32 der Prüfung vom 31.08.2026). Anders als bei `X-Forwarded-For` gibt
+es bei nginx keine übliche anhängende Schreibweise; der praktisch
+wichtigere Fall ist der Proxy, der die Kopfzeile schlicht vergisst.
 
 **Nicht nötig:** WebSocket-Unterstützung. CO-37 fragt zyklisch ab.
 

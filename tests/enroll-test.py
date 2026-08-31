@@ -220,5 +220,55 @@ check("enrolled_from_ip wird nirgends mehr aus request.client gefuellt",
       and "enrolled_from_ip = request.client" not in quelle)
 
 
+
+# ======================================================================
+# Hostnamen sind eindeutig, auch ueber die Schreibweise (F-33)
+# ======================================================================
+# F-23 hat die Umbenennung per Heartbeat auf einen belegten Namen
+# geschlossen - aber nur bytegleich. Der Vergleich war ein SQL-'=' auf
+# einer Spalte ohne COLLATE NOCASE: 'DC01' und 'dc01' galten als zwei
+# verschiedene Hosts, obwohl DNS und Windows sie nicht unterscheiden. In
+# der Freigabeliste standen damit wieder zwei nicht unterscheidbare
+# Eintraege, und die menschliche Freigabe - nach F-08 der GESAMTE Schutz
+# der offenen Anmelderoute - war wieder ein Muenzwurf.
+check("der Vergleich laeuft ueber hostname_belegt()",
+      "def hostname_belegt" in quelle)
+check("hostname_belegt vergleicht kleingeschrieben",
+      "func.lower(Host.hostname)" in quelle)
+check("kein blanker Vergleich Host.hostname == mehr",
+      "Host.hostname == " not in quelle)
+check("ein abschliessender Punkt wird abgewiesen",
+      'name.endswith(".")' in quelle)
+
+# Die Datenbank faengt das Rennen ab - die Pruefung in der Route allein
+# kann es nicht: zwischen dem Nachsehen und dem Schreiben liegt kein
+# Schloss, und beide Routen laufen nebenlaeufig im Threadpool.
+mig = (WURZEL / "backend" / "migrate.py").read_text(encoding="utf-8")
+check("es gibt einen eindeutigen Index ueber lower(hostname)",
+      "ux_host_hostname_nocase" in mig and "lower(hostname)" in mig)
+check("ein vorhandenes Doppelpaar bricht die Migration nicht ab",
+      "def _hostname_index" in mig and "report[\"notes\"].append" in mig)
+
+# Und die Wirkung, nicht nur der Wortlaut.
+import sqlite3 as _s3  # noqa: E402
+_c = _s3.connect(":memory:")
+_c.execute("create table host(id integer primary key, hostname text)")
+_c.execute("create unique index ux_host_hostname_nocase on host(lower(hostname))")
+_c.execute("insert into host(hostname) values('dc01')")
+
+
+def _geht_durch(name):
+    try:
+        _c.execute("insert into host(hostname) values(?)", (name,))
+        _c.execute("delete from host where hostname=?", (name,))
+        return True
+    except _s3.IntegrityError:
+        return False
+
+
+check("DC01 kommt nicht neben dc01", not _geht_durch("DC01"))
+check("Dc01 kommt nicht neben dc01", not _geht_durch("Dc01"))
+check("ein anderer Name geht weiterhin durch", _geht_durch("dc02"))
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

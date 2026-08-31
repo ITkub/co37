@@ -141,5 +141,94 @@ check("normale Werte bleiben unveraendert",
       h["os_version"] == "Windows-10-10.0.19045-SP0"
       and h["agent_version"] == "0.36.7", h)
 
+
+# ======================================================================
+# boot_time: Plausibilitaetsband (F-41)
+# ======================================================================
+# from_timestamp() ist datetime.fromtimestamp() und wirft bei grossen
+# Werten - 1e18 gibt OSError, 1e30 OverflowError. Das fing bis 0.37.9
+# niemand ab: ein Agent, der einmal Unsinn meldet, bekam bei JEDEM
+# folgenden Heartbeat einen 500 und fiel damit aus dem Betrieb. Ein Wert
+# weit in der Zukunft bricht ausserdem ohne Fehler alle laufenden
+# Auftraege des Hosts ab.
+print("--- boot_time wird auf Plausibilitaet geprueft (F-41) ---")
+for wert, name in ((1e18, "1e18"), (1e30, "1e30"), (-5, "negativ"),
+                   (time.time() + 86400 * 400, "weit in der Zukunft")):
+    r = hb(boot_time=wert)
+    check(f"boot_time {name} legt den Heartbeat nicht lahm",
+          "HTTP" not in r or r["HTTP"] != 500, r)
+
+# Danach muss ein normaler Heartbeat weiterhin gehen - sonst prueft das
+# hier nur, dass gar nichts mehr passiert.
+r = hb(boot_time=boot)
+check("ein normaler Heartbeat geht danach weiter", "HTTP" not in r, r)
+
+# ======================================================================
+# scan-result: Menge und Laenge begrenzt (F-34)
+# ======================================================================
+# Anders als der Heartbeat - der mit kurz() und FELD_MAX sorgfaeltige
+# Schranken hat - griff hier bis 0.37.9 keine einzige. Die Liste war
+# unbegrenzt, current_version, new_version und size_bytes gingen
+# ungekuerzt und ungeprueft in die Datenbank. Ein uebernommener Agent
+# konnte damit die gemeinsame Datei volllaufen lassen; die Wirkung traf
+# die ganze Anlage, nicht nur seinen eigenen Host.
+print("--- scan-result hat Grenzen (F-34) ---")
+
+viele = [{"id": f"p{i}", "title": f"Paket {i}", "new_version": "1.0"}
+         for i in range(6000)]
+r = call("/api/v1/agent/scan-result",
+         {"reboot_required": False, "reboot_reasons": [], "updates": viele},
+         hdr=ah)
+check("eine ueberlange Liste wird angenommen, nicht abgewiesen",
+      "HTTP" not in r, r)
+check("gespeichert wird nur bis zur Grenze",
+      r.get("stored", 0) <= 5000, r.get("stored"))
+check("und der Agent erfaehrt, dass gekuerzt wurde",
+      r.get("truncated") is True, r)
+
+lang = "9" * 100000
+r = call("/api/v1/agent/scan-result",
+         {"reboot_required": False, "reboot_reasons": [],
+          "updates": [{"id": "x", "title": "y", "new_version": lang,
+                       "current_version": lang, "size_bytes": lang}]},
+         hdr=ah)
+check("ueberlange Versionsangaben werden angenommen", "HTTP" not in r, r)
+ups = call(f"/api/v1/hosts/{hid}/updates", hdr=adm)
+eintrag = ups[0] if isinstance(ups, list) and ups else {}
+check("die Versionsangabe ist gekuerzt gespeichert",
+      len(eintrag.get("new_version") or "") <= 120,
+      len(eintrag.get("new_version") or ""))
+# size_bytes und current_version liefert UpdateRead nicht aus - ueber
+# HTTP ist dort also nichts zu sehen. Geprueft wird deshalb am
+# Quelltext, dass die Werte ueberhaupt durch eine Pruefung gehen. Die
+# erste Fassung dieser Zeile las size_bytes aus der Antwort und schlug
+# fehl, weil das Feld gar nicht drinsteht.
+import ast as _ast  # noqa: E402
+from pathlib import Path as _P  # noqa: E402
+_q = (_P(__file__).resolve().parent.parent
+      / "backend" / "main.py").read_text(encoding="utf-8")
+_sr = next((k for k in _ast.walk(_ast.parse(_q))
+            if isinstance(k, _ast.FunctionDef) and k.name == "agent_scan_result"),
+           None)
+check("agent_scan_result() gefunden", _sr is not None)
+if _sr:
+    _rufe = {k.func.id for k in _ast.walk(_sr)
+             if isinstance(k, _ast.Call) and isinstance(k.func, _ast.Name)}
+    check("die Groesse geht durch eine Pruefung", "_groesse" in _rufe,
+          sorted(_rufe))
+    check("die Versionsangaben werden gekuerzt", "kurz" in _rufe, sorted(_rufe))
+    check("die Liste wird begrenzt", "SCAN_MAX_UPDATES" in _q)
+
+r = call("/api/v1/agent/scan-result",
+         {"reboot_required": False, "reboot_reasons": [],
+          "updates": [{"id": "a", "title": "b", "new_version": "1.2.3",
+                       "size_bytes": 4096}]}, hdr=ah)
+check("ein normaler Scan geht weiterhin durch",
+      "HTTP" not in r and r.get("truncated") is False, r)
+ups = call(f"/api/v1/hosts/{hid}/updates", hdr=adm)
+eintrag = ups[0] if isinstance(ups, list) and ups else {}
+check("normale Werte bleiben erhalten",
+      eintrag.get("new_version") == "1.2.3", eintrag)
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

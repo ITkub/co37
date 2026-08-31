@@ -155,5 +155,25 @@ check("die Oberflaeche fragt die Route ueberhaupt ab",
       app_js.count('"/api/health"') >= 2, app_js.count('"/api/health"'))
 
 
+
+# ======================================================================
+# Der Fehlerpfad verraet das Datenmodell nicht (F-42)
+# ======================================================================
+# /api/health muss offen bleiben, und _darf_versionen_sehen() haelt die
+# Versionsnummern korrekt zurueck (F-09). Der 503-Zweig lief bis 0.37.9
+# daran vorbei und lieferte jedem Unangemeldeten die Namen der fehlenden
+# Tabellen und Spalten.
+mquelle = (WURZEL / "backend" / "main.py").read_text(encoding="utf-8")
+_i = mquelle.find("schema_mismatch")
+_block = mquelle[max(0, _i - 800):_i + 800]
+check("der 503-Zweig fragt, wer zusehen darf",
+      "_darf_versionen_sehen" in _block)
+# Nur der 503-Zweig, nicht die ganze Datei: /api/v1/schema liefert
+# dieselbe Liste voellig zu Recht - die Route haengt an require_admin.
+# Die erste Fassung dieser Pruefung suchte im ganzen Quelltext und
+# schlug genau daran an.
+check("missing steht im 503-Zweig nicht mehr bedingungslos drin",
+      '"missing": missing' not in _block, _block[-300:])
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
