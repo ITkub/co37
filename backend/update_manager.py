@@ -35,7 +35,15 @@ INCOMING_ZIP = UPDATE_DIR / "incoming.zip"
 # selbst und braucht sie dafuer. Er darf sich auf die Pruefung hier nicht
 # verlassen: sie findet unprivilegiert statt, ausgepackt wird als root.
 INCOMING_SIG = UPDATE_DIR / "incoming.sig"
+
+# Zwei Statusdateien, zwei Schreiber - siehe den Kopf von update_watcher.py.
+# Hier schreibt das Backend (uploaded, triggered, cancelled), im Ausgang
+# schreibt der Watcher (running, success, error). Frueher war es eine Datei
+# in einem Verzeichnis, das co37 gehoert; damit war jeder Schreibzugriff des
+# als root laufenden Watchers eine Rechteausweitung (F-18, 2026-08-31).
 STATUS_FILE = UPDATE_DIR / "status.json"
+STATUS_WATCHER = Path(os.getenv("CO37_BASE", "/opt/co37")) / "state" / "status.json"
+
 PROBE_DIR = UPDATE_DIR / "_probe"
 PROBE_ZIP = UPDATE_DIR / "_probe.zip"
 
@@ -66,12 +74,34 @@ def _default_status() -> dict:
     return {"state": "idle", "current_version": get_current_version()}
 
 
+def _neuere_statusdatei() -> Optional[Path]:
+    """
+    Welche der beiden Statusdateien den aktuellen Stand hat.
+
+    Die juengere gewinnt, und das bildet den Ablauf richtig ab: nach dem
+    Hochladen und beim Ausloesen schreibt das Backend, waehrend und nach
+    dem Einspielen der Watcher. Der Watcher raeumt die Eingangsdatei
+    ausserdem weg, sobald er den Auftrag angenommen hat - danach gibt es
+    ohnehin nur noch eine.
+    """
+    kandidaten = []
+    for pfad in (STATUS_FILE, STATUS_WATCHER):
+        try:
+            kandidaten.append((pfad.stat().st_mtime_ns, pfad))
+        except OSError:
+            continue
+    if not kandidaten:
+        return None
+    return max(kandidaten)[1]
+
+
 def get_status() -> dict:
     UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-    if not STATUS_FILE.exists():
+    pfad = _neuere_statusdatei()
+    if pfad is None:
         return _default_status()
     try:
-        data = json.loads(STATUS_FILE.read_text())
+        data = json.loads(pfad.read_text())
     except Exception:  # noqa: BLE001
         return _default_status()
     data["current_version"] = get_current_version()

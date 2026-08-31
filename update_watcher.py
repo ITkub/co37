@@ -36,10 +36,58 @@ from pathlib import Path
 
 BASE = Path(os.getenv("CO37_BASE", "/opt/co37"))
 DATA_DIR = BASE / "data"
-UPDATE_DIR = DATA_DIR / "update"
+
+# ----------------------------------------------------------------------
+# Zwei Richtungen, zwei Verzeichnisse - und das ist der Kern der Trennung
+# ----------------------------------------------------------------------
+# EINGANG: data/update/ gehoert co37 (das Backend laeuft unprivilegiert und
+# muss das hochgeladene Paket dort ablegen koennen). Alles, was der Watcher
+# hier liest, ist damit von einem unprivilegierten Prozess kontrolliert.
+#
+# AUSGANG: state/ gehoert root und ist fuer co37 nur lesbar. Alles, was der
+# Watcher SCHREIBT, gehoert hierher.
+#
+# Bis 0.37.5 lagen beide Richtungen in data/update/. Das war eine
+# Rechteausweitung von co37 nach root, an drei Stellen gleichzeitig
+# (Sicherheitspruefung 2026-08-31, F-18): der Watcher schrieb dort
+# status.json, build_status.json und watcher.json nach dem Muster
+# write_text -> replace -> shutil.chown. Beides folgt Verknuepfungen. Wer
+# als co37 vorher eine Verknuepfung unter dem erwarteten Namen ablegte,
+# liess root durch sie hindurchschreiben und bekam anschliessend das Ziel
+# per chown uebereignet - also eine beliebige root-Datei zum
+# Weiterbeschreiben.
+#
+# Der Ausweg ist nicht, jeden einzelnen Aufruf gegen Verknuepfungen zu
+# haerten: O_NOFOLLOW schuetzt nur die letzte Pfadkomponente, und das
+# ELTERNverzeichnis gehoert co37 - es liesse sich als Ganzes umhaengen.
+# Deshalb ein Verzeichnis, in dem co37 gar nichts anlegen kann.
+UPDATE_DIR = DATA_DIR / "update"        # Eingang, co37 schreibt
+STATE_DIR = BASE / "state"              # Ausgang, nur root schreibt
+
 INCOMING_ZIP = UPDATE_DIR / "incoming.zip"
-STATUS_FILE = UPDATE_DIR / "status.json"
-WORK_DIR = UPDATE_DIR / "_work"
+
+# Die geschuetzte Kopie, mit der wirklich gearbeitet wird. Siehe
+# ins_sichere_holen() - das Paket wird EINMAL hierher kopiert, und danach
+# werden Signaturpruefung und Auspacken auf diese Kopie angewandt.
+SAFE_DIR = STATE_DIR / "work"
+SAFE_ZIP = SAFE_DIR / "incoming.zip"
+SAFE_SIG = SAFE_DIR / "incoming.sig"
+WORK_DIR = SAFE_DIR / "_work"
+
+# Der Status hat zwei Schreiber, und deshalb ab 0.37.6 zwei Dateien:
+#
+#   STATUS_EINGANG  schreibt das BACKEND (uploaded, triggered, cancelled)
+#                   und der Watcher liest sie, um den Auftrag zu erkennen.
+#   STATUS_FILE     schreibt der WATCHER (running, success, error) und das
+#                   Backend liest sie.
+#
+# Vorher war es eine Datei, die beide beschrieben - und weil sie in einem
+# Verzeichnis lag, das co37 gehoert, war jede Schreiboperation des Watchers
+# ein Hebel nach root (F-18). Wer welche Datei besitzt, ist jetzt an ihrem
+# Ort abzulesen. Welche der beiden fuer die Anzeige gilt, entscheidet der
+# Zeitstempel; das Backend macht das in update_manager.get_status().
+STATUS_EINGANG = UPDATE_DIR / "status.json"
+STATUS_FILE = STATE_DIR / "status.json"
 
 BACKUP_DIR = BASE / "update_backups"
 KEEP_BACKUPS = 3
@@ -97,8 +145,9 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.37.5"
-WATCHER_INFO = UPDATE_DIR / "watcher.json"
+WATCHER_VERSION = "0.37.6"
+WATCHER_INFO = STATE_DIR / "watcher.json"
+WATCHER_INFO_ALT = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 
 
@@ -106,23 +155,65 @@ def log(msg: str):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
-def read_status() -> dict:
+def state_dir_bereit() -> Path:
+    """
+    Legt das Ausgangsverzeichnis an - root, fuer alle lesbar.
+
+    0755 statt 0700: das Backend laeuft als co37 und muss die Statusdateien
+    lesen. Schreiben kann es dort nichts, und genau darauf kommt es an.
+    Angelegt wird es hier und nicht in setup.sh, weil ein Update setup.sh
+    nicht ausfuehrt - sonst haette eine im Betrieb aktualisierte Anlage das
+    Verzeichnis nie.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        return json.loads(STATUS_FILE.read_text())
-    except Exception:  # noqa: BLE001
-        return {"state": "idle"}
+        os.chown(STATE_DIR, 0, 0)
+        os.chmod(STATE_DIR, 0o755)
+    except OSError:
+        pass
+    return STATE_DIR
+
+
+def _schreibe_json(ziel: Path, data: dict):
+    """
+    Schreibt eine Statusdatei nach state/ - fuer co37 lesbar, nicht
+    beschreibbar.
+
+    Kein chown mehr auf den Benutzer co37. Das war der Hebel aus F-18:
+    os.chown folgt Verknuepfungen und uebereignete damit das Ziel. Hier
+    bleibt die Datei root und wird ueber das Leserecht zugaenglich gemacht.
+    """
+    state_dir_bereit()
+    tmp = ziel.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    os.chmod(tmp, 0o644)
+    tmp.replace(ziel)
+
+
+def read_status() -> dict:
+    """
+    Der Stand, wie ihn das Backend hinterlassen hat.
+
+    Bewusst der EINGANG: dort steht der Auftrag ('triggered') und der
+    Protokollanfang, den das Backend gesetzt hat. Der Watcher schreibt
+    seinen eigenen Verlauf danach in den Ausgang.
+
+    Die Datei gehoert co37 und ist damit nicht vertrauenswuerdig. Gelesen
+    wird sie nur mit json.loads, und der einzige Wert, auf den hin
+    gehandelt wird, ist die Zeichenkette 'triggered' - eine untergeschobene
+    Verknuepfung wuerde hier hoechstens einen Auftrag ausloesen, den ein
+    Administrator ohnehin ausloesen darf.
+    """
+    for pfad in (STATUS_EINGANG, STATUS_FILE):
+        try:
+            return json.loads(pfad.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+    return {"state": "idle"}
 
 
 def write_status(data: dict):
-    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = STATUS_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-    tmp.replace(STATUS_FILE)
-    # Backend laeuft als co37 und muss die Datei lesen koennen
-    try:
-        shutil.chown(STATUS_FILE, user="co37", group="co37")
-    except Exception:  # noqa: BLE001
-        pass
+    _schreibe_json(STATUS_FILE, data)
 
 
 def eintrag(schluessel: str, **werte) -> dict:
@@ -234,6 +325,103 @@ INCOMING_SIG = UPDATE_DIR / "incoming.sig"
 
 class PaketAbgewiesen(RuntimeError):
     """Ein Paket, das nicht ausgepackt werden darf."""
+
+
+def ins_sichere_holen(quelle: Path, ziel: Path):
+    """
+    Kopiert eine Datei aus dem Eingang in das nur fuer root beschreibbare
+    Arbeitsverzeichnis.
+
+    Der Grund ist der Befund F-18/F-19 vom 2026-08-31: bis 0.37.5 wurde die
+    Signatur auf incoming.zip geprueft (die Funktion liest die Datei und
+    schliesst sie wieder) und dieselbe Datei danach ERNEUT von der Platte
+    geoeffnet, um sie auszupacken. Dazwischen lag das Anlegen der
+    Sicherung, also Sekunden bis Minuten. incoming.zip liegt aber im
+    Eingang und gehoert co37.
+
+    Das Rennen war nicht einmal knapp: co37 kann am Protokolleintrag
+    upd.log.backup ablesen, dass die Pruefung durch ist, und erst dann
+    tauschen. Geprueft wurde dann das eine Paket, eingespielt das andere.
+
+    Deshalb: einmal hierher kopieren, und ab da ausschliesslich mit dieser
+    Kopie arbeiten - pruefen UND auspacken. Die Kopie liegt in einem
+    Verzeichnis, in dem co37 nichts anlegen kann.
+
+    O_NOFOLLOW: die Quelle darf keine Verknuepfung sein. Root wuerde ihr
+    sonst folgen und eine beliebige Datei des Systems hereinholen.
+    """
+    try:
+        fd = os.open(quelle, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise PaketAbgewiesen(
+            f"{quelle.name} laesst sich nicht lesen ({exc}). Eine "
+            f"symbolische Verknuepfung wird hier bewusst nicht verfolgt."
+        )
+    try:
+        with os.fdopen(fd, "rb") as src, open(ziel, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    except OSError as exc:
+        raise PaketAbgewiesen(f"{quelle.name} nicht kopierbar: {exc}")
+
+
+def sicher_auspacken(zf: zipfile.ZipFile, ziel: Path):
+    """
+    Packt aus und laesst nichts aus dem Zielverzeichnis heraus.
+
+    Dieselbe Pruefung, die update_manager._safe_extract im Backend schon
+    macht. Sie fehlte hier - ausgerechnet auf der Seite, die als root
+    auspackt (F-17). Ein Paket ist zwar signiert, aber eine Pruefung, die
+    auf der unprivilegierten Seite steht und auf der privilegierten fehlt,
+    ist genau falsch herum aufgehaengt.
+    """
+    ziel = ziel.resolve()
+    for info in zf.infolist():
+        dest = (ziel / info.filename).resolve()
+        if not str(dest).startswith(str(ziel) + os.sep):
+            raise PaketAbgewiesen(
+                f"Das Paket enthaelt einen Pfad ausserhalb des "
+                f"Arbeitsverzeichnisses: {info.filename}"
+            )
+    zf.extractall(ziel)
+
+
+# Diese Dateien entscheiden, wem die Installation vertraut.
+GESCHUETZTE_SCHLUESSEL = ["backend/release_key.pub", "backend/license_key.pub"]
+
+
+def pruefe_schluessel(root: Path):
+    """
+    Ein Update darf die Vertrauensbasis nicht austauschen.
+
+    Dieselbe Regel wie in update_manager._pruefe_schluessel() - dort steht
+    sie seit jeher, hier fehlte sie (F-27). Das war die falsche Verteilung:
+    das Backend prueft unprivilegiert und laesst sich umgehen, der Watcher
+    spielt tatsaechlich ein. swap_in_new_code() uebernahm einen im Paket
+    mitgebrachten Schluessel kommentarlos ("Paket bringt die Datei mit -
+    dann gilt sie").
+
+    Wirkung ohne diese Pruefung: ein einziges untergeschobenes Paket macht
+    den Absender dauerhaft zum legitimen Herausgeber - fuer alle weiteren
+    Pakete UND fuer den Agent-Quelltext, der auf jedem verwalteten Host als
+    SYSTEM laeuft.
+
+    Fehlt der Schluessel im Paket, ist das kein Fehler: BEWAHRTE_DATEIEN
+    traegt ihn dann aus dem bisherigen Stand nach.
+    """
+    for rel in GESCHUETZTE_SCHLUESSEL:
+        vorhanden = BASE / rel
+        im_paket = root / rel
+        if not vorhanden.is_file() or not im_paket.is_file():
+            continue
+        alt = vorhanden.read_text(encoding="ascii", errors="replace").strip()
+        neu = im_paket.read_text(encoding="ascii", errors="replace").strip()
+        if alt and neu and alt != neu:
+            raise PaketAbgewiesen(
+                f"Das Paket bringt einen anderen {Path(rel).name} mit als "
+                f"den hier hinterlegten. Ein Update darf die Vertrauensbasis "
+                f"nicht austauschen. Soll der Schluessel wirklich gewechselt "
+                f"werden, muss er von Hand ersetzt werden."
+            )
 
 
 def pruefe_signatur(paket: Path, signatur: Path):
@@ -437,18 +625,18 @@ def swap_in_new_code(root: Path) -> bool:
     return self_changed
 
 
+# Die Anforderung kommt vom Backend, liegt also im Eingang. Der Stand geht
+# zurueck und liegt damit im Ausgang.
 BUILD_REQUEST = UPDATE_DIR / "build_request.json"
-BUILD_STATUS = UPDATE_DIR / "build_status.json"
+BUILD_STATUS = STATE_DIR / "build_status.json"
+BUILD_STATUS_ALT = UPDATE_DIR / "build_status.json"
 
 
 def write_build_status(data: dict):
-    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = BUILD_STATUS.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-    tmp.replace(BUILD_STATUS)
+    _schreibe_json(BUILD_STATUS, data)
     try:
-        shutil.chown(BUILD_STATUS, user="co37", group="co37")
-    except Exception:  # noqa: BLE001
+        BUILD_STATUS_ALT.unlink()
+    except OSError:
         pass
 
 
@@ -547,17 +735,37 @@ def do_update():
     status.setdefault("log", [])
     write_status(status)
 
+    # Auftrag verbraucht. Ohne das stuende im Eingang weiter 'triggered'
+    # und die naechste Runde der Hauptschleife finge dasselbe Update noch
+    # einmal an. unlink entfernt eine Verknuepfung, nicht ihr Ziel - in
+    # einem Verzeichnis, das co37 gehoert, ist das der einzige Zugriff,
+    # den root sich hier erlauben darf.
+    try:
+        STATUS_EINGANG.unlink()
+    except OSError:
+        pass
+
     backup_path = None
     self_changed = False
     try:
         if not INCOMING_ZIP.exists():
             raise RuntimeError("incoming.zip fehlt")
 
-        # Vor allem anderen, insbesondere vor dem Auspacken und vor der
-        # Sicherung: was nicht vom Herausgeber stammt, wird hier nicht
-        # angefasst.
+        # ZUERST in Sicherheit bringen, dann pruefen, dann diese Kopie
+        # auspacken. Die Reihenfolge ist der ganze Punkt: was geprueft
+        # wurde, muss dasselbe sein wie das, was eingespielt wird. Solange
+        # beides aus dem Eingang gelesen wurde, war es das nicht (F-19).
+        state_dir_bereit()
+        shutil.rmtree(SAFE_DIR, ignore_errors=True)
+        SAFE_DIR.mkdir(parents=True)
+        os.chmod(SAFE_DIR, 0o700)
+        ins_sichere_holen(INCOMING_ZIP, SAFE_ZIP)
+        if INCOMING_SIG.exists():
+            ins_sichere_holen(INCOMING_SIG, SAFE_SIG)
+
+        # Was nicht vom Herausgeber stammt, wird hier nicht angefasst.
         append_log(status, "upd.log.check_sig")
-        pruefe_signatur(INCOMING_ZIP, INCOMING_SIG)
+        pruefe_signatur(SAFE_ZIP, SAFE_SIG)
 
         tag = datetime.now().strftime("%Y%m%d-%H%M%S")
         append_log(status, "upd.log.backup")
@@ -567,12 +775,16 @@ def do_update():
         append_log(status, "upd.log.unpack")
         shutil.rmtree(WORK_DIR, ignore_errors=True)
         WORK_DIR.mkdir(parents=True)
-        with zipfile.ZipFile(INCOMING_ZIP) as zf:
-            zf.extractall(WORK_DIR)
+        with zipfile.ZipFile(SAFE_ZIP) as zf:
+            sicher_auspacken(zf, WORK_DIR)
         root = find_update_root(WORK_DIR)
 
         new_version = (root / "backend" / "VERSION").read_text().strip()
         append_log(status, "upd.log.new_version", version=new_version)
+
+        # Nach dem Auspacken, vor dem Einspielen: der Vertrauensanker
+        # bleibt, wie er ist.
+        pruefe_schluessel(root)
 
         append_log(status, "upd.log.swap")
         self_changed = swap_in_new_code(root)
@@ -672,17 +884,18 @@ def main():
         sys.exit(1)
 
     UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_dir_bereit()
 
     # Fassung hinterlegen, damit das Backend sie melden kann
     try:
-        WATCHER_INFO.write_text(json.dumps({
+        _schreibe_json(WATCHER_INFO, {
             "version": WATCHER_VERSION,
             "features": WATCHER_FEATURES,
             "started_at": datetime.now().isoformat(),
-        }, ensure_ascii=False, indent=2))
+        })
         try:
-            shutil.chown(WATCHER_INFO, user="co37", group="co37")
-        except Exception:  # noqa: BLE001
+            WATCHER_INFO_ALT.unlink()
+        except OSError:
             pass
     except OSError as exc:
         log(f"watcher.json nicht schreibbar: {exc}")

@@ -193,6 +193,41 @@ check("und das Backend liest genau diesen Schluessel",
 
 # ----------------------------------------------------------------------
 # Und das Skript muss ueberhaupt laufen koennen
+print("--- Was als root schreibt, schreibt nicht in co37-Gebiet ---")
+# F-20, 2026-08-31: /etc/cron.daily/co37-backup laeuft als root und schrieb
+# nach $BASE/data/backup - in das eine Verzeichnis, das co37 gehoert.
+# sqlite3 ".backup" oeffnet das Ziel mit O_CREAT|O_RDWR und folgt einer
+# Verknuepfung. Damit hatte co37 einmal taeglich einen Schreibzugriff als
+# root an frei gewaehlter Stelle.
+inhalt = SETUP.read_text(encoding="utf-8")
+cron = re.search(r"cat > /etc/cron\.daily/co37-backup <<EOF(.*?)\nEOF",
+                 inhalt, re.S)
+check("die Sicherung wird eingerichtet", cron is not None)
+if cron:
+    rumpf = cron.group(1)
+    # Die Datenbank wird aus data/ GELESEN, das ist richtig. Geschrieben
+    # werden darf dort nichts.
+    ziel = rumpf.split(".backup")[-1] if ".backup" in rumpf else rumpf
+    check("ihr Ziel liegt nicht unter data/", "/data/" not in ziel,
+          ziel.strip())
+    check("sie schreibt nach db_backups", "db_backups" in rumpf)
+    check("die Datenbank wird weiterhin von dort gelesen",
+          "$BASE/data/co37.db" in rumpf)
+check("db_backups wird angelegt und gehoert root",
+      "db_backups" in inhalt and 'chmod 700 "$BASE/db_backups"' in inhalt)
+
+print("--- Das Ausgangsverzeichnis des Watchers ---")
+# F-18: der Watcher meldet seinen Stand nach state/. Das Verzeichnis muss
+# root gehoeren und fuer co37 lesbar sein - beschreibbar nicht.
+check("state/ wird angelegt", re.search(r"mkdir -p .*state", inhalt) is not None)
+check("state/ ist lesbar, aber nicht fuer co37 beschreibbar",
+      'chmod 755 "$BASE/state"' in inhalt)
+check("state/ liegt nicht unter data/", "$BASE/data/state" not in inhalt)
+check("co37 bekommt weiterhin nur data/",
+      inhalt.count('chown -R co37:co37 "$BASE/data"') == 1
+      and 'chown -R co37:co37 "$BASE/state"' not in inhalt)
+
+
 # ----------------------------------------------------------------------
 # Nur wenn bash da ist. Fehlt sie, ist das kein Fehler des Skripts, und
 # eine Falschmeldung waere schlimmer als eine ausgelassene Pruefung -

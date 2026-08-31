@@ -26,6 +26,7 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -175,11 +176,16 @@ check("Begruendung nennt python3-cryptography",
 sys.modules.pop("release_sig", None)
 
 # 8. Die Pruefung steht VOR dem Auspacken im Ablauf
+#
+# Seit 0.37.6 laufen Pruefung und Auspacken beide auf der geschuetzten
+# Kopie (SAFE_ZIP) statt auf incoming.zip - deshalb stehen hier diese
+# Namen. Dass es dieselbe Datei ist, prueft der F-19-Abschnitt weiter
+# unten; hier geht es nur um die Reihenfolge.
 quelle = (WURZEL / "update_watcher.py").read_text(encoding="utf-8")
-pos_pruefung = quelle.find("pruefe_signatur(INCOMING_ZIP")
-pos_extract = quelle.find("zf.extractall(WORK_DIR)")
+pos_pruefung = quelle.find("pruefe_signatur(SAFE_ZIP")
+pos_extract = quelle.find("sicher_auspacken(zf, WORK_DIR)")
 check("pruefe_signatur wird in do_update aufgerufen", pos_pruefung > 0)
-check("Aufruf steht vor extractall",
+check("Aufruf steht vor dem Auspacken",
       0 < pos_pruefung < pos_extract, f"{pos_pruefung} < {pos_extract}")
 check("die Signatur wird am Ende wieder weggeraeumt",
       "INCOMING_SIG.unlink(missing_ok=True)" in quelle)
@@ -270,6 +276,187 @@ for knoten in ast.walk(baum):
                     f"in Zeile {anweisung.lineno}")
 check("keine Anweisung hinter return/raise im selben Block",
       not tot, "; ".join(tot))
+
+# ======================================================================
+# F-18 - der Watcher schreibt nirgends hin, wo co37 schreiben darf
+# ======================================================================
+print("--- Root schreibt nicht in co37-Gebiet ---")
+# Der Befund vom 2026-08-31: status.json, build_status.json und
+# watcher.json lagen unter data/update/. Das Verzeichnis gehoert co37.
+# Muster war jeweils write_text -> replace -> shutil.chown, und beides
+# folgt Verknuepfungen: co37 legt unter dem erwarteten Namen eine
+# Verknuepfung ab, root schreibt hindurch und uebereignet danach das Ziel.
+# Damit gehoerte co37 eine beliebige root-Datei.
+#
+# Geprueft wird die Eigenschaft, nicht die Schreibweise: KEIN Ziel, in das
+# der Watcher schreibt, darf unterhalb von data/ liegen.
+quelle = (WURZEL / "update_watcher.py").read_text(encoding="utf-8")
+
+spec_roh = importlib.util.spec_from_file_location(
+    "watcher_roh", WURZEL / "update_watcher.py")
+w_roh = importlib.util.module_from_spec(spec_roh)
+spec_roh.loader.exec_module(w_roh)
+
+for name in ("STATUS_FILE", "BUILD_STATUS", "WATCHER_INFO", "SAFE_DIR"):
+    ziel = getattr(w_roh, name, None)
+    check(f"{name} liegt nicht unter data/",
+          ziel is not None and w_roh.DATA_DIR not in Path(ziel).parents,
+          ziel)
+check("state/ ist das Ausgangsverzeichnis",
+      getattr(w_roh, "STATE_DIR", None) == w_roh.BASE / "state",
+      getattr(w_roh, "STATE_DIR", None))
+check("der Eingang bleibt unter data/",
+      w_roh.DATA_DIR in Path(w_roh.STATUS_EINGANG).parents,
+      w_roh.STATUS_EINGANG)
+
+# Und der Hebel selbst darf nicht zurueckkommen: kein chown auf einen
+# Benutzer mehr. Kommentarzeilen aussortiert - der Befund wird oben im
+# Quelltext erklaert, und den Namen dort zu treffen waere ein Fehlalarm.
+ohne_kommentar = "\n".join(
+    z for z in quelle.splitlines() if not z.lstrip().startswith("#"))
+check("kein shutil.chown mehr im Watcher",
+      "shutil.chown" not in ohne_kommentar)
+check("die Statusdateien werden ueber eine Stelle geschrieben",
+      ohne_kommentar.count("def _schreibe_json(") == 1)
+
+
+# ======================================================================
+# F-19 - geprueft wird dieselbe Datei, die auch eingespielt wird
+# ======================================================================
+print("--- Signatur und Auspacken greifen auf dieselbe Kopie zu ---")
+# Bis 0.37.5 wurde die Signatur auf incoming.zip geprueft und dieselbe
+# Datei danach ERNEUT von der Platte geoeffnet. Dazwischen lag das Anlegen
+# der Sicherung. incoming.zip gehoert co37 - das Rennen war nicht knapp,
+# es war am Protokolleintrag ablesbar.
+check("do_update prueft die geschuetzte Kopie",
+      "pruefe_signatur(SAFE_ZIP, SAFE_SIG)" in ohne_kommentar)
+check("und packt dieselbe Kopie aus",
+      "zipfile.ZipFile(SAFE_ZIP)" in ohne_kommentar)
+check("das Paket wird vorher hineingeholt",
+      "ins_sichere_holen(INCOMING_ZIP, SAFE_ZIP)" in ohne_kommentar)
+check("incoming.zip wird nicht mehr direkt ausgepackt",
+      "ZipFile(INCOMING_ZIP)" not in ohne_kommentar)
+
+# Aufgerufen statt gesucht: eine Verknuepfung als Quelle muss abgewiesen
+# werden, sonst holt root sich eine beliebige Datei des Systems herein.
+_q = TMP / "f19"
+_q.mkdir(exist_ok=True)
+(_q / "echt.zip").write_bytes(b"inhalt")
+(_q / "verknuepft.zip").symlink_to(_q / "echt.zip")
+try:
+    w_roh.ins_sichere_holen(_q / "verknuepft.zip", _q / "ziel.zip")
+    check("eine Verknuepfung als Paket wird abgewiesen", False)
+except w_roh.PaketAbgewiesen:
+    check("eine Verknuepfung als Paket wird abgewiesen", True)
+w_roh.ins_sichere_holen(_q / "echt.zip", _q / "ziel.zip")
+check("eine echte Datei wird kopiert",
+      (_q / "ziel.zip").read_bytes() == b"inhalt")
+
+
+# ======================================================================
+# F-17 - der Watcher packt nichts aus dem Arbeitsverzeichnis heraus
+# ======================================================================
+print("--- Zip-Slip auch auf der root-Seite ---")
+_z = TMP / "f17"
+_z.mkdir(exist_ok=True)
+boese = _z / "boese.zip"
+with zipfile.ZipFile(boese, "w") as zf:
+    zf.writestr("../ausgebrochen.txt", "nein")
+brav = _z / "brav.zip"
+with zipfile.ZipFile(brav, "w") as zf:
+    zf.writestr("backend/VERSION", "9.9.9")
+
+ziel = _z / "aus"
+ziel.mkdir(exist_ok=True)
+try:
+    with zipfile.ZipFile(boese) as zf:
+        w_roh.sicher_auspacken(zf, ziel)
+    check("ein Pfad ausserhalb wird abgewiesen", False)
+except w_roh.PaketAbgewiesen:
+    check("ein Pfad ausserhalb wird abgewiesen", True)
+check("nichts ist ausserhalb gelandet",
+      not (_z / "ausgebrochen.txt").exists())
+with zipfile.ZipFile(brav) as zf:
+    w_roh.sicher_auspacken(zf, ziel)
+check("ein braves Paket wird ausgepackt",
+      (ziel / "backend" / "VERSION").read_text() == "9.9.9")
+
+
+# ======================================================================
+# F-27 - ein Update darf den Vertrauensanker nicht austauschen
+# ======================================================================
+print("--- Der Herausgeberschluessel bleibt ---")
+# Die Pruefung stand nur in update_manager.py, also auf der Seite, die
+# unprivilegiert laeuft und sich ueber F-19 umgehen liess. Der Watcher
+# uebernahm einen mitgebrachten Schluessel kommentarlos. Wirkung: ein
+# einziges untergeschobenes Paket macht den Absender dauerhaft zum
+# legitimen Herausgeber - auch fuer den Agent-Quelltext.
+_p = TMP / "f27"
+(_p / "backend").mkdir(parents=True, exist_ok=True)
+
+# Gleicher Schluessel wie installiert: geht durch.
+(_p / "backend" / "release_key.pub").write_text(
+    (BASE / "backend" / "release_key.pub").read_text(encoding="ascii"),
+    encoding="ascii")
+try:
+    w_roh.BASE = BASE
+    w_roh.pruefe_schluessel(_p)
+    check("derselbe Schluessel wird nicht beanstandet", True)
+except w_roh.PaketAbgewiesen as e:
+    check("derselbe Schluessel wird nicht beanstandet", False, e)
+
+# Anderer Schluessel: muss abgewiesen werden.
+(_p / "backend" / "release_key.pub").write_text("AAAA-ein-anderer-Schluessel\n",
+                                                encoding="ascii")
+try:
+    w_roh.pruefe_schluessel(_p)
+    check("ein anderer Schluessel wird abgewiesen", False)
+except w_roh.PaketAbgewiesen:
+    check("ein anderer Schluessel wird abgewiesen", True)
+
+# Gar keiner im Paket: kein Fehler, BEWAHRTE_DATEIEN traegt ihn nach.
+(_p / "backend" / "release_key.pub").unlink()
+try:
+    w_roh.pruefe_schluessel(_p)
+    check("ein Paket ohne Schluessel bleibt zulaessig", True)
+except w_roh.PaketAbgewiesen as e:
+    check("ein Paket ohne Schluessel bleibt zulaessig", False, e)
+
+# Ueber den Syntaxbaum, nicht ueber die Zeichenkette: ein auskommentierter
+# Aufruf hat diese Pruefung beim ersten Anlauf gruen bleiben lassen. Genau
+# der Fehler, der in diesem Projekt schon zweimal aufgetreten ist -
+# 'kein FileKey= mehr' und 'signiere_agent() in main()' fanden beide ihren
+# Namen in einem Kommentar wieder.
+import ast as _ast  # noqa: E402
+
+_baum = _ast.parse(quelle)
+_do = next((k for k in _ast.walk(_baum)
+            if isinstance(k, _ast.FunctionDef) and k.name == "do_update"), None)
+check("do_update ist auffindbar", _do is not None)
+
+
+def _aufrufzeile(fn, name):
+    """Zeilennummer des ersten echten Aufrufs von 'name' - Kommentare zaehlen nicht."""
+    for k in _ast.walk(fn):
+        if isinstance(k, _ast.Call) and isinstance(k.func, _ast.Name) \
+                and k.func.id == name:
+            return k.lineno
+    return None
+
+
+if _do:
+    z_schluessel = _aufrufzeile(_do, "pruefe_schluessel")
+    z_swap = _aufrufzeile(_do, "swap_in_new_code")
+    z_signatur = _aufrufzeile(_do, "pruefe_signatur")
+    z_holen = _aufrufzeile(_do, "ins_sichere_holen")
+    check("do_update ruft pruefe_schluessel wirklich auf", z_schluessel is not None)
+    check("und der Aufruf steht vor dem Einspielen",
+          z_schluessel is not None and z_swap is not None and z_schluessel < z_swap,
+          f"{z_schluessel} < {z_swap}")
+    check("das Paket wird geholt, bevor die Signatur geprueft wird",
+          z_holen is not None and z_signatur is not None and z_holen < z_signatur,
+          f"{z_holen} < {z_signatur}")
+
 
 # ======================================================================
 # Jeder Bauweg meldet seinen Stand

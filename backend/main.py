@@ -3374,8 +3374,37 @@ def list_packages():
     return result
 
 
+# Die Anforderung schreibt das Backend (Eingang), den Stand der Watcher
+# (Ausgang, nur fuer root beschreibbar). Siehe den Kopf von
+# update_watcher.py - bis 0.37.5 lag beides in einem Verzeichnis, das co37
+# gehoert, und war damit eine Rechteausweitung nach root (F-18).
 BUILD_REQUEST = DATA_DIR / "update" / "build_request.json"
-BUILD_STATUS = DATA_DIR / "update" / "build_status.json"
+# Dasselbe Verzeichnis wie BASE_DIR weiter unten; hier eigenstaendig
+# gebildet, weil BASE_DIR erst spaeter definiert wird.
+STATE_DIR = Path(__file__).resolve().parent.parent / "state"
+BUILD_STATUS = STATE_DIR / "build_status.json"
+# Wo der Stand bis 0.37.5 lag. Nur noch zum Lesen, fuer die eine Runde,
+# in der ein alter Watcher noch dorthin geschrieben hat.
+BUILD_STATUS_ALT = DATA_DIR / "update" / "build_status.json"
+WATCHER_INFO = STATE_DIR / "watcher.json"
+WATCHER_INFO_ALT = DATA_DIR / "update" / "watcher.json"
+
+
+def _lies_zustand(neu: Path, alt: Path) -> Optional[dict]:
+    """Liest die juengere der beiden Dateien, oder None."""
+    import json as _json
+    kandidaten = []
+    for pfad in (neu, alt):
+        try:
+            kandidaten.append((pfad.stat().st_mtime_ns, pfad))
+        except OSError:
+            continue
+    if not kandidaten:
+        return None
+    try:
+        return _json.loads(max(kandidaten)[1].read_text())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # Muss VOR der Route /api/v1/packages/{name} stehen. Sonst faengt deren
@@ -3398,22 +3427,29 @@ def request_package_build():
     BUILD_REQUEST.write_text(_json.dumps({
         "requested_at": utcnow().isoformat(),
     }))
-    BUILD_STATUS.write_text(_json.dumps({
-        "state": "requested",
-        "log": ["Angefordert, warte auf Verarbeitung durch den Host..."],
-    }))
+    # Den Stand schreibt hier bewusst niemand mehr: das Verzeichnis, in das
+    # der Watcher meldet, ist fuer diesen Prozess nicht beschreibbar - und
+    # genau das ist der Zweck. 'requested' leitet package_build_status()
+    # unten aus der Anforderung ab.
     return {"ok": True, "state": "requested"}
 
 
 @app.get("/api/v1/packages/build-status", dependencies=[Depends(require_admin)])
 def package_build_status():
-    import json as _json
-    if not BUILD_STATUS.exists():
+    stand = _lies_zustand(BUILD_STATUS, BUILD_STATUS_ALT)
+
+    # Solange die Anforderung liegt und der Watcher sie noch nicht
+    # angenommen hat, ist der gemeldete Stand der des VORIGEN Baus. Ohne
+    # diese Ableitung stuende in der Oberflaeche das alte Ergebnis, waehrend
+    # der neue Bau schon angefordert ist - genau die irrefuehrende Anzeige,
+    # die in 0.37.5 behoben wurde, nur andersherum.
+    if BUILD_REQUEST.exists() and (stand or {}).get("state") != "running":
+        return {"state": "requested",
+                "log": [{"k": "pkg.log.running"}]}
+
+    if stand is None:
         return {"state": "idle", "log": []}
-    try:
-        return _json.loads(BUILD_STATUS.read_text())
-    except Exception:  # noqa: BLE001
-        return {"state": "idle", "log": []}
+    return stand
 
 
 @app.get("/api/v1/packages/{name}")
@@ -3598,9 +3634,8 @@ def watcher_info() -> dict:
     daher aus eigener Kraft nie aktuell werden. Ohne diese Anzeige bleibt das
     unbemerkt, waehrend Korrekturen scheinbar wirkungslos verpuffen.
     """
-    import json as _json
-    path = DATA_DIR / "update" / "watcher.json"
-    if not path.exists():
+    data = _lies_zustand(WATCHER_INFO, WATCHER_INFO_ALT)
+    if data is None:
         return {
             "version": None,
             "ok": False,
@@ -3609,10 +3644,6 @@ def watcher_info() -> dict:
                     "vor 0.4.3 kann sich nicht selbst erneuern und muss "
                     "einmalig von Hand ersetzt werden.",
         }
-    try:
-        data = _json.loads(path.read_text())
-    except Exception:  # noqa: BLE001
-        return {"version": None, "ok": False, "hint": "watcher.json nicht lesbar"}
 
     expected = update_manager.get_current_version()
     data["ok"] = True

@@ -56,7 +56,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS
 echo ">>> Benutzer und Verzeichnisse"
 id -u co37 >/dev/null 2>&1 || \
   useradd -r -s /usr/sbin/nologin -d "$BASE" co37
-mkdir -p "$BASE"/{data,data/update,update_backups}
+mkdir -p "$BASE"/{data,data/update,update_backups,state,db_backups}
 
 # ---------------------------------------------------------------------
 # Virtualenv
@@ -106,6 +106,21 @@ fi
 chown -R root:root "$BASE"
 chown -R co37:co37 "$BASE/data"
 chmod 700 "$BASE/data"
+
+# state/ ist die Gegenrichtung zu data/: dorthin meldet der als root
+# laufende Watcher seinen Stand, und das Backend liest ihn. Lesbar fuer
+# alle, beschreibbar nur fuer root - das ist der ganze Zweck. Lag der
+# Stand wie bis 0.37.5 unter data/, war jeder Schreibzugriff des Watchers
+# ein Hebel nach root: co37 legt unter dem erwarteten Namen eine
+# Verknuepfung ab, root schreibt hindurch und uebereignet anschliessend
+# per chown das Ziel (Sicherheitspruefung 2026-08-31, F-18).
+chmod 755 "$BASE/state"
+
+# Die taegliche Sicherung laeuft als root. Ihr Ziel darf deshalb nicht in
+# data/ liegen - sqlite3 ".backup" folgt einer Verknuepfung und legt die
+# Datei an, wohin sie zeigt. Damit haette co37 einmal taeglich einen
+# Schreibzugriff als root an frei gewaehlter Stelle (F-20).
+chmod 700 "$BASE/db_backups"
 
 # ---------------------------------------------------------------------
 # Geheimnisse fuer den Dienst
@@ -219,10 +234,22 @@ fi
 # ---------------------------------------------------------------------
 cat > /etc/cron.daily/co37-backup <<EOF
 #!/bin/sh
-mkdir -p $BASE/data/backup
-sqlite3 $BASE/data/co37.db ".backup $BASE/data/backup/co37-\$(date +%u).db"
+# Ziel bewusst NICHT unter data/ - siehe die Begruendung oben bei
+# db_backups. Das Verzeichnis gehoert root und ist 700.
+mkdir -p $BASE/db_backups
+chmod 700 $BASE/db_backups
+sqlite3 $BASE/data/co37.db ".backup $BASE/db_backups/co37-\$(date +%u).db"
 EOF
 chmod +x /etc/cron.daily/co37-backup
+
+# Alte Sicherungen aus der Zeit, als sie in co37-Gebiet lagen. Sie sind
+# nicht falsch, stehen aber am gefaehrdeten Ort - und wer sie dort noch
+# findet, haelt sie fuer den aktuellen Stand.
+if [ -d "$BASE/data/backup" ]; then
+  echo "    Hinweis: alte Datensicherungen liegen noch unter"
+  echo "             $BASE/data/backup - neue entstehen unter"
+  echo "             $BASE/db_backups. Die alten von Hand pruefen und entfernen."
+fi
 
 # ---------------------------------------------------------------------
 # Abschluss
