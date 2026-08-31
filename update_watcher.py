@@ -97,7 +97,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.37.4"
+WATCHER_VERSION = "0.37.5"
 WATCHER_INFO = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
 
@@ -604,6 +604,25 @@ def do_update():
         ok, lines = build_packages()
         for e in lines[-25:]:
             append_eintrag(status, e)
+
+        # Auch hierhin, nicht nur ins Update-Protokoll. Der Agents-Reiter
+        # zeigt ausschliesslich build_status.json an - schreibt dieser Weg
+        # es nicht, steht dort nach einem Update weiter der Stand des
+        # letzten Bauens ueber den Knopf, samt dessen gruenem "fertig",
+        # neben frisch gebauten Paketen einer neueren Fassung. Am
+        # 2026-08-31 genau so aufgefallen: Dateien 0.37.4, Protokoll
+        # 0.37.3.
+        #
+        # Bewusst nur der Endzustand, kein "running" vorweg: bricht das
+        # Update zwischendurch ab, bliebe ein "running" stehen und der
+        # Knopf waere dauerhaft gesperrt. Lieber kurz der alte Stand als
+        # eine Sperre, die sich nicht von selbst loest.
+        write_build_status({
+            "state": "success" if ok else "error",
+            "log": lines,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        })
+
         if not ok:
             append_log(status, "upd.log.build_failed_ok")
 

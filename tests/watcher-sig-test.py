@@ -272,6 +272,35 @@ check("keine Anweisung hinter return/raise im selben Block",
       not tot, "; ".join(tot))
 
 # ======================================================================
+# Jeder Bauweg meldet seinen Stand
+# ======================================================================
+# Am 2026-08-31 aufgefallen: der Agents-Reiter zeigt ausschliesslich
+# build_status.json. Geschrieben hat es nur handle_build_request() - der
+# Weg ueber den Knopf. do_update() baut die Pakete ebenfalls, meldete den
+# Stand aber nur ins Update-Protokoll. Ergebnis in der Oberflaeche:
+# Pakete der Fassung 0.37.4, daneben das Protokoll von 0.37.3 mit einem
+# gruenen "fertig", das zu einem anderen Lauf gehoerte.
+#
+# Ueber den Baum statt ueber Zeichenketten, damit ein dritter Bauweg
+# genauso auffaellt: WER build_packages() aufruft, MUSS in derselben
+# Funktion auch write_build_status() aufrufen.
+print("--- Jeder Bauweg schreibt build_status.json ---")
+
+
+def _aufrufe(fn):
+    return {k.func.id for k in ast.walk(fn)
+            if isinstance(k, ast.Call) and isinstance(k.func, ast.Name)}
+
+
+bauer = [k for k in ast.walk(baum)
+         if isinstance(k, ast.FunctionDef) and "build_packages" in _aufrufe(k)]
+check("es gibt ueberhaupt Aufrufer von build_packages()",
+      len(bauer) >= 2, [f.name for f in bauer])
+ohne = [f.name for f in bauer if "write_build_status" not in _aufrufe(f)]
+check("jeder Aufrufer meldet den Stand auch nach build_status.json",
+      not ohne, ohne)
+
+# ======================================================================
 # Das Backend legt die Signatur ueberhaupt erst ab
 # ======================================================================
 print("--- Backend hinterlegt die Signatur ---")
