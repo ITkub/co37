@@ -286,6 +286,22 @@ class User(SQLModel, table=True):
 
     disabled: bool = Field(default=False)
 
+    # Darf dieses Konto Neustarts anlegen und einplanen?
+    #
+    # Vorgabe nein, und das ist die eigentliche Entscheidung: bis 0.37.6
+    # durfte JEDES angemeldete Konto auf JEDEM freigegebenen Host einen
+    # Neustart ausloesen - und weil create_job() dabei selbst
+    # params["manual"]=True setzt, umging der auch noch Wartungsfenster
+    # und Neustartrichtlinie. Ein einziger Aufruf startete damit einen
+    # Produktivserver mitten am Tag neu (Sicherheitspruefung 2026-08-31,
+    # F-22).
+    #
+    # Administratoren duerfen es immer, unabhaengig von diesem Feld. Fuer
+    # die Rolle 'user' hakt ein Administrator es beim Anlegen an oder
+    # spaeter nach. Scannen und Patchen bleiben ohne dieses Recht
+    # erlaubt - das ist der Alltag, um den es geht.
+    may_reboot: bool = Field(default=False)
+
     # Sprache der Oberflaeche. None heisst ausdruecklich "nicht gewaehlt",
     # dann gilt die Vorgabe der Installation. Ein Vorgabewert 'en' waere
     # hier falsch: er liesse sich nicht mehr von einer bewussten Wahl

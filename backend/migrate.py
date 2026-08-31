@@ -54,7 +54,14 @@ logger = logging.getLogger(__name__)
 #    haelt den Bereichs-Zeitplan pro Host fest, getrennt von last_patch_run -
 #    sonst wuerde der zuerst meldende Host im Bereich den Termin fuer alle
 #    anderen als erledigt markieren.
-SCHEMA_VERSION = 17
+# 18: user.may_reboot - das Recht, Neustarts anzulegen und einzuplanen.
+#    Vorgabe 0, also NEIN, und zwar auch fuer alle BESTEHENDEN Konten.
+#    Das ist Absicht: die Einschraenkung soll beim Einspielen greifen und
+#    nicht erst, wenn jemand daran denkt. Administratoren sind davon
+#    unberuehrt, sie duerfen es ueber ihre Rolle. Wer einem vorhandenen
+#    'user'-Konto das Recht geben will, hakt es danach in der
+#    Benutzerverwaltung an.
+SCHEMA_VERSION = 18
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -96,6 +103,10 @@ EXPECTED_COLUMNS = {
         # jedem bestehenden Konto eine bewusste Wahl fuer Englisch - eine
         # spaeter geaenderte Vorgabe erreichte diese Konten nie mehr.
         "language": "VARCHAR",
+        # Siehe SCHEMA_VERSION 18 oben: bewusst DEFAULT 0, damit auch
+        # bestehende Konten das Recht erst bekommen, wenn es jemand
+        # ausdruecklich vergibt.
+        "may_reboot": "BOOLEAN DEFAULT 0",
     },
 }
 

@@ -517,11 +517,30 @@ def client_ip(request: Optional[Request]) -> Optional[str]:
         return None
     if via_trusted_proxy(request):
         fwd = request.headers.get("x-forwarded-for", "")
-        # Erster Eintrag ist der urspruengliche Aufrufer; die weiteren sind
-        # zwischengeschaltete Proxys.
-        first = fwd.split(",")[0].strip()
-        if first:
-            return first
+        # VON RECHTS lesen, nicht von links.
+        #
+        # Bis 0.37.6 stand hier fwd.split(",")[0] - der erste Eintrag. Das
+        # ist nur richtig, wenn der Proxy die Kopfzeile ERSETZT. Die
+        # verbreitete nginx-Vorgabe $proxy_add_x_forwarded_for haengt an,
+        # Traefik ebenso. Der Aufrufer schickt dann selbst
+        # "X-Forwarded-For: 1.2.3.4", der Proxy macht daraus
+        # "1.2.3.4, <echte Adresse>" - und der erste Eintrag war der frei
+        # erfundene. Damit liess sich die Anmeldedrosselung vollstaendig
+        # umgehen: je Versuch eine neue Fantasieadresse, und der Zaehler
+        # fing immer wieder bei null an (F-22 der Pruefung vom
+        # 2026-08-31). Im Pruefprotokoll stand dieselbe Erfindung.
+        #
+        # Rechts steht, was der letzte Proxy selbst gesehen hat, und das
+        # ist die einzige Angabe, die nicht vom Aufrufer stammt. Bei einer
+        # Kette werden die eingetragenen Proxys von rechts uebersprungen,
+        # bis der erste Eintrag kommt, der keiner ist - das ist der
+        # Aufrufer.
+        eintraege = [e.strip() for e in fwd.split(",") if e.strip()]
+        for kandidat in reversed(eintraege):
+            if kandidat not in _PROXY_CFG["trusted"]:
+                return kandidat
+        # Nur eingetragene Proxys in der Kopfzeile (oder sie ist leer):
+        # dann ist die Gegenstelle selbst die beste Auskunft.
     return peer_ip(request)
 
 
@@ -736,6 +755,20 @@ class Principal:
     @property
     def is_admin(self) -> bool:
         return self.role == Role.admin
+
+    @property
+    def may_reboot(self) -> bool:
+        """
+        Darf dieser Aufrufer Neustarts anlegen und einplanen?
+
+        Administratoren immer, sonst nur mit dem Recht am Konto. Die
+        Entscheidung steht hier und nicht an der Route, damit es genau
+        EINE Stelle gibt, die sie faellt - die Oberflaeche fragt dasselbe
+        ueber /api/v1/me ab, darf aber nie die massgebliche sein.
+        """
+        if self.is_admin:
+            return True
+        return bool(self.user and self.user.may_reboot)
 
 
 def _session_by_token(token: str, session: Session) -> Optional[LoginSession]:
@@ -2938,7 +2971,9 @@ def host_updates(host_id: int, session: Session = Depends(get_session)):
 @app.post("/api/v1/hosts/{host_id}/jobs", response_model=JobRead,
           dependencies=[Depends(require_login)])
 def create_job(
-    host_id: int, payload: JobCreate, session: Session = Depends(get_session)
+    host_id: int, payload: JobCreate, request: Request,
+    who: Principal = Depends(require_login),
+    session: Session = Depends(get_session),
 ):
     host = session.get(Host, host_id)
     if not host:
@@ -2946,7 +2981,63 @@ def create_job(
     if host.approval_state != ApprovalState.approved:
         raise HTTPException(400, "Host ist nicht freigegeben")
 
-    params = dict(payload.params)
+    # Wer darf was ausloesen (F-22)
+    #
+    # Bis 0.37.6 hing die Route nur an require_login: jedes angemeldete
+    # Konto konnte auf jedem Host jede Auftragsart anlegen. Beim Neustart
+    # war das besonders bitter, weil die Route unten selbst manual=True
+    # setzt und damit Wartungsfenster UND Neustartrichtlinie uebergeht.
+    #
+    # Scan und Patch bleiben fuer jeden Angemeldeten - das ist der Alltag.
+    if payload.job_type == JobType.reboot and not who.may_reboot:
+        raise HTTPException(
+            403,
+            "Dieses Konto darf keine Neustarts ausloesen. Ein Administrator "
+            "kann das Recht in der Benutzerverwaltung vergeben.",
+        )
+    # Die Selbstaktualisierung ist keine Bedienhandlung. Sie laeuft
+    # automatisch beim Heartbeat und von Hand ueber die Einstellungen -
+    # beide Wege gehen ueber _queue_selfupdate() und achten dabei auf
+    # Staffelung und schon offene Auftraege. Ueber diese Route umgeht man
+    # beides, deshalb hier nur fuer Administratoren.
+    if payload.job_type == JobType.selfupdate and not who.is_admin:
+        raise HTTPException(403, "Nur fuer Administratoren")
+
+    # Was der Aufrufer an params mitschicken darf - und sonst nichts.
+    #
+    # 'params' war ein freies dict, aus dem das Backend anschliessend
+    # seine EIGENEN Steuerflaggen liest: manual, skip_downtime,
+    # allow_without_downtime, allow_partial_downtime, reboot_if_needed,
+    # source_area_id, followup. Jede dieser Bremsen liess sich damit vom
+    # Aufrufer abschalten - Massenzuweisung in den Steuerkanal des
+    # Auftrags (F-22). Sie werden weiter unten gesetzt, aber vom Backend,
+    # nicht vom Aufrufer.
+    #
+    # Weisse Liste statt schwarzer: eine neue Flagge im Backend ist damit
+    # von sich aus zu, und nicht erst, wenn jemand daran denkt.
+    #
+    # Uebrig bleibt genau ein Wert, den die Oberflaeche wirklich schickt:
+    # source_area_id bei Sammelauftraegen ueber einen Bereich. Er
+    # entscheidet in agent_pre_reboot(), wessen Checkmk-Verknuepfung die
+    # Downtime bekommt - deshalb wird er unten gegen den Host geprueft
+    # und nicht einfach uebernommen.
+    ERLAUBTE_PARAMS = {"source_area_id"}
+    params = {k: v for k, v in (payload.params or {}).items()
+              if k in ERLAUBTE_PARAMS}
+
+    # Ein Bereich, dem dieser Host gar nicht angehoert, waere das Ausleihen
+    # einer fremden Downtime-Einstellung - bis hin zu einem Bereich mit
+    # checkmk_downtime_all. Der Sammelauftrag der Oberflaeche schickt immer
+    # den eigenen Bereich des Hosts; alles andere ist keine Bedienung.
+    if "source_area_id" in params:
+        try:
+            gewaehlt = int(params["source_area_id"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Ungueltiger Bereich")
+        if gewaehlt != (host.area_id or 0):
+            raise HTTPException(
+                400, "Der Host gehoert nicht zu diesem Bereich")
+        params["source_area_id"] = gewaehlt
 
     # Manueller oder geplanter Neustart: Richtlinie und Wartungsfenster
     # werden umgangen, die Downtime nur auf ausdruecklichen Wunsch.
@@ -3004,6 +3095,16 @@ def create_job(
         expires_at=expires,
     )
     session.add(job)
+
+    # Ins Pruefprotokoll. Es gab bisher keinen Eintrag dazu und im Job
+    # steht kein Urheber - wer ein Produktivsystem zur Unzeit neu
+    # gestartet hat, liess sich hinterher nicht feststellen (F-24).
+    # BSI IT-Grundschutz OPS.1.1.3.A11 verlangt genau das: Aenderungen
+    # durchgehend dokumentieren.
+    audit(session, who.name, f"job.{payload.job_type.value}",
+          host.hostname + (f" (geplant {scheduled:%d.%m. %H:%M})"
+                           if scheduled else ""),
+          request)
     session.commit()
     session.refresh(job)
     return job
@@ -3678,6 +3779,12 @@ class UserCreate(BaseModel):
     username: str
     password: str
     role: Role = Role.user
+    # Vorgabe nein - wer das Recht will, hakt es ausdruecklich an.
+    may_reboot: bool = False
+
+
+class UserRechte(BaseModel):
+    may_reboot: bool
 
 
 class PasswordReset(BaseModel):
@@ -3815,6 +3922,11 @@ def whoami(who: Principal = Depends(require_login)):
         "username": who.name,
         "role": who.role.value,
         "is_admin": who.is_admin,
+        # Damit die Oberflaeche den Neustart-Knopf gar nicht erst anbietet.
+        # Massgeblich ist trotzdem die Pruefung in create_job() - hier geht
+        # es nur darum, niemandem einen Knopf hinzustellen, der dann 403
+        # liefert.
+        "may_reboot": who.may_reboot,
         "must_change_password": bool(
             who.user.must_change_password if who.user else False),
         # None heisst "nicht gewaehlt". Die Oberflaeche faellt dann auf die
@@ -3907,6 +4019,9 @@ def list_users(who: Principal = Depends(require_admin),
             "username": u.username,
             "role": u.role.value,
             "disabled": u.disabled,
+            # Administratoren duerfen es ueber ihre Rolle; das Feld selbst
+            # steht bei ihnen auf False und waere in der Liste irrefuehrend.
+            "may_reboot": u.role == Role.admin or u.may_reboot,
             "created_at": u.created_at,
             "last_login": u.last_login,
         }
@@ -3926,13 +4041,55 @@ def create_user(payload: UserCreate, request: Request,
     _check_password(payload.password)
 
     user = User(username=name, role=payload.role,
+                may_reboot=payload.may_reboot,
                 password_hash=hash_password(payload.password))
     session.add(user)
     audit(session, who.name, "user.create",
-          f"{name} als {payload.role.value}", request)
+          f"{name} als {payload.role.value}"
+          + (", darf Neustarts" if payload.may_reboot else ""), request)
     session.commit()
     session.refresh(user)
-    return {"id": user.id, "username": user.username, "role": user.role.value}
+    return {"id": user.id, "username": user.username, "role": user.role.value,
+            "may_reboot": user.role == Role.admin or user.may_reboot}
+
+
+@app.patch("/api/v1/users/{user_id}/rechte")
+def set_user_rechte(user_id: int, payload: UserRechte, request: Request,
+                    who: Principal = Depends(require_admin),
+                    session: Session = Depends(get_session)):
+    """
+    Setzt das Neustart-Recht eines Kontos nachtraeglich.
+
+    Eigene Route statt eines allgemeinen Benutzer-PATCH: was hier
+    einstellbar ist, soll an der Route abzulesen sein. Ein Sammelendpunkt
+    waere die Einladung, spaeter role oder disabled mit hineinzureichen -
+    und genau solche Massenzuweisung ist der Befund, der zu dieser
+    Aenderung gefuehrt hat.
+    """
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "Benutzer nicht gefunden")
+    if user.role == Role.admin:
+        raise HTTPException(
+            400, "Administratoren duerfen Neustarts ueber ihre Rolle")
+
+    user.may_reboot = payload.may_reboot
+    session.add(user)
+
+    # Alle Sitzungen dieses Kontos verwerfen. Sonst behielte die
+    # Oberflaeche eines gerade angemeldeten Benutzers ihren Knopf, bis er
+    # sich neu anmeldet - und ein entzogenes Recht, das erst spaeter
+    # greift, ist kein entzogenes Recht.
+    for row in session.exec(
+        select(LoginSession).where(LoginSession.user_id == user.id)
+    ).all():
+        session.delete(row)
+
+    audit(session, who.name, "user.rechte",
+          f"{user.username}: Neustarts "
+          + ("erlaubt" if payload.may_reboot else "entzogen"), request)
+    session.commit()
+    return {"ok": True, "may_reboot": user.may_reboot}
 
 
 @app.post("/api/v1/users/{user_id}/password")

@@ -205,7 +205,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
   + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
-  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, "
+  + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
@@ -1130,9 +1130,36 @@ global.setTimeout = origSetTimeout;
     const headUser = api.renderAreaHead(areaX, 3, false);
     check("'...'-Knopf OHNE Administratorrechte nicht vorhanden",
           !headUser.includes('data-act="areaedit"'));
-    check("Check/Patch/Restart aber auch ohne Administratorrechte da",
-          headUser.includes('data-act="areascan"') && headUser.includes('data-act="areapatch"')
-          && headUser.includes('data-act="areareboot"'));
+    check("Check und Patch auch ohne Administratorrechte da",
+          headUser.includes('data-act="areascan"')
+          && headUser.includes('data-act="areapatch"'));
+
+    // --- Neustart haengt seit 0.37.7 am Recht des Kontos, nicht an der
+    // Rolle (F-22). Bis dahin durfte jedes angemeldete Konto auf jedem
+    // Host neu starten - unter Umgehung von Wartungsfenster und
+    // Neustartrichtlinie, weil create_job() dabei manual=True setzt.
+    const merkeMe = api.getMe();
+    api.setMe({ username: "b", role: "user", is_admin: false, may_reboot: false });
+    const ohneRecht = api.renderAreaHead(areaX, 3, false);
+    check("ohne Neustart-Recht kein Restart-Knopf am Bereichs-Kopf",
+          !ohneRecht.includes('data-act="areareboot"'));
+    check("Check und Patch bleiben trotzdem",
+          ohneRecht.includes('data-act="areascan"')
+          && ohneRecht.includes('data-act="areapatch"'));
+    const ohneRechtHost = api.renderUnit(
+      { id: 4711, hostname: "h", approval_state: "approved", os_type: "linux" },
+      0, false);
+    check("und auch keiner an der Hostzeile",
+          !ohneRechtHost.includes('data-act="reboot"'));
+
+    api.setMe({ username: "b", role: "user", is_admin: false, may_reboot: true });
+    check("mit Neustart-Recht ist er da",
+          api.renderAreaHead(areaX, 3, false).includes('data-act="areareboot"'));
+    check("auch an der Hostzeile",
+          api.renderUnit(
+            { id: 4711, hostname: "h", approval_state: "approved",
+              os_type: "linux" }, 0, false).includes('data-act="reboot"'));
+    api.setMe(merkeMe);
 
     // Der Edit-Knopf in Settings -> Bereiche ist weg - Bearbeiten laeuft
     // jetzt ausschliesslich ueber den Bereichs-Kopf auf der Hauptseite.

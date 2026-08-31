@@ -162,10 +162,48 @@ check("fremde Adresse gilt nicht",
       not main.via_trusted_proxy(fake_request(peer="10.0.0.6")))
 
 # ------------------------------------------------- echte Absenderadresse
+#
+# F-21, 2026-08-31: gelesen wurde der ERSTE Eintrag aus X-Forwarded-For.
+# Das ist nur richtig, wenn der Proxy die Kopfzeile ersetzt. Die
+# verbreitete nginx-Vorgabe $proxy_add_x_forwarded_for haengt dagegen an,
+# Traefik ebenso - dann steht vorne, was der Aufrufer selbst geschickt
+# hat. Damit liess sich die Anmeldedrosselung vollstaendig umgehen: je
+# Versuch eine neue Fantasieadresse, und der Zaehler fing bei null an.
+# Im Pruefprotokoll stand dieselbe Erfindung.
+#
+# Seit 0.37.7 wird von RECHTS gelesen, unter Ueberspringen der
+# eingetragenen Proxys.
 configure(trusted=PROXY, https_only=False)
-req = fake_request(peer=PROXY, headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"})
-check("echter Aufrufer wird uebernommen",
+
+req = fake_request(peer=PROXY, headers={"x-forwarded-for": "203.0.113.9"})
+check("einzelner Eintrag wird uebernommen",
       main.client_ip(req) == "203.0.113.9", main.client_ip(req))
+
+# Der Angriff: der Aufrufer setzt selbst eine Adresse, der Proxy haengt
+# seine Sicht hinten an. Massgeblich ist, was der Proxy gesehen hat.
+req = fake_request(peer=PROXY,
+                   headers={"x-forwarded-for": "1.2.3.4, 203.0.113.9"})
+check("eine vorangestellte Fantasieadresse zaehlt nicht",
+      main.client_ip(req) == "203.0.113.9", main.client_ip(req))
+
+# Kette aus zwei eingetragenen Proxys: die eigenen werden von rechts
+# uebersprungen, uebrig bleibt der Aufrufer.
+configure(trusted=f"{PROXY}, 10.0.0.1", https_only=False)
+req = fake_request(peer=PROXY,
+                   headers={"x-forwarded-for": "1.2.3.4, 203.0.113.9, 10.0.0.1"})
+check("eingetragene Proxys werden von rechts uebersprungen",
+      main.client_ip(req) == "203.0.113.9", main.client_ip(req))
+
+# Stehen nur eigene Proxys darin, ist die Gegenstelle die beste Auskunft.
+req = fake_request(peer=PROXY, headers={"x-forwarded-for": "10.0.0.1"})
+check("nur eigene Proxys: Gegenstelle gilt",
+      main.client_ip(req) == PROXY, main.client_ip(req))
+
+configure(trusted=PROXY, https_only=False)
+req = fake_request(peer=PROXY, headers={"x-forwarded-for": "   "})
+check("leere Kopfzeile faellt auf die Gegenstelle zurueck",
+      main.client_ip(req) == PROXY, main.client_ip(req))
+
 req = fake_request(peer="192.0.2.77", headers={"x-forwarded-for": "203.0.113.9"})
 check("von fremder Adresse wird die Kopfzeile ignoriert",
       main.client_ip(req) == "192.0.2.77", main.client_ip(req))

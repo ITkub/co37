@@ -505,6 +505,21 @@ function hostAreaGiltig(h){
   return !!(h.area_id && AREAS.some(a => a.id === h.area_id));
 }
 
+// Darf das angemeldete Konto Neustarts anlegen?
+//
+// Eine Funktion statt einer Variablen, weil renderUnit() und
+// renderAreaHead() sie beide brauchen und in verschiedenen Bereichen
+// liegen. Rein zur Anzeige: durchgesetzt wird das Recht in create_job(),
+// hier geht es nur darum, keinen Knopf hinzustellen, der 403 liefert.
+function darfNeustart(){
+  // is_admin steht mit dabei, obwohl das Backend may_reboot fuer
+  // Administratoren ohnehin auf true setzt: so bleibt der Knopf auch
+  // dann richtig, wenn die Oberflaeche gegen ein Backend laeuft, das das
+  // Feld noch nicht kennt.
+  return !!(ME && (ME.is_admin || ME.may_reboot));
+}
+
+
 function renderAreaHead(area, count, admin){
   // Dieselben Knoepfe wie eine Host-Zeile (Check/Patch/Restart), nur ohne
   // History - die gibt es nur pro einzelnem Host. "..." oeffnet denselben
@@ -518,7 +533,7 @@ function renderAreaHead(area, count, admin){
     <div class="actions">
       <button data-act="areascan" data-id="${area.id}">${t("act.scan")}</button>
       <button data-act="areapatch" data-id="${area.id}">${t("act.patch")}</button>
-      <button class="warn" data-act="areareboot" data-id="${area.id}">${t("act.reboot")}</button>
+      ${darfNeustart() ? `<button class="warn" data-act="areareboot" data-id="${area.id}">${t("act.reboot")}</button>` : ""}
       ${admin ? `<button data-act="areaedit" data-id="${area.id}">…</button>` : ""}
     </div>
   </div>`;
@@ -621,7 +636,7 @@ function renderUnit(h, i, admin){
           : `${act ? `<button class="primary" data-act="live" data-id="${act.id}" data-title="${esc(h.display_name||h.hostname)}">${t("act.live")}</button>` : ""}
              <button data-act="scan" data-id="${h.id}">${t("act.scan")}</button>
              <button data-act="patch" data-id="${h.id}">${t("act.patch")}</button>
-             <button class="warn" data-act="reboot" data-id="${h.id}">${t("act.reboot")}</button>
+             ${darfNeustart() ? `<button class="warn" data-act="reboot" data-id="${h.id}">${t("act.reboot")}</button>` : ""}
              <button data-act="detail" data-id="${h.id}">${t("act.history")}</button>`}
         ${admin ? `<button data-act="edithost" data-id="${h.id}">…</button>` : ""}
       </div>
@@ -847,6 +862,7 @@ const ACTIONS = {
   canceljob:  (d) => cancelJob(+d.id),
   pick:       (d) => togglePick(d.name),
   day:        (d) => toggleDay(d.day),
+  togglereboot: (d) => toggleReboot(+d.id, d.username, !d.on),
   resetpw:    (d) => resetPw(+d.id, d.username),
   deluser:    (d) => delUser(+d.id, d.username),
   areaedit:   (d) => editArea(+d.id),
@@ -2140,12 +2156,26 @@ async function loadUsers(){
     <div class="vrow" style="margin-bottom:5px">
       <span>${esc(u.username)}${u.username === me ? t("settings.users.you_suffix") : ""}<br>
         <span style="color:var(--muted-2)">${u.role === "admin" ? t("settings.users.role_admin") : t("settings.users.role_user")}
+        ${u.may_reboot ? "· " + t("settings.users.reboot_allowed") : ""}
         · ${u.last_login ? t("settings.users.last_login", { when: fmtTime(u.last_login) }) : t("settings.users.never_logged_in")}</span></span>
       <span style="display:flex;gap:8px">
+        ${u.role === "admin" ? "" : `<button data-act="togglereboot" data-id="${u.id}"
+          data-username="${esc(u.username)}" data-on="${u.may_reboot ? "1" : ""}"
+          >${u.may_reboot ? t("settings.users.reboot_revoke") : t("settings.users.reboot_grant")}</button>`}
         <button data-act="resetpw" data-id="${u.id}" data-username="${esc(u.username)}">${t("settings.users.set_password")}</button>
         <button class="danger" data-act="deluser" data-id="${u.id}" data-username="${esc(u.username)}"
           ${u.username === me ? "disabled" : ""}>${t("settings.users.remove")}</button>
       </span></div>`).join("");
+}
+
+async function toggleReboot(id, name, an){
+  // Das Backend verwirft dabei die Sitzungen des Kontos - ein entzogenes
+  // Recht, das erst bei der naechsten Anmeldung greift, waere keines.
+  if (!confirm(t(an ? "ask.reboot_grant" : "ask.reboot_revoke", { name }))) return;
+  try { await api("PATCH", `/api/v1/users/${id}/rechte`, { may_reboot: an }); }
+  catch(e){ return; }
+  toast(t(an ? "msg.reboot_granted" : "msg.reboot_revoked", { name }));
+  loadUsers(); loadAudit();
 }
 
 async function resetPw(id, name){
@@ -2169,11 +2199,13 @@ document.getElementById("nuAdd").onclick = async () => {
   const username = document.getElementById("nuName").value.trim();
   const password = document.getElementById("nuPass").value;
   const role = document.getElementById("nuRole").value;
+  const may_reboot = document.getElementById("nuReboot").checked;
   if (!username || !password){ toast(t("msg.need_name_pw"), true); return; }
-  try { await api("POST", "/api/v1/users", {username, password, role}); }
+  try { await api("POST", "/api/v1/users", {username, password, role, may_reboot}); }
   catch(e){ return; }
   document.getElementById("nuName").value = "";
   document.getElementById("nuPass").value = "";
+  document.getElementById("nuReboot").checked = false;
   toast(t("msg.created", { name: username }));
   loadUsers(); loadAudit();
 };

@@ -70,12 +70,34 @@ Nötig ist, dass der Proxy diese Kopfzeilen setzt:
 
 | Kopfzeile | Wert |
 |---|---|
-| `X-Forwarded-For` | Adresse des ursprünglichen Aufrufers |
+| `X-Forwarded-For` | Adresse des ursprünglichen Aufrufers, **am Ende angehängt** |
 | `X-Forwarded-Proto` | `https` |
 | `Host` | der DNS-Name, unverändert |
 
 Die meisten Proxys tun das von sich aus. Nach dem Einrichten prüfen —
 siehe Abschnitt 6.
+
+### Warum „am Ende angehängt" hier steht
+
+Proxys gehen mit `X-Forwarded-For` unterschiedlich um: manche **ersetzen**
+die Kopfzeile, manche **hängen an**. nginx tut mit der verbreiteten
+Schreibweise `$proxy_add_x_forwarded_for` das Zweite, Traefik ebenfalls.
+Schickt der Aufrufer dann selbst ein `X-Forwarded-For: 1.2.3.4`, kommt bei
+CO-37 `1.2.3.4, <echte Adresse>` an.
+
+CO-37 liest deshalb seit 0.37.7 **von rechts** und überspringt dabei die
+unter „Zugang" eingetragenen Proxy-Adressen. Was übrig bleibt, hat der
+letzte Proxy selbst gesehen und stammt nicht vom Aufrufer.
+
+Bis 0.37.6 wurde der **erste** Eintrag genommen. Hinter einem anhängenden
+Proxy war das der frei erfundene Wert — und damit ließ sich die Drosselung
+der Anmeldung vollständig umgehen: je Versuch eine neue Fantasieadresse,
+und der Zähler fing immer wieder bei null an. Im Prüfprotokoll stand
+dieselbe Erfindung.
+
+Beide Verhaltensweisen funktionieren jetzt. Wer die Wahl hat, lässt den
+Proxy anhängen (`$proxy_add_x_forwarded_for`) — dann bleibt die Kette
+nachvollziehbar.
 
 **Nicht nötig:** WebSocket-Unterstützung. CO-37 fragt zyklisch ab.
 

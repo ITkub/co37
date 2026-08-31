@@ -353,6 +353,112 @@ if erlaubt:
         code, _ = call(f"/api/v1/hosts/{ziel[0][1]}/approve", {}, hdr=adm)
         check("erneute Freigabe am Limit moeglich", code == 200, code)
 
+# =====================================================================
+# F-22 - Neustarts sind ein eigenes Recht
+# =====================================================================
+# Bis 0.37.6 durfte jedes angemeldete Konto auf JEDEM freigegebenen Host
+# jede Auftragsart anlegen. Beim Neustart war das besonders bitter, weil
+# create_job() dabei selbst params["manual"]=True setzt - und der uebergeht
+# Wartungsfenster UND Neustartrichtlinie. Ein einziger Aufruf startete
+# damit einen Produktivserver mitten am Tag neu.
+print("\n--- Neustart-Recht je Konto ---")
+
+# Neu anmelden: weiter oben hat dieselbe Reihe das Passwort des Testkontos
+# geaendert, und ein Passwortwechsel verwirft alle Sitzungen des Kontos.
+# Ohne das antwortet hier alles mit 401 und die Pruefung sagt nichts aus.
+code, res = call("/api/v1/login", {"username": "tester",
+                                   "password": "neues-passwort-123"})
+check("Testkonto meldet sich mit dem neuen Passwort an", code == 200, code)
+usr = {"X-Session": res.get("session", "")} if code == 200 else {}
+
+# Einen bereits freigegebenen Host mitbenutzen statt einen neuen anzulegen:
+# der Freibetrag der Lizenz ist an dieser Stelle der Reihe schon
+# ausgereizt, eine weitere Freigabe scheiterte und create_job() antwortete
+# dann mit 400 ("Host ist nicht freigegeben") statt mit dem 403, um das es
+# hier geht.
+hosts = call("/api/v1/hosts", hdr=adm)[1]
+hid = next((h["id"] for h in hosts
+            if h.get("approval_state") == "approved"), None) \
+    if isinstance(hosts, list) else None
+check("ein freigegebener Host steht zur Verfuegung", hid is not None)
+if hid:
+    # Ohne das Recht: Scan und Patch ja, Neustart nein.
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "scan"}, hdr=usr)
+    check("ohne Recht: Scan erlaubt", code == 200, code)
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "patch"}, hdr=usr)
+    check("ohne Recht: Patch erlaubt", code == 200, code)
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "reboot"}, hdr=usr)
+    check("ohne Recht: Neustart abgewiesen", code == 403, code)
+    # Die Selbstaktualisierung ist keine Bedienhandlung: sie laeuft
+    # automatisch beim Heartbeat und von Hand ueber die Einstellungen,
+    # beide Wege mit Staffelung und Doppel-Auftrag-Sperre.
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "selfupdate"},
+                   hdr=usr)
+    check("ohne Recht: Selbstaktualisierung abgewiesen", code == 403, code)
+
+    # Die Oberflaeche muss es erfahren, sonst stellt sie einen Knopf hin,
+    # der 403 liefert.
+    code, me = call("/api/v1/me", hdr=usr)
+    check("/me meldet may_reboot=false", me.get("may_reboot") is False, me)
+
+    liste = call("/api/v1/users", hdr=adm)[1]
+    tester = next((u for u in liste if u["username"] == "tester"), None) \
+        if isinstance(liste, list) else None
+    check("der Testbenutzer steht in der Liste", tester is not None)
+
+    if tester:
+        code, _ = call(f"/api/v1/users/{tester['id']}/rechte",
+                       {"may_reboot": True}, method="PATCH", hdr=usr)
+        check("ein Benutzer darf sich das Recht nicht selbst geben",
+              code == 403, code)
+        code, _ = call(f"/api/v1/users/{tester['id']}/rechte",
+                       {"may_reboot": True}, method="PATCH", hdr=adm)
+        check("ein Administrator darf es vergeben", code == 200, code)
+
+        # Das Vergeben verwirft die Sitzungen des Kontos. Ein Recht, das
+        # erst bei der naechsten Anmeldung greift, ist beim Entziehen keines.
+        code, _ = call("/api/v1/me", hdr=usr)
+        check("die alte Sitzung ist danach ungueltig", code == 401, code)
+
+        code, res = call("/api/v1/login", {"username": "tester",
+                                           "password": "neues-passwort-123"})
+        usr2 = {"X-Session": res.get("session", "")} if code == 200 else {}
+        check("/me meldet may_reboot=true",
+              call("/api/v1/me", hdr=usr2)[1].get("may_reboot") is True)
+        code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "reboot"},
+                       hdr=usr2)
+        check("mit Recht: Neustart erlaubt", code == 200, code)
+
+        code, _ = call(f"/api/v1/users/{tester['id']}/rechte",
+                       {"may_reboot": False}, method="PATCH", hdr=adm)
+        check("das Recht laesst sich entziehen", code == 200, code)
+
+    # ----------------------------------------------- Steuerflaggen
+    # params war ein freies dict, aus dem das Backend seine EIGENEN Flaggen
+    # liest: manual, skip_downtime, allow_without_downtime, followup. Jede
+    # dieser Bremsen liess sich vom Aufrufer abschalten.
+    print("--- Steuerflaggen kommen nicht vom Aufrufer ---")
+    code, job = call(f"/api/v1/hosts/{hid}/jobs",
+                     {"job_type": "scan",
+                      "params": {"manual": True, "skip_downtime": True,
+                                 "allow_without_downtime": True,
+                                 "followup": True, "erfunden": "x"}},
+                     hdr=adm)
+    check("der Auftrag wird angelegt", code == 200, code)
+    if code == 200:
+        p = job.get("params") or {}
+        for flagge in ("manual", "skip_downtime", "allow_without_downtime",
+                       "followup", "erfunden"):
+            check(f"  {flagge} wurde verworfen", flagge not in p, p)
+
+    # Ein fremder Bereich waere das Ausleihen einer fremden
+    # Downtime-Einstellung - bis hin zu einer mit checkmk_downtime_all.
+    code, _ = call(f"/api/v1/hosts/{hid}/jobs",
+                   {"job_type": "patch",
+                    "params": {"source_area_id": 999999}}, hdr=adm)
+    check("ein fremder Bereich wird abgewiesen", code == 400, code)
+
+
 # --------------------------------------------------- Sicherheitskopfzeilen
 h = headers_of("/api/health")
 check("Kopfzeilen ueberhaupt vorhanden", h is not None)

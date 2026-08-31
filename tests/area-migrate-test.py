@@ -67,7 +67,12 @@ engine = create_engine(os.environ["CO37_DB"])
 SQLModel.metadata.create_all(engine)
 migrate.migrate(engine)
 
-check("Version nach dem Aufstieg ist 17", migrate.get_version(engine) == 17,
+# Gegen die Konstante, nicht gegen eine abgetippte Zahl: sonst gehoert
+# diese Zeile bei jeder Schemaerweiterung mitgepflegt, und wer das
+# vergisst, bekommt einen roten Test ohne echten Befund. Geprueft wird,
+# worauf es hier ankommt - dass der Aufstieg die Version fortschreibt.
+check(f"Version nach dem Aufstieg ist {migrate.SCHEMA_VERSION}",
+      migrate.get_version(engine) == migrate.SCHEMA_VERSION,
       migrate.get_version(engine))
 
 conn = sqlite3.connect(DB_PATH)
