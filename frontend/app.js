@@ -2225,6 +2225,26 @@ async function loadUsers(){
       </span></div>`).join("");
 }
 
+// Das Neustart-Recht ist eine Frage fuer die Rolle 'user'. Ein
+// Administrator hat es ueber seine Rolle, immer - Principal.may_reboot im
+// Backend liefert fuer ihn True, gleichgueltig was im Feld steht. Ein
+// Haekchen stehen zu lassen, das nichts bewirkt, ist irrefuehrend.
+function nuRechteAnzeigen(){
+  const istAdmin = document.getElementById("nuRole").value === "admin";
+  document.getElementById("nuRebootRow").style.display = istAdmin ? "none" : "";
+  document.getElementById("nuRebootHint").style.display = istAdmin ? "none" : "";
+  // Zuruecksetzen, damit ein vorher gesetztes Haekchen nicht unsichtbar
+  // weiterlebt und beim Zurueckschalten auf 'user' ueberrascht.
+  if (istAdmin) document.getElementById("nuReboot").checked = false;
+}
+
+document.getElementById("nuRole").addEventListener("change", nuRechteAnzeigen);
+// Einmal beim Laden: Browser stellen den Zustand eines <select> nach
+// einem Neuladen gerne wieder her, und dann stuende die Auswahl auf
+// "Administrator", waehrend die Zeile noch sichtbar waere.
+nuRechteAnzeigen();
+
+
 async function toggleReboot(id, name, an){
   // Das Backend verwirft dabei die Sitzungen des Kontos - ein entzogenes
   // Recht, das erst bei der naechsten Anmeldung greift, waere keines.

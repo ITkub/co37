@@ -205,7 +205,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "spracheImDialogZeigen, setzeSprache, "
   + "setVorgabeSprache: (s) => { VORGABE_SPRACHE = s; }, "
   + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
-  + "loadRollout, loadUsers, loadAudit, loadAccount, "
+  + "loadRollout, loadUsers, loadAudit, loadAccount, nuRechteAnzeigen, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
   + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
@@ -407,6 +407,37 @@ global.setTimeout = origSetTimeout;
           el("roState").textContent);
     check("Hinweistext vorhanden", el("roHint").innerHTML.length > 20);
   } catch(e){ check("loadRollout laeuft durch", false, e.message); }
+
+  console.log("\n=== Neustart-Haekchen beim Anlegen ===");
+  {
+    // Ein Administrator hat das Recht ueber seine Rolle - das Haekchen
+    // daneben taete nichts und behauptete das Gegenteil. Beim Umschalten
+    // auf "Administrator" muss es also verschwinden.
+    const rolle = el("nuRole"), zeile = el("nuRebootRow"),
+          hinweis = el("nuRebootHint"), haken = el("nuReboot");
+
+    rolle.value = "user";
+    api.nuRechteAnzeigen();
+    check("bei 'Benutzer' ist die Zeile sichtbar", zeile.style.display !== "none",
+          zeile.style.display);
+    check("und der Hinweis auch", hinweis.style.display !== "none",
+          hinweis.style.display);
+
+    haken.checked = true;
+    rolle.value = "admin";
+    api.nuRechteAnzeigen();
+    check("bei 'Administrator' ist die Zeile weg", zeile.style.display === "none",
+          zeile.style.display);
+    check("und der Hinweis ebenso", hinweis.style.display === "none",
+          hinweis.style.display);
+    check("ein gesetztes Haekchen wird dabei zurueckgenommen",
+          haken.checked === false, haken.checked);
+
+    rolle.value = "user";
+    api.nuRechteAnzeigen();
+    check("zurueck auf 'Benutzer' ist sie wieder da",
+          zeile.style.display !== "none", zeile.style.display);
+  }
 
   console.log("\n=== Meldungen bei offenem Dialog ===");
   {
