@@ -24,6 +24,10 @@ import urllib.error
 import urllib.request
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
+# Das Geruest aendert das Anfangspasswort beim Start (erzwungener
+# Wechsel, F-16). Wer diese Reihe einzeln gegen ein frisches Backend
+# laufen laesst, hat noch das Anfangspasswort - daher der Rueckfall.
+ADMIN_PW = os.getenv("CO37_TEST_ADMIN_PW", "admin")
 ADMIN = {"X-Session": os.getenv("CO37_TEST_SESSION", "")}
 
 fails = 0
@@ -104,7 +108,7 @@ check("ueber HTTP abgewiesen", code == 403, code)
 # ueber den unverschluesselten Zugang nicht an und niemand kaeme hinein.
 r = urllib.request.Request(
     B + "/api/v1/login",
-    data=json.dumps({"username": "admin", "password": "admin"}).encode(),
+    data=json.dumps({"username": "admin", "password": ADMIN_PW}).encode(),
     headers={"Content-Type": "application/json", **HTTPS})
 roh = urllib.request.urlopen(r, timeout=30).headers.get("Set-Cookie") or ""
 check("mit HTTPS-Zwang traegt das Cookie Secure",

@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -27,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.7"
+AGENT_VERSION = "0.37.8"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -183,9 +184,32 @@ def clear_token():
         log(f"Konfiguration nicht schreibbar: {exc}", err=True)
 
 
+# Was als Token durchgeht. Der Server liefert secrets.token_urlsafe(32),
+# also Base64 mit URL-Alphabet - mehr braucht es hier nicht.
+TOKEN_ERLAUBT = re.compile(r"^[A-Za-z0-9._-]{16,512}$")
+
+
 def set_token(token: str):
     """Speichert das erhaltene Dauertoken und entfernt das Enrollment-Token."""
     global TOKEN
+
+    # F-26: der Wert kommt aus einer Serverantwort und wird gleich
+    # zeilenweise in agent.conf geschrieben. Ohne Pruefung reicht ein
+    # Zeilenumbruch darin, um weitere Konfigurationszeilen einzuschleusen -
+    # und load_config() nimmt bei mehrfachem Schluessel den zuletzt
+    # gelesenen. Ein Token der Form
+    #
+    #     abc\nserver = http://angreifer\nverify_ssl = false
+    #
+    # haette den Agenten dauerhaft umgelenkt und die Zertifikatspruefung
+    # abgeschaltet. Erreichbar war das fuer jeden, der die Verbindung
+    # kontrolliert: die Anmeldung laeuft ohne Token, und eine Neuanmeldung
+    # laesst sich mit zwei Antworten 401 erzwingen.
+    if not TOKEN_ERLAUBT.match(token or ""):
+        raise ValueError(
+            "Der Server hat ein Token in unerwarteter Form geliefert - "
+            "es wird nicht gespeichert.")
+
     TOKEN = token
     lines, seen = [], False
     for line in CFG_PATH.read_text(encoding="utf-8").splitlines():

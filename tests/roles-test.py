@@ -26,6 +26,10 @@ import urllib.request
 
 B = os.getenv("CO37_TEST_URL", "http://127.0.0.1:8085")
 ADMIN_SESSION = os.getenv("CO37_TEST_SESSION", "")
+# Das Geruest aendert das Anfangspasswort beim Start (erzwungener
+# Wechsel, F-16). Wer diese Reihe einzeln gegen ein frisches Backend
+# laufen laesst, hat noch das Anfangspasswort - daher der Rueckfall.
+ADMIN_PW = os.getenv("CO37_TEST_ADMIN_PW", "admin")
 
 fails = 0
 
@@ -258,7 +262,7 @@ jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 req = urllib.request.Request(
     B + "/api/v1/login",
-    data=json.dumps({"username": "admin", "password": "admin"}).encode(),
+    data=json.dumps({"username": "admin", "password": ADMIN_PW}).encode(),
     headers={"Content-Type": "application/json"})
 resp = opener.open(req, timeout=30)
 roh = resp.headers.get("Set-Cookie") or ""
@@ -459,6 +463,154 @@ if hid:
     check("ein fremder Bereich wird abgewiesen", code == 400, code)
 
 
+# =====================================================================
+# F-24 - die eingreifenden Routen stehen im Pruefprotokoll
+# =====================================================================
+print("--- Eingriffe sind zuordenbar ---")
+code, eintraege = call("/api/v1/audit", hdr=adm)
+if code == 200 and isinstance(eintraege, list):
+    aktionen = {e.get("action") for e in eintraege}
+    # job.scan/job.patch/job.reboot sind oben angelegt worden, job.cancel
+    # gleich hier.
+    check("Auftraege stehen im Protokoll",
+          any(a and a.startswith("job.") for a in aktionen), sorted(aktionen)[:8])
+
+    # Einen wartenden Auftrag anlegen und abbrechen.
+    if hid:
+        code, job = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "scan"},
+                         hdr=adm)
+        if code == 200:
+            code, _ = call(f"/api/v1/jobs/{job['id']}", None,
+                           method="DELETE", hdr=adm)
+            check("Auftrag abgebrochen", code == 200, code)
+            code, nachher = call("/api/v1/audit", hdr=adm)
+            check("der Abbruch steht im Protokoll",
+                  any(e.get("action") == "job.cancel" for e in nachher),
+                  code)
+
+# =====================================================================
+# F-16 - das Anfangspasswort muss geaendert werden
+# =====================================================================
+print("--- Erzwungener Passwortwechsel ---")
+
+# Mindestlaenge: bewusst ein Passwort von ACHT Zeichen. Vier waeren auch
+# unter der alten Grenze von sechs durchgefallen - die Pruefung haette
+# dann nichts ueber die neue Grenze ausgesagt.
+code, _ = call("/api/v1/users", {"username": "achtzeichen",
+                                 "password": "achtzeic", "role": "user"},
+               hdr=adm)
+check("acht Zeichen sind zu wenig", code == 400, code)
+code, _ = call("/api/v1/users", {"username": "langgenug",
+                                 "password": "zwoelfzeichen", "role": "user"},
+               hdr=adm)
+check("zwoelf Zeichen werden angenommen", code == 200, code)
+
+# Und der Zwang selbst, am laufenden System statt am Quelltext.
+#
+# Ein vom Administrator gesetztes Passwort ist ein Uebergangspasswort -
+# seit 0.37.8 setzt das Zuruecksetzen deshalb must_change_password. Damit
+# laesst sich hier pruefen, was das Flag bewirkt: solange es steht, kommt
+# das Konto nur noch an /me, /me/password und die Abmeldung.
+liste = call("/api/v1/users", hdr=adm)[1]
+lang = next((u for u in liste if u["username"] == "langgenug"), None) \
+    if isinstance(liste, list) else None
+check("das Testkonto ist angelegt", lang is not None)
+if lang:
+    code, _ = call(f"/api/v1/users/{lang['id']}/password",
+                   {"new_password": "vom-admin-gesetzt"}, hdr=adm)
+    check("Administrator setzt ein Passwort", code == 200, code)
+
+    code, res = call("/api/v1/login", {"username": "langgenug",
+                                       "password": "vom-admin-gesetzt"})
+    check("Anmeldung damit moeglich", code == 200, code)
+    neu_hdr = {"X-Session": res.get("session", "")} if code == 200 else {}
+
+    code, me = call("/api/v1/me", hdr=neu_hdr)
+    check("/me ist erreichbar und meldet den ausstehenden Wechsel",
+          code == 200 and me.get("must_change_password") is True, me)
+
+    code, _ = call("/api/v1/hosts", hdr=neu_hdr)
+    check("alles andere ist gesperrt", code == 403, code)
+
+    code, _ = call("/api/v1/me/password",
+                   {"old_password": "vom-admin-gesetzt",
+                    "new_password": "endlich-selbst-gewaehlt"}, hdr=neu_hdr)
+    check("der Wechsel selbst geht durch", code == 200, code)
+
+    code, res = call("/api/v1/login", {"username": "langgenug",
+                                       "password": "endlich-selbst-gewaehlt"})
+    frei = {"X-Session": res.get("session", "")} if code == 200 else {}
+    code, _ = call("/api/v1/hosts", hdr=frei)
+    check("danach ist der Zugang frei", code == 200, code)
+
+# =====================================================================
+# F-25 - das gespeicherte Checkmk-Secret geht nur an die eigene Adresse
+# =====================================================================
+print("--- Checkmk-Test ohne Secret nur gegen die hinterlegte Adresse ---")
+# Die Route heisst /checkmk/config - sie prueft die Verbindung und
+# speichert erst danach.
+code, res = call("/api/v1/checkmk/config",
+                 {"url": "http://beliebig.example", "site": "s", "user": "u",
+                  "secret": ""}, hdr=adm)
+check("fremde Adresse ohne Secret wird abgewiesen", code == 400, code)
+# Auf den konkreten Satz pruefen: ohne hinterlegtes Secret antwortet die
+# Route ebenfalls mit 400 ("Kein Automation-Secret hinterlegt") - eine
+# Pruefung nur auf den Code haette die Abschaltung nicht bemerkt.
+check("und die Begruendung nennt die fremde Adresse",
+      isinstance(res, str) and "andere Adresse" in res, str(res)[:120])
+
+
+# =====================================================================
+# F-23 - der Heartbeat darf nicht auf einen belegten Namen umbenennen
+# =====================================================================
+print("--- Umbenennen per Heartbeat ---")
+# enroll() weist einen belegten Namen mit 409 ab, der Heartbeat prueft bis
+# 0.37.7 nur das FORMAT. Ein beliebiges Geraet im Netz konnte sich also als
+# harmloser Name anmelden (die Route ist absichtlich offen) und sich dann
+# in den Namen eines echten Hosts umbenennen. In der Freigabeliste standen
+# zwei nicht unterscheidbare Eintraege - und die Freigabe durch einen
+# Menschen ist nach F-08 der GESAMTE Schutz dieser Route.
+code, res = call("/api/v1/agent/enroll",
+                 {"hostname": "TEST-ECHT01", "os_type": "linux",
+                  "os_version": "Debian 13", "agent_version": "0.37.8"})
+check("erster Host angemeldet", code == 200, code)
+code, res2 = call("/api/v1/agent/enroll",
+                  {"hostname": "TEST-FREMD01", "os_type": "linux",
+                   "os_version": "Debian 13", "agent_version": "0.37.8"})
+check("zweiter Host angemeldet", code == 200, code)
+fremd_tok = res2.get("agent_token", "") if code == 200 else ""
+
+if fremd_tok:
+    # Der Heartbeat selbst muss durchgehen - ein Fehlschlag naehme den Host
+    # dauerhaft aus dem Betrieb. Nur der Name darf nicht wechseln.
+    code, _ = call("/api/v1/agent/heartbeat",
+                   {"hostname": "TEST-ECHT01", "os_type": "linux",
+                    "os_version": "Debian 13", "agent_version": "0.37.8"},
+                   hdr={"X-Agent-Token": fremd_tok})
+    check("der Heartbeat wird trotzdem angenommen", code == 200, code)
+
+    namen = [h["hostname"] for h in call("/api/v1/hosts", hdr=adm)[1]]
+    check("der belegte Name wurde NICHT uebernommen",
+          namen.count("TEST-ECHT01") == 1, namen.count("TEST-ECHT01"))
+    check("der fremde Host heisst weiterhin wie zuvor",
+          "TEST-FREMD01" in namen, [n for n in namen if n.startswith("TEST-")])
+
+    # Ein freier Name darf dagegen weiterhin gesetzt werden - sonst waere
+    # das legitime Umbenennen eines Hosts kaputt.
+    code, _ = call("/api/v1/agent/heartbeat",
+                   {"hostname": "TEST-FREMD02", "os_type": "linux",
+                    "os_version": "Debian 13", "agent_version": "0.37.8"},
+                   hdr={"X-Agent-Token": fremd_tok})
+    namen = [h["hostname"] for h in call("/api/v1/hosts", hdr=adm)[1]]
+    check("ein freier Name wird uebernommen", "TEST-FREMD02" in namen,
+          [n for n in namen if n.startswith("TEST-")])
+
+    # Und der abgewiesene Versuch steht im Protokoll.
+    eintraege = call("/api/v1/audit", hdr=adm)[1]
+    check("der abgewiesene Versuch steht im Pruefprotokoll",
+          any(e.get("action") == "host.rename.denied" for e in eintraege))
+
+
 # --------------------------------------------------- Sicherheitskopfzeilen
 h = headers_of("/api/health")
 check("Kopfzeilen ueberhaupt vorhanden", h is not None)
@@ -490,7 +642,7 @@ for _ in range(8):
                                      "password": "falsch"})
 check("Anmeldung wird nach mehreren Fehlversuchen gedrosselt", code == 429, code)
 
-code, _ = call("/api/v1/login", {"username": "admin", "password": "admin"})
+code, _ = call("/api/v1/login", {"username": "admin", "password": ADMIN_PW})
 check("auch richtige Zugangsdaten sind waehrend der Sperre abgewiesen",
       code == 429, code)
 

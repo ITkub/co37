@@ -860,6 +860,17 @@ def authenticate(x_session: str, session: Session,
     return Principal(user.username, user.role, user)
 
 
+# Routen, die auch mit ausstehendem Passwortwechsel erreichbar bleiben.
+# Genau die, die man braucht, um ihn zu erledigen - und die Abmeldung.
+# Alles andere waere ein Zwang mit Hintertuer.
+PW_FREI = {
+    "/api/v1/me",
+    "/api/v1/me/password",
+    "/api/v1/logout",
+    "/api/health",
+}
+
+
 def require_login(
     request: Request,
     x_session: str = Header(default=""),
@@ -874,9 +885,28 @@ def require_login(
     dadurch Hosts freigeben, die Checkmk-Zugangsdaten aendern und - ueber
     das Hochladen eines Systemupdates, das der Watcher als root auspackt -
     Code als root ausfuehren.
-    """
-    return authenticate(x_session, session, request)
 
+    Seit 0.37.8 setzt sie ausserdem den Passwortwechsel durch: solange
+    must_change_password steht, kommt das Konto nur an die Routen aus
+    PW_FREI. Vorher war das Feld reine Zierde - es wurde nur in /me
+    ausgeliefert, keine Route hat es geprueft, und die Oberflaeche hat es
+    nicht einmal ausgewertet. Ein Zwang, den man umgeht, indem man die
+    Oberflaeche weglaesst, ist keiner.
+    """
+    who = authenticate(x_session, session, request)
+    if who.user and who.user.must_change_password \
+            and request.url.path not in PW_FREI:
+        raise HTTPException(
+            403,
+            "Das Anfangspasswort muss zuerst geaendert werden.",
+            headers={"X-CO37-Password-Change": "required"},
+        )
+    return who
+
+
+# Laengste Downtime, die ueber die Schnittstelle gesetzt werden kann.
+# Eine Woche - siehe die Begruendung in set_downtime().
+DOWNTIME_MAX_MINUTES = 7 * 24 * 60
 
 # Gueltigkeitsdauer eines Installations-Tokens. Kurz genug, dass der Wert
 # in der Verlaufsdatei des Zielsystems von vornherein wertlos ist.
@@ -959,8 +989,7 @@ def bootstrap_admin(session: Session):
     nichts entgegen. Das Feld must_change_password ist vorhanden und wird
     hier nur nicht gesetzt - die Erzwingung laesst sich spaeter ohne
     Schemaaenderung nachruesten. Ohne TLS ist ein bekanntes Passwort im
-    Netz mitlesbar; vor einem Einsatz ausserhalb des Testnetzes gehoert
-    das eingeschaltet.
+    Netz mitlesbar - deshalb ist der Zwang seit 0.37.8 eingeschaltet.
     """
     if session.exec(select(User)).first():
         return
@@ -968,7 +997,19 @@ def bootstrap_admin(session: Session):
         username="admin",
         role=Role.admin,
         password_hash=hash_password("admin"),
-        must_change_password=False,
+        # Der eigentliche Punkt. Bis 0.37.7 stand hier False, mit dem
+        # Kommentar, im lokalen Testbetrieb spreche nichts dagegen - und
+        # damit lief jede Installation dauerhaft auf admin/admin, wenn es
+        # niemand von sich aus aenderte. Fuer ein Werkzeug, dessen
+        # Administrator auf jedem verwalteten Host Auftraege als SYSTEM
+        # anlegen kann, ist ein bekanntes Vorgabepasswort die Uebernahme
+        # der ganzen Flotte (Sicherheitspruefung 2026-08-31, F-16;
+        # BSI IT-Grundschutz ORP.4).
+        #
+        # Der Zwang kostet einen Dialog bei der ersten Anmeldung und
+        # funktioniert auch ueber HTTP - er hat mit dem HTTPS-Schalter
+        # nichts zu tun.
+        must_change_password=True,
     ))
     session.commit()
 
@@ -1763,7 +1804,34 @@ def agent_heartbeat(
     # Auch hier pruefen: der Heartbeat darf den Namen aendern, und ohne
     # diese Zeile liesse sich die Pruefung bei der Anmeldung umgehen -
     # erst sauber anmelden, dann im naechsten Heartbeat umbenennen.
-    host.hostname = check_hostname(payload.hostname)
+    # F-23: der Heartbeat darf umbenennen, aber nicht auf einen Namen, den
+    # es schon gibt.
+    #
+    # enroll() weist einen belegten Namen mit 409 ab; hier wurde bis 0.37.7
+    # nur das FORMAT geprueft. Ein beliebiges Geraet im Netz konnte sich
+    # also als 'tmp-1' anmelden (die Route ist absichtlich offen) und sich
+    # im naechsten Heartbeat in 'dc01' umbenennen - samt frei gesetztem
+    # os_type, os_version, ip_address und agent_version. In der
+    # Freigabeliste standen dann zwei nicht unterscheidbare 'dc01', und die
+    # Freigabe durch einen Menschen - nach F-08 der GESAMTE Schutz der
+    # offenen Anmelderoute - wurde zur Muenzwurf-Frage.
+    neuer_name = check_hostname(payload.hostname)
+    if neuer_name != host.hostname:
+        belegt = session.exec(
+            select(Host).where(Host.hostname == neuer_name,
+                               Host.id != host.id)
+        ).first()
+        if belegt:
+            # Kein 4xx: ein Heartbeat, der scheitert, nimmt den Host aus dem
+            # Betrieb. Der alte Name bleibt einfach stehen, und im Protokoll
+            # steht, warum.
+            audit(session, f"agent:{host.hostname}", "host.rename.denied",
+                  f"nach {kurz(neuer_name, FELD_MAX)} - Name ist vergeben",
+                  request)
+        else:
+            audit(session, f"agent:{host.hostname}", "host.rename",
+                  f"nach {neuer_name}", request)
+            host.hostname = neuer_name
     host.os_type = payload.os_type
     host.os_version = kurz(payload.os_version, FELD_MAX)
     host.ip_address = kurz(payload.ip_address, IP_MAX)
@@ -3187,7 +3255,9 @@ def last_jobs(session: Session = Depends(get_session)):
 
 
 @app.delete("/api/v1/jobs/{job_id}", dependencies=[Depends(require_login)])
-def cancel_job(job_id: int, session: Session = Depends(get_session)):
+def cancel_job(job_id: int, request: Request,
+               who: Principal = Depends(require_login),
+               session: Session = Depends(get_session)):
     """Bricht einen wartenden Auftrag ab. Laufende bleiben unberuehrt."""
     job = session.get(Job, job_id)
     if not job:
@@ -3201,6 +3271,13 @@ def cancel_job(job_id: int, session: Session = Depends(get_session)):
     job.state = JobState.cancelled
     job.finished_at = utcnow()
     session.add(job)
+    # F-24: bis 0.37.7 stand hier kein Eintrag. Wer einen geplanten
+    # Sicherheitspatch oder Neustart abgebrochen hat, war hinterher nicht
+    # feststellbar - im Job steht kein Urheber.
+    host = session.get(Host, job.host_id)
+    audit(session, who.name, "job.cancel",
+          f"{job.job_type.value} auf {host.hostname if host else job.host_id}",
+          request)
     session.commit()
     return {"ok": True}
 
@@ -3260,6 +3337,27 @@ async def set_checkmk_config(
 
     secret = payload.secret
     if not secret:
+        # F-25: das gespeicherte Secret wird NUR gegen die gespeicherte
+        # Adresse geschickt.
+        #
+        # Vorher nahm die Route jede Adresse entgegen und haengte das
+        # Secret als "Authorization: Bearer <user> <secret>" daran. Die
+        # Schnittstelle gibt das Secret bewusst nie zurueck (checkmk_status
+        # liefert nur secret_set) - ueber diesen Weg liess es sich im
+        # Klartext an eine selbst gewaehlte Adresse zustellen. Nebenbei war
+        # es ein Portscanner mit angehaengtem Geheimnis gegen alles, was
+        # der Server erreicht.
+        #
+        # Eine neue Adresse zu pruefen bleibt moeglich - dann gehoert das
+        # Secret mitgeschickt.
+        gespeichert = _setting(session, "cmk_url", "")
+        if payload.url.rstrip("/") != gespeichert.rstrip("/"):
+            raise HTTPException(
+                400,
+                "Fuer eine andere Adresse muss das Automation-Secret "
+                "mitgegeben werden. Das gespeicherte wird nur an die "
+                "hinterlegte Adresse geschickt.",
+            )
         secret = decrypt(_setting(session, "cmk_secret"))
         if not secret:
             raise HTTPException(400, "Kein Automation-Secret hinterlegt")
@@ -3360,7 +3458,9 @@ async def get_downtimes(host_id: int, session: Session = Depends(get_session)):
 
 @app.post("/api/v1/hosts/{host_id}/downtime", dependencies=[Depends(require_login)])
 async def set_downtime(
-    host_id: int, payload: DowntimeRequest, session: Session = Depends(get_session)
+    host_id: int, payload: DowntimeRequest, request: Request,
+    who: Principal = Depends(require_login),
+    session: Session = Depends(get_session),
 ):
     """
     Setzt eine Downtime auf allen verknuepften Checkmk-Hosts.
@@ -3386,6 +3486,16 @@ async def set_downtime(
         if minutes < 1:
             raise HTTPException(400, "Dauer muss mindestens eine Minute betragen")
 
+    # Nach oben war die Dauer unbegrenzt - "minutes": 5000000 sind rund
+    # neun Jahre, und das Monitoring waere fuer diesen Host so lange blind.
+    # Eine Woche ist grosszuegig fuer jedes Wartungsfenster und begrenzt
+    # den Schaden eines Vertippers wie eines Missbrauchs.
+    if minutes > DOWNTIME_MAX_MINUTES:
+        raise HTTPException(
+            400,
+            f"Downtime ist auf {DOWNTIME_MAX_MINUTES // (24 * 60)} Tage "
+            f"begrenzt.")
+
     try:
         targets = await downtime_targets(host, cmk)
     except CheckmkError as exc:
@@ -3398,11 +3508,18 @@ async def set_downtime(
     )
     if res["failed"] and not res["ok"]:
         raise HTTPException(502, f"Downtime fehlgeschlagen: {res['failed']}")
+    # F-24: das Stummschalten des Monitorings gehoert protokolliert.
+    audit(session, who.name, "downtime.set",
+          f"{host.hostname}: {minutes} min auf {len(res['ok'])} Checkmk-Hosts",
+          request)
+    session.commit()
     return res
 
 
 @app.delete("/api/v1/hosts/{host_id}/downtime", dependencies=[Depends(require_login)])
-async def clear_downtime(host_id: int, session: Session = Depends(get_session)):
+async def clear_downtime(host_id: int, request: Request,
+                         who: Principal = Depends(require_login),
+                         session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host nicht gefunden")
@@ -3415,7 +3532,12 @@ async def clear_downtime(host_id: int, session: Session = Depends(get_session)):
         targets = await downtime_targets(host, cmk)
     except CheckmkError as exc:
         raise HTTPException(502, f"Checkmk-Hosts nicht abrufbar: {exc}")
-    return await cmk.remove_downtime_multi(targets)
+    res = await cmk.remove_downtime_multi(targets)
+    # F-24: das Aufheben ebenso. Waehrend eines geplanten Wartungslaufs
+    # loest es Alarme aus - auch das gehoert zuordenbar.
+    audit(session, who.name, "downtime.clear", host.hostname, request)
+    session.commit()
+    return res
 
 
 # ======================================================================
@@ -3791,7 +3913,16 @@ class PasswordReset(BaseModel):
     new_password: str
 
 
-MIN_PASSWORD_LEN = 6
+# Mindestlaenge. Zwoelf statt der frueheren sechs.
+#
+# Sechs Zeichen sind fuer ein Konto, das auf der ganzen Flotte Auftraege
+# als SYSTEM anlegen darf, zu wenig. Laenge wirkt dabei staerker als
+# erzwungene Sonderzeichen - deshalb bewusst KEINE Komplexitaetsregeln,
+# die treiben Menschen erfahrungsgemaess zu "Passwort1!".
+#
+# Gilt nur fuer NEUE Passwoerter. Bestehende bleiben gueltig, sonst
+# sperrte ein Update jeden aus, dessen Passwort kuerzer ist.
+MIN_PASSWORD_LEN = 12
 
 
 def _check_password(pw: str):
@@ -4102,6 +4233,12 @@ def reset_password(user_id: int, payload: PasswordReset, request: Request,
     _check_password(payload.new_password)
 
     user.password_hash = hash_password(payload.new_password)
+    # Ein vom Administrator gesetztes Passwort ist ein Uebergangspasswort:
+    # er kennt es, und irgendwo ist es hingeschrieben worden, um es
+    # weiterzugeben. Der Benutzer aendert es bei der naechsten Anmeldung -
+    # dieselbe Regel wie fuer das Anfangspasswort der Installation (F-16,
+    # BSI IT-Grundschutz ORP.4).
+    user.must_change_password = True
     session.add(user)
     # Laufende Sitzungen beenden - sonst bleibt der alte Zugang bestehen
     for row in session.exec(

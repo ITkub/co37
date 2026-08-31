@@ -206,7 +206,33 @@ if [ -z "$SESSION" ]; then
   tail -20 "$TMP/backend.log"
   exit 1
 fi
+
+# Das Anfangspasswort muss geaendert werden, bevor irgendetwas anderes
+# geht (F-16, ab 0.37.8). Genau das macht die frische Installation auch,
+# und deshalb macht das Geruest es hier mit statt den Zwang fuer Tests
+# abzuschalten: eine Absicherung, die im Testbetrieb nicht gilt, ist im
+# Testbetrieb auch nicht geprueft.
+#
+# Die Sitzung wird beim Wechsel verworfen - danach also neu anmelden.
+TESTPW="testlauf-passwort-2026"
+curl -s --max-time 10 -X POST \
+  -H "Content-Type: application/json" -H "X-Session: $SESSION" \
+  -d "{\"old_password\":\"admin\",\"new_password\":\"$TESTPW\"}" \
+  "http://127.0.0.1:$PORT/api/v1/me/password" > /dev/null
+
+SESSION=$(curl -s --max-time 10 -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"admin\",\"password\":\"$TESTPW\"}" \
+  "http://127.0.0.1:$PORT/api/v1/login" \
+  | "$PY" -c 'import sys,json; print(json.load(sys.stdin).get("session",""))' 2>/dev/null)
+
+if [ -z "$SESSION" ]; then
+  echo "Anmeldung nach dem erzwungenen Passwortwechsel fehlgeschlagen."
+  tail -20 "$TMP/backend.log"
+  exit 1
+fi
 export CO37_TEST_SESSION="$SESSION"
+export CO37_TEST_ADMIN_PW="$TESTPW"
 
 gesamt=0; fehlerhaft=0; uebersprungen=0
 echo

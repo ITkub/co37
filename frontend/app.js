@@ -57,11 +57,46 @@ async function doLogin(){
     return;
   }
   await res.json();   // Inhalt wird nicht mehr gebraucht - das Cookie zaehlt
+  // Fuer einen etwaigen erzwungenen Wechsel gleich danach aufheben.
+  PW_ALT = password;
   setSession(true);
   document.getElementById("dlgLogin").close();
   document.getElementById("appShell").style.display = "";
   await startApp();
 }
+
+/* ---------- Erzwungener Passwortwechsel ---------- */
+
+function zeigePasswortZwang(){
+  document.getElementById("appShell").style.display = "none";
+  document.getElementById("pwzError").textContent = "";
+  document.getElementById("pwzNeu").value = "";
+  document.getElementById("pwzNeu2").value = "";
+  const dlg = document.getElementById("dlgPwZwang");
+  if (!dlg.open) dlg.showModal();
+  document.getElementById("pwzNeu").focus();
+}
+
+async function passwortZwangSpeichern(){
+  const neu = document.getElementById("pwzNeu").value;
+  const neu2 = document.getElementById("pwzNeu2").value;
+  const feld = document.getElementById("pwzError");
+  if (neu.length < PW_MIN){
+    feld.textContent = t("msg.pw_short", { anzahl: PW_MIN }); return;
+  }
+  if (neu !== neu2){ feld.textContent = t("msg.pw_mismatch"); return; }
+  try {
+    await api("POST", "/api/v1/me/password",
+              { old_password: PW_ALT || "", new_password: neu });
+  } catch(e){ return; }
+  // Der Server verwirft dabei alle Sitzungen, auch die eigene - der
+  // Benutzer meldet sich gleich mit dem neuen Passwort an.
+  PW_ALT = null;
+  document.getElementById("dlgPwZwang").close();
+  setSession(false);
+  showLogin(t("msg.pw_changed"));
+}
+
 
 async function doLogout(){
   try {
@@ -72,6 +107,17 @@ async function doLogout(){
   setSession(false);
   location.reload();
 }
+
+// Muss zu MIN_PASSWORD_LEN im Backend passen. Steht hier als Konstante
+// und nicht zweimal als Zahl im Code - dieselbe Fehlerart wie die fest
+// eingetragene Python-Fassung in i18n.js, die nach einem Anheben auf die
+// falsche Datei zeigte.
+const PW_MIN = 12;
+// Das gerade eingegebene Passwort, nur solange ein erzwungener Wechsel
+// aussteht. Die Route /me/password verlangt das alte Passwort, und der
+// Benutzer hat es zwei Sekunden vorher eingetippt - ihn erneut danach zu
+// fragen waere Schikane. Wird unmittelbar nach dem Wechsel geleert.
+let PW_ALT = null;
 
 let HOSTS = [], AREAS = [], CMK_HOSTS = [], AGENT_VER = "";
 // Verschieben der Uebersicht: nur bei ungefilterter Liste erlaubt.
@@ -1802,6 +1848,17 @@ document.getElementById("agUpdateAll").onclick = async () => {
 let CMK_STATUS = null;
 
 async function loadCmk(){
+  // Ohne Administratorrechte gibt es hier nichts zu holen: die Route ist
+  // require_admin, die Checkmk-Verknuepfung wird nur im Host-Dialog
+  // gebraucht, und der steht ohnehin nur Administratoren offen.
+  //
+  // Der Grund fuer diese Zeile ist eine Meldung, die niemand ausgeloest
+  // hat: startApp() rief loadCmk() bei JEDER Anmeldung auf, api() zeigt
+  // die Begruendung eines abgewiesenen Aufrufs selbst an, und das catch
+  // hier schluckt nur die Ausnahme, nicht den Toast. Wer sich als
+  // Benutzer anmeldete, bekam also sofort "Nur fuer Administratoren"
+  // eingeblendet, ohne etwas getan zu haben (2026-08-31 gemeldet).
+  if (!(ME && ME.is_admin)){ CMK_STATUS = null; CMK_HOSTS = []; return; }
   let st;
   try { st = await api("GET", "/api/v1/checkmk/status"); } catch(e){ return; }
   CMK_STATUS = st;
@@ -2139,7 +2196,7 @@ document.getElementById("acSave").onclick = async () => {
   const nw = document.getElementById("acNew").value;
   const nw2 = document.getElementById("acNew2").value;
   if (nw !== nw2){ toast(t("msg.pw_mismatch"), true); return; }
-  if (nw.length < 6){ toast(t("msg.pw_short"), true); return; }
+  if (nw.length < PW_MIN){ toast(t("msg.pw_short", { anzahl: PW_MIN }), true); return; }
   try { await api("POST", "/api/v1/me/password", {old_password: oldPw, new_password: nw}); }
   catch(e){ return; }
   // Der Server verwirft dabei alle Sitzungen - auch die eigene.
@@ -2181,7 +2238,7 @@ async function toggleReboot(id, name, an){
 async function resetPw(id, name){
   const pw = prompt(t("ask.new_password", { name }));
   if (!pw) return;
-  if (pw.length < 6){ toast(t("msg.pw_short"), true); return; }
+  if (pw.length < PW_MIN){ toast(t("msg.pw_short", { anzahl: PW_MIN }), true); return; }
   try { await api("POST", `/api/v1/users/${id}/password`, {new_password: pw}); }
   catch(e){ return; }
   toast(t("msg.pw_set", { name }));
@@ -2457,10 +2514,20 @@ document.getElementById("loginGo").onclick = doLogin;
 document.getElementById("loginPass").addEventListener("keydown", e => {
   if (e.key === "Enter") doLogin();
 });
+document.getElementById("pwzGo").onclick = passwortZwangSpeichern;
+document.getElementById("pwzNeu2").addEventListener("keydown", e => {
+  if (e.key === "Enter") passwortZwangSpeichern();
+});
 document.getElementById("btnLogout").onclick = doLogout;
 
 async function startApp(){
   try { ME = await api("GET", "/api/v1/me"); } catch(e){ return; }
+
+  // Erzwungener Passwortwechsel. Das Backend laesst mit gesetztem Flag nur
+  // noch /me, /me/password und die Abmeldung durch - hier geht es also
+  // nicht darum, etwas zu verhindern, sondern darum, dem Benutzer zu
+  // sagen, was er tun soll, statt ihn gegen lauter 403 laufen zu lassen.
+  if (ME.must_change_password){ zeigePasswortZwang(); return; }
   document.getElementById("whoami").textContent =
     ME.username + (ME.is_admin ? " · " + t("settings.users.role_admin") : "");
   // Reiter, die nur Administratoren sehen sollen

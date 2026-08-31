@@ -557,6 +557,59 @@ if _muster:
 
 
 # ======================================================================
+# F-26 - der Agent schreibt kein Servertoken ungeprueft in agent.conf
+# ======================================================================
+print("--- Token aus der Serverantwort wird geprueft ---")
+# Der Wert kommt aus einer Serverantwort und wird zeilenweise in
+# agent.conf geschrieben; load_config() nimmt bei mehrfachem Schluessel den
+# zuletzt gelesenen. Ein Zeilenumbruch im Token reichte damit, um
+# "server = http://angreifer" und "verify_ssl = false" nachzuschieben - der
+# Agent haette dauerhaft einen anderen Server befragt und dabei kein
+# Zertifikat mehr geprueft. Erreichbar fuer jeden, der die Verbindung
+# kontrolliert: die Anmeldung laeuft ohne Token, und eine Neuanmeldung
+# laesst sich mit zwei Antworten 401 erzwingen.
+_ag = TMP / "f26"
+_ag.mkdir(exist_ok=True)
+_conf = _ag / "agent.conf"
+_conf.write_text("server = https://co37.example\ntoken = alt\n", encoding="utf-8")
+
+# Das oben schon geladene Modul weiterbenutzen. agent.py beendet sich beim
+# Laden, wenn keine agent.conf danebenliegt - lade_agent() richtet dafuer
+# eigens ein Verzeichnis ein, und das noch einmal zu tun waere doppelt.
+_ag_mod = mit
+_ag_mod.CFG_PATH = _conf
+_ag_mod.sichere_rechte = lambda *a, **k: None
+_ag_mod.log = lambda *a, **k: None
+
+check("der Agent kennt eine Form fuer Token",
+      getattr(_ag_mod, "TOKEN_ERLAUBT", None) is not None)
+
+boese = "abc\nserver = http://angreifer\nverify_ssl = false"
+try:
+    _ag_mod.set_token(boese)
+    check("ein Token mit Zeilenumbruch wird abgewiesen", False)
+except ValueError:
+    check("ein Token mit Zeilenumbruch wird abgewiesen", True)
+inhalt = _conf.read_text(encoding="utf-8")
+check("die Konfiguration ist unveraendert",
+      "angreifer" not in inhalt and "verify_ssl" not in inhalt, inhalt)
+
+for schlecht in ("", "kurz", "hat leerzeichen drin", "semikolon;drin"):
+    try:
+        _ag_mod.set_token(schlecht)
+        check(f"abgewiesen: {schlecht[:22]!r}", False)
+    except ValueError:
+        check(f"abgewiesen: {schlecht[:22]!r}", True)
+
+# Ein echtes Token muss weiterhin durchgehen - sonst waere die Anmeldung
+# kaputt. Form wie secrets.token_urlsafe(32).
+gut = "aBc-123_XyZ" * 3
+_ag_mod.set_token(gut)
+check("ein gueltiges Token wird gespeichert",
+      f"token = {gut}" in _conf.read_text(encoding="utf-8"))
+
+
+# ======================================================================
 # F-06 - nur statisch, siehe Kopf dieser Datei
 # ======================================================================
 print("--- Rechte an agent.conf (statisch) ---")

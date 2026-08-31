@@ -15,17 +15,21 @@ const SESSION = process.argv[3] || process.env.CO37_TEST_SESSION || "";
 // Seit 0.13.0 arbeitet die Oberflaeche mit einer Anmeldesitzung statt mit
 // dem API-Key. Die Sitzung muss vorliegen, bevor das Skript geladen wird -
 // deshalb hier synchron per curl statt mit fetch.
+// Das Geruest aendert das Anfangspasswort beim Start (erzwungener Wechsel,
+// F-16) und reicht das neue als CO37_TEST_ADMIN_PW weiter. Der Rueckfall
+// auf "admin" gilt fuer den Einzellauf gegen ein frisches Backend.
+const ADMIN_PW = process.env.CO37_TEST_ADMIN_PW || "admin";
 let SESSION_TOKEN = "";
 try {
   const out = execSync(
     `curl -s -X POST http://127.0.0.1:${PORT}/api/v1/login `
     + `-H "Content-Type: application/json" `
-    + `-d '{"username":"admin","password":"admin"}'`,
+    + `-d '{"username":"admin","password":"${ADMIN_PW}"}'`,
     { encoding: "utf8" });
   SESSION_TOKEN = JSON.parse(out).session || "";
 } catch (e) {
-  console.error("Anmeldung fehlgeschlagen. Laeuft das Backend, und ist das "
-              + "Passwort von admin noch 'admin'?");
+  console.error("Anmeldung fehlgeschlagen. Laeuft das Backend, und passt das "
+              + "Passwort von admin (CO37_TEST_ADMIN_PW)?");
 }
 if (!SESSION_TOKEN) process.exit(1);
 const HTML_PATH = process.argv[4] || "/tmp/jt/frontend/index.html";
