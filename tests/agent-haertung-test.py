@@ -691,46 +691,207 @@ check("die Geheimnissuche durchsucht tools/ weiterhin",
       "tests tools ." in _sh or "tools" in _sh.split("GEHEIM=")[1].split("\n")[0])
 
 # ======================================================================
-# agent.conf laesst sich nicht vorbelegen (F-46)
+# Die Konfigurationslogik des Installationsskripts (F-46, Fehler 1721)
 # ======================================================================
-# C:\ProgramData erlaubt jedem Benutzer, ein Unterverzeichnis anzulegen
-# und darin zu schreiben. Ein lokaler Benutzer konnte also vor der
-# Installation eine agent.conf hinlegen; das Installationsskript las sie,
-# BEVOR icacls die Rechte setzt, und uebernahm daraus alles. Ohne
-# CO37SERVER auf der Befehlszeile - der Weg fuer eine Wiederinstallation -
-# galt dann sein 'server'-Eintrag, und der Agent sprach als SYSTEM mit
-# dem falschen Server.
+# Der Anlass, 2026-09-01: eine Haertung fuer F-46 verwarf den 'server'
+# aus einer vorhandenen agent.conf. Beim Upgrade per Doppelklick gibt
+# aber niemand CO37SERVER auf der Befehlszeile mit - danach stand gar
+# keine Adresse mehr da, das Skript beendete sich mit exit(1), und der
+# Installer meldete Fehler 1721. Auf KK-WIN01 passiert.
+#
+# Die Pruefung davor sah nur nach, DASS die Zeile da ist. Sie prueft
+# jetzt, was sie BEWIRKT - und zwar fuer alle vier Wege, auf denen
+# installiert wird. Das ist ohne Windows moeglich: es ist reine
+# Python-Logik ueber ein dict.
 print()
-print("--- Vorbelegte agent.conf wird nicht uebernommen (F-46) ---")
-# Ueber den Syntaxbaum des erzeugten Skripts, nicht per
-# Zeichenkettensuche: die erste Fassung dieser Pruefung suchte
-# "existing = uebernommen" im Quelltext und blieb gruen, als die Zeile
-# auskommentiert wurde - der Text steht dann ja immer noch da. Dieselbe
-# Falle wie bei F-27.
-_marker = "TASK_SCRIPT = r" + "'''"
-_ts = msi.split(_marker, 1)[1].split("'''", 1)[0]
-_tsbaum = ast.parse(_ts)
-_zuweisungen = [k for k in ast.walk(_tsbaum) if isinstance(k, ast.Assign)]
-_ersetzt = [k for k in _zuweisungen
-            if any(isinstance(z, ast.Name) and z.id == "existing"
-                   for z in k.targets)
-            and isinstance(k.value, ast.Name) and k.value.id == "uebernommen"]
-check("aus einer vorhandenen Konfiguration wird nur das Token uebernommen",
-      len(_ersetzt) == 1, len(_ersetzt))
-check("das Token ueberlebt eine Neuinstallation weiterhin",
-      'if existing.get("token")' in _ts)
+print("--- Konfigurationslogik des Installationsskripts (F-46) ---")
 
-# Und die Wirkung: 'server' aus einer vorbelegten Datei darf nicht
-# gewinnen. Das Skript laeuft hier nicht (es braucht Windows), aber die
-# Reihenfolge im Baum laesst sich pruefen - die Ersetzung muss VOR der
-# Auswertung von sys.argv stehen.
-_pos_ersetzt = _ersetzt[0].lineno if _ersetzt else 10 ** 6
-_pos_server = min([k.lineno for k in ast.walk(_tsbaum)
-                   if isinstance(k, ast.Assign)
-                   and any(isinstance(z, ast.Subscript) for z in k.targets)
-                   and "server" in ast.dump(k)] or [0])
-check("die Ersetzung steht vor dem Setzen von server",
-      _pos_ersetzt < _pos_server, f"{_pos_ersetzt} < {_pos_server}")
+_marker = "TASK_SCRIPT = r" + "\'\'\'"
+_ts = msi.split(_marker, 1)[1].split("\'\'\'", 1)[0]
+check("TASK_SCRIPT laesst sich herausloesen", len(_ts) > 500, len(_ts))
+
+# Nur den Teil ausfuehren, der die Konfiguration zusammensetzt: vom
+# Einlesen bis vor das Schreiben. Alles davor und danach braucht Windows.
+_von = _ts.find("existing = {}")
+_bis = _ts.find("# Ohne Serveradresse ist der Agent nicht lauffaehig")
+check("der Konfigurationsteil ist auffindbar", 0 < _von < _bis, f"{_von}..{_bis}")
+
+
+def _konfig(datei_inhalt, argv_server, argv_verify="true"):
+    """Fuehrt genau den Abschnitt des erzeugten Skripts aus."""
+    raum = {
+        "server": argv_server,
+        "verify": argv_verify,
+        "CONF": None,
+    }
+
+    class _Datei:
+        def exists(self):
+            return datei_inhalt is not None
+
+        def read_text(self, encoding=None):
+            return datei_inhalt
+
+    raum["CONF"] = _Datei()
+    exec(_ts[_von:_bis], raum)  # noqa: S102
+    return raum["existing"]
+
+
+_alt = ("server = https://co37.itkub.net\n"
+        "token = abc123def456ghi789\n"
+        "verify_ssl = false\n"
+        "boeses = x\n")
+
+# 1. Der Fall, der 1721 ausgeloest hat.
+_e = _konfig(_alt, "")
+check("Upgrade per Doppelklick behaelt den Server",
+      _e.get("server") == "https://co37.itkub.net", _e)
+check("und behaelt das Token",
+      _e.get("token") == "abc123def456ghi789", _e)
+
+# 2. Die Befehlszeile gewinnt.
+_e = _konfig(_alt, "https://neu.example")
+check("CO37SERVER ueberschreibt den alten Server",
+      _e.get("server") == "https://neu.example", _e)
+
+# 3. Was aus einer vorhandenen Datei NICHT uebernommen wird.
+_e = _konfig(_alt, "")
+check("verify_ssl aus der Datei wird verworfen",
+      "verify_ssl" not in _e, _e)
+check("unbekannte Schluessel werden verworfen", "boeses" not in _e, _e)
+
+# 4. Nur wenn es diesmal mitgegeben wird, gilt verify_ssl.
+_e = _konfig(_alt, "https://x", argv_verify="false")
+check("verify_ssl von der Befehlszeile gilt",
+      _e.get("verify_ssl") == "false", _e)
+
+# 5. Erstinstallation ohne alles muss weiterhin scheitern.
+_e = _konfig(None, "")
+check("Erstinstallation ohne alles hat keinen Server", not _e.get("server"), _e)
+
+# ======================================================================
+# Ein Abbruch darf den Host nicht ohne Agent zuruecklassen (F-48)
+# ======================================================================
+# In der InstallExecuteSequence steht RemoveExistingProducts nach
+# InstallInitialize. Bei einem Upgrade loescht dabei RemoveTask der ALTEN
+# Fassung die geplante Aufgabe; erst danach kommt RegisterTask. Scheitert
+# dieses Skript dazwischen, ist die Aufgabe weg - und eine CustomAction
+# hat keine Rueckrollaktion, der Installer stellt sie nicht wieder her.
+# Der Host steht dann ganz ohne Agent da und meldet sich nie wieder.
+#
+# Am 2026-09-01 auf KK-WIN01 genau so passiert.
+#
+# Geprueft wird der ganze Ablauf, nicht nur die Konfiguration: schtasks
+# und icacls werden abgefangen, und wir sehen, WAS aufgerufen worden
+# waere.
+print()
+print("--- Ein Abbruch laesst keine Aufgabe verschwinden (F-48) ---")
+
+_seq = msi[msi.find("<InstallExecuteSequence>"):msi.find("</InstallExecuteSequence>")]
+check("RemoveExistingProducts laeuft vor RegisterTask",
+      "RemoveExistingProducts" in _seq and "RegisterTask" in _seq)
+
+import types as _types  # noqa: E402
+
+
+def _ablauf(conf_inhalt, argv_server):
+    """
+    Fuehrt den Ablauf des erzeugten Skripts nach - von 'gab_es_schon' bis
+    vor die Wiederholungspruefung. Gibt zurueck, ob abgebrochen wurde und
+    ob die Aufgabe angelegt worden waere.
+    """
+    aufrufe = []
+
+    class _Res:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def _run(cmd, **kw):
+        aufrufe.append(next((a for a in cmd if str(a).startswith("/")),
+                            str(cmd[0])))
+        return _Res()
+
+    def _ende(code=0):
+        # MUSS werfen. Die erste Fassung dieser Attrappe war
+        # 'exit=SystemExit' - die Klasse, nicht eine Funktion, die wirft.
+        # sys.exit(1) hat damit nur ein Objekt erzeugt, das Skript lief
+        # weiter, und alle fuenf Faelle meldeten "durchgelaufen". Eine
+        # Attrappe, die den geprueften Fall gar nicht herstellt, prueft
+        # nichts.
+        raise SystemExit(code)
+
+    class _Datei:
+        def __init__(self, i):
+            self.inhalt = i
+            self.geschrieben = None
+
+        def exists(self):
+            return self.inhalt is not None
+
+        def read_text(self, encoding=None):
+            return self.inhalt
+
+        def write_text(self, t, encoding=None):
+            self.geschrieben = t
+
+    class _Ordner:
+        def mkdir(self, **kw):
+            pass
+
+        def __truediv__(self, x):
+            return self
+
+    _conf = _Datei(conf_inhalt)
+    _raum = {
+        "os": _types.SimpleNamespace(environ={"SystemRoot": r"C:\Windows"}),
+        "subprocess": _types.SimpleNamespace(run=_run),
+        "sys": _types.SimpleNamespace(
+            argv=["x", argv_server, "true"],
+            stderr=_types.SimpleNamespace(write=lambda s: None),
+            exit=_ende),
+        "Path": Path,
+        "CONF": _conf, "CONF_DIR": _Ordner(), "INSTALL_DIR": _Ordner(),
+        "ICACLS": "icacls.exe", "SCHTASKS": "schtasks.exe",
+        "server": argv_server, "verify": "true",
+    }
+    _von = _ts.find("# Lief auf diesem Rechner")
+    _bis = _ts.find("# Nachpruefen statt vertrauen")
+    abgebrochen = False
+    try:
+        exec(_ts[_von:_bis], _raum)  # noqa: S102
+    except SystemExit:
+        abgebrochen = True
+    return abgebrochen, "/Create" in aufrufe
+
+
+check("der Ablaufteil ist auffindbar",
+      0 < _ts.find("# Lief auf diesem Rechner")
+      < _ts.find("# Nachpruefen statt vertrauen"))
+
+# Die Attrappe muss den Abbruch ueberhaupt herstellen koennen - sonst
+# sagen die Faelle darunter nichts aus.
+_ab, _ = _ablauf(None, "")
+check("die Attrappe stellt einen Abbruch her", _ab is True)
+
+# Der Fall von KK-WIN01: Upgrade, Konfiguration unbrauchbar.
+_ab, _aufgabe = _ablauf("token = abc\n", "")
+check("Upgrade mit unbrauchbarer Konfiguration bricht ab", _ab is True)
+check("aber die Aufgabe wird vorher wiederhergestellt", _aufgabe is True)
+
+# Erstinstallation ohne alles: nichts anlegen, was ins Leere zeigt.
+_ab, _aufgabe = _ablauf(None, "")
+check("Erstinstallation ohne alles bricht ab", _ab is True)
+check("und legt keine Aufgabe an", _aufgabe is False)
+
+# Die Normalwege bleiben Normalwege.
+for _inhalt, _srv, _name in (
+        ("server = https://x\ntoken = abc\n", "", "Upgrade per Doppelklick"),
+        ("server = https://x\ntoken = abc\n", "https://neu", "Upgrade mit CO37SERVER"),
+        (None, "https://neu", "Erstinstallation mit CO37SERVER")):
+    _ab, _aufgabe = _ablauf(_inhalt, _srv)
+    check(f"{_name}: laeuft durch", _ab is False)
+    check(f"{_name}: Aufgabe angelegt", _aufgabe is True)
 
 # ======================================================================
 # Windows-Hilfsprogramme mit vollem Pfad (F-47)
@@ -753,6 +914,25 @@ check("faellt auf den blossen Namen zurueck, wenn die Datei fehlt",
       "return str(pfad) if pfad.is_file() else name" in agent_quelle)
 check("das Installationsskript benutzt volle Pfade",
       "SCHTASKS = str(SYS32" in msi and "ICACLS = str(SYS32" in msi)
+
+# Die Pfade werden in einem raw-String erzeugt - dort ergibt \\ ZWEI
+# Backslashes, nicht einen. Ein so entstandener Ruecklfallpfad
+# ("C:\\\\Windows") faellt beim Bauen nicht auf und erst auf einem
+# Windows ohne SystemRoot. Deshalb nicht den Wortlaut pruefen, sondern
+# den Wert ausrechnen.
+_umgebung = {"os": os, "Path": Path}
+for _zeile in _ts.splitlines():
+    if _zeile.startswith(("SYS32 =", "ICACLS =", "SCHTASKS =")):
+        exec(_zeile, _umgebung)  # noqa: S102
+_ohne_sysroot = {"os": type("o", (), {"environ": {}})(), "Path": Path}
+for _zeile in _ts.splitlines():
+    if _zeile.startswith("SYS32 ="):
+        exec(_zeile, _ohne_sysroot)  # noqa: S102
+_rueckfall = str(_ohne_sysroot["SYS32"])
+check("der Rueckfallpfad hat keine doppelten Backslashes",
+      "\\\\" not in _rueckfall, _rueckfall)
+check("der Rueckfallpfad endet auf System32",
+      _rueckfall.replace("/", "\\").endswith("Windows\\System32"), _rueckfall)
 check("keine blossen schtasks-Aufrufe mehr im MSI-Bau",
       '["schtasks", ' not in msi and '"schtasks", "/Create"' not in msi)
 

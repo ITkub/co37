@@ -103,7 +103,7 @@ INSTALL_DIR = Path(sys.argv[0]).resolve().parent
 # ausnutzbar ist, haengt am Arbeitsverzeichnis der Aufgabe und daran, ob
 # ein PATH-Eintrag beschreibbar ist; der volle Pfad kostet nichts und
 # macht die Frage gegenstandslos.
-SYS32 = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32"
+SYS32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
 ICACLS = str(SYS32 / "icacls.exe")
 SCHTASKS = str(SYS32 / "schtasks.exe")
 CONF_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "CO37"
@@ -111,6 +111,11 @@ CONF = CONF_DIR / "agent.conf"
 
 server = sys.argv[1] if len(sys.argv) > 1 else ""
 verify = sys.argv[2] if len(sys.argv) > 2 else "true"
+
+# Lief auf diesem Rechner schon einmal eine Installation? Das
+# entscheidet spaeter, ob die geplante Aufgabe auch dann angelegt wird,
+# wenn die Konfiguration unbrauchbar ist (F-48). VOR dem mkdir ablesen.
+gab_es_schon = CONF.exists()
 
 CONF_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -125,25 +130,39 @@ if CONF.exists():
             k, _, v = line.partition("=")
             existing[k.strip()] = v.strip()
 
-# Aus einer vorhandenen Konfiguration wird NUR das Token uebernommen
-# (F-46 der Pruefung vom 2026-08-31).
+# Aus einer vorhandenen Konfiguration werden nur die drei Schluessel
+# uebernommen, die der Agent ueberhaupt liest - und verify_ssl nur, wenn
+# es dieses Mal ausdruecklich mitgegeben wird.
 #
-# C:\\ProgramData erlaubt jedem Benutzer, ein Unterverzeichnis anzulegen
-# und darin zu schreiben. Ein lokaler Benutzer konnte also vor der
-# Installation eine agent.conf hinlegen, und dieses Skript las sie -
-# bevor icacls die Rechte setzt. Ohne CO37SERVER auf der
-# msiexec-Befehlszeile (der Weg fuer eine Wiederinstallation, den das
-# Skript ausdruecklich zulaesst) galt dann sein 'server'-Eintrag, und
-# der Agent sprach als SYSTEM mit dem falschen Server. Keine
-# Codeeinschleusung - release_key.pub liegt in Program Files -, aber
-# Auftragssteuerung (patch, reboot), also dieselbe Folge wie F-26.
+# ZUR GESCHICHTE (F-46 der Pruefung vom 2026-08-31): hier stand kurz eine
+# Fassung, die AUCH den 'server' verwarf. Das war als Haertung gedacht -
+# C:\\ProgramData erlaubt jedem Benutzer, ein Unterverzeichnis anzulegen,
+# ein lokaler Benutzer koennte also vor der Erstinstallation eine
+# agent.conf hinlegen, und dieses Skript liest sie, bevor icacls die
+# Rechte setzt.
 #
-# Das Token darf bleiben: es ueberlebt so eine Neuinstallation, ohne dass
-# der Host wieder auf "wartet auf Freigabe" faellt, und ein
-# untergeschobenes heilt sich selbst (401 -> Neuanmeldung).
+# Die Fassung war falsch: sie hat den WIEDERINSTALLATIONS-Pfad zerstoert.
+# Beim Upgrade per Doppelklick gibt niemand CO37SERVER auf der
+# Befehlszeile mit; ohne den 'server' aus der vorhandenen Datei stand
+# dann gar keine Adresse mehr da, das Skript beendete sich mit exit(1),
+# und der Installer meldete Fehler 1721. Auf KK-WIN01 am 2026-09-01
+# passiert, in 0.37.11 zurueckgenommen.
+#
+# DER BEFUND BLEIBT DAMIT OFFEN. Sauber loesen liesse er sich nur, wenn
+# das Skript eine Erstinstallation von einem Upgrade unterscheiden kann -
+# etwa an den Rechten der vorhandenen Datei (eine aus einer frueheren
+# Installation hat kein vererbtes (I), siehe die Feldbestaetigung zu
+# F-06) oder an der MSI-Eigenschaft 'Installed'. Beides laesst sich ohne
+# ein laufendes Windows nicht pruefen, und ein zweiter Fehlversuch kostet
+# wieder eine Flotte. Gehoert auf einen Windows-Testhost.
+#
+# Der schmale Rest des Angriffs: eine ERSTinstallation ohne CO37SERVER
+# auf einem Rechner, auf dem vorher jemand eine agent.conf hinterlegt
+# hat. Mit CO37SERVER gewinnt immer die Befehlszeile.
 uebernommen = {}
-if existing.get("token"):
-    uebernommen["token"] = existing["token"]
+for schluessel in ("server", "token"):
+    if existing.get(schluessel):
+        uebernommen[schluessel] = existing[schluessel]
 existing = uebernommen
 
 if server:
@@ -151,12 +170,72 @@ if server:
 if verify.lower() == "false":
     existing["verify_ssl"] = "false"
 
-# Ohne Serveradresse ist der Agent nicht lauffaehig. Lieber die
-# Installation scheitern lassen, als eine Aufgabe zu hinterlassen, die
-# bei jedem Start still abbricht.
+def registriere_aufgabe():
+    """
+    Legt die geplante Aufgabe an. Gibt den Rueckgabewert von schtasks
+    zurueck.
+
+    Steht als Funktion da, weil sie auf ZWEI Wegen gebraucht wird - im
+    Normalfall unten, und im Fehlerfall gleich hier drunter (F-48).
+    """
+    python_exe = INSTALL_DIR / "python" / "pythonw.exe"
+    agent_py = INSTALL_DIR / "agent.py"
+
+    subprocess.run([SCHTASKS, "/Delete", "/TN", "CO37Agent", "/F"],
+                   capture_output=True)
+
+    return subprocess.run([
+        SCHTASKS, "/Create",
+        "/TN", "CO37Agent",
+        "/TR", f'"{python_exe}" "{agent_py}"',
+        # Alle 5 Minuten statt nur ONSTART. Ein ONSTART-Ausloeser allein
+        # laesst den Agent bis zum naechsten Systemstart tot liegen, wenn
+        # er sich einmal nicht selbst neu starten konnte. Mehrfachstarts
+        # sind ungefaehrlich: der Agent haelt eine Einzelinstanz-Sperre
+        # und beendet sich sofort, wenn schon einer laeuft.
+        "/SC", "MINUTE", "/MO", "5",
+        "/RU", "SYSTEM",
+        "/RL", "HIGHEST",
+        "/F",
+    ], capture_output=True, text=True)
+
+
+# Ohne Serveradresse ist der Agent nicht lauffaehig, und die Installation
+# soll scheitern - der Administrator hat CO37SERVER vergessen und muss es
+# merken.
+#
+# ABER: die Aufgabe vorher trotzdem anlegen, wenn hier schon einmal etwas
+# lief (F-48 der Pruefung vom 2026-09-01).
+#
+# Der Grund steht in der InstallExecuteSequence: RemoveExistingProducts
+# laeuft nach InstallInitialize und loescht dabei ueber RemoveTask der
+# ALTEN Fassung die geplante Aufgabe. Erst danach kommt RegisterTask.
+# Scheitert dieses Skript dazwischen, ist die Aufgabe weg - und eine
+# CustomAction hat keine Rueckrollaktion, der Installer stellt sie nicht
+# wieder her. Der Host steht dann ganz ohne Agent da und meldet sich nie
+# wieder.
+#
+# Genau so passiert am 2026-09-01 auf KK-WIN01: eine Haertung verwarf den
+# 'server' aus der vorhandenen agent.conf, das Skript brach hier ab, und
+# der Host war anschliessend still. Erst dieser Vorfall hat gezeigt, dass
+# die Abwaegung im alten Kommentar falsch herum stand: dort hiess es
+# "lieber die Installation scheitern lassen, als eine Aufgabe zu
+# hinterlassen, die bei jedem Start still abbricht". Eine Aufgabe, die
+# abbricht, bringt der naechste Lauf wieder in Ordnung - eine fehlende
+# bemerkt niemand.
+#
+# Bei einer ERSTinstallation ohne Konfiguration wird nichts angelegt:
+# dort gibt es keine Aufgabe zu retten, und der Installer raeumt
+# INSTALLDIR beim Ruecklauf wieder ab - die Aufgabe zeigte danach ins
+# Leere.
 if not existing.get("server"):
+    if gab_es_schon:
+        registriere_aufgabe()
+        sys.stderr.write(
+            "Die geplante Aufgabe wurde wiederhergestellt, die "
+            "Konfiguration ist aber unbrauchbar.\n")
     sys.stderr.write(
-        "CO37SERVER fehlt und es liegt keine agent.conf vor.\n"
+        "CO37SERVER fehlt und es liegt keine brauchbare agent.conf vor.\n"
         'Aufruf: msiexec /i <paket>.msi /qn CO37SERVER="http://server:8080"\n'
     )
     sys.exit(1)
@@ -184,26 +263,7 @@ for ziel, rechte in ((CONF_DIR, "(OI)(CI)(F)"), (CONF, "(F)")):
         capture_output=True,
     )
 
-python_exe = INSTALL_DIR / "python" / "pythonw.exe"
-agent_py = INSTALL_DIR / "agent.py"
-
-subprocess.run([SCHTASKS, "/Delete", "/TN", "CO37Agent", "/F"],
-               capture_output=True)
-
-res = subprocess.run([
-    SCHTASKS, "/Create",
-    "/TN", "CO37Agent",
-    "/TR", f'"{python_exe}" "{agent_py}"',
-    # Alle 5 Minuten statt nur ONSTART. Ein ONSTART-Ausloeser allein
-    # laesst den Agent bis zum naechsten Systemstart tot liegen, wenn er
-    # sich einmal nicht selbst neu starten konnte. Mehrfachstarts sind
-    # ungefaehrlich: der Agent haelt eine Einzelinstanz-Sperre und
-    # beendet sich sofort, wenn schon einer laeuft.
-    "/SC", "MINUTE", "/MO", "5",
-    "/RU", "SYSTEM",
-    "/RL", "HIGHEST",
-    "/F",
-], capture_output=True, text=True)
+res = registriere_aufgabe()
 
 if res.returncode != 0:
     sys.stderr.write(res.stderr)
