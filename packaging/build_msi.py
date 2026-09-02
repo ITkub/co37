@@ -159,7 +159,81 @@ if CONF.exists():
 # Der schmale Rest des Angriffs: eine ERSTinstallation ohne CO37SERVER
 # auf einem Rechner, auf dem vorher jemand eine agent.conf hinterlegt
 # hat. Mit CO37SERVER gewinnt immer die Befehlszeile.
+def von_privilegierter_hand(pfad):
+    """
+    Stammt diese Datei von jemandem, der ohnehin alles darf?
+
+    Der Besitzer ist das verlaessliche Merkmal (F-46, geklaert am
+    2026-09-01 auf einem Windows-Testhost). Nachgemessen:
+
+      von SYSTEM angelegt (Installer)  -> Besitzer VORDEFINIERT\Administratoren
+      von einem Benutzer vorbelegt     -> Besitzer bleibt dieser Benutzer,
+                                          AUCH nach der Installation
+
+    Die Rechte taugen dafuer nicht: wer Besitzer ist, darf sie selbst
+    setzen und koennte eine untergeschobene Datei genauso aussehen
+    lassen wie eine installierte. Den Besitz an die Administratoren
+    abzugeben kann ein Unprivilegierter dagegen nicht.
+
+    Ein Administrator, der die Datei von Hand angelegt hat, gilt als
+    vertrauenswuerdig - er koennte sie ohnehin direkt schreiben. Genau
+    dieser Fall hat die erste, zu strenge Fassung dieser Pruefung
+    zerstoert (Fehler 1721, siehe F-48).
+
+    Im Zweifel True: eine Pruefung, die bei einem unerwarteten Windows
+    den Upgrade-Pfad bricht, richtet mehr Schaden an als der schmale
+    Angriff, den sie abwehrt.
+    """
+    ps = str(SYS32 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    # Den Pfad ueber die Umgebung uebergeben, NICHT als Argument:
+    # "powershell -Command <skript> <arg>" fuellt $args nicht, sondern
+    # versucht <arg> als eigenen Befehl auszufuehren. Am 2026-09-01 auf
+    # dem Testhost gesehen - die erste Fassung lief damit immer in den
+    # Fehlerzweig und haette wegen des Rueckfalls unten JEDE Datei
+    # durchgewinkt. Eine Pruefung, die nicht laeuft, ist schlimmer als
+    # keine: sie sieht im Quelltext aus wie eine.
+    #
+    # Ueber die Umgebung gibt es ausserdem kein Anfuehrungszeichen-
+    # Problem und keine Einschleusung ueber den Dateinamen.
+    umgebung = dict(os.environ, CO37_CONF_PRUEFEN=str(CONF))
+    skript = (
+        "$o=(Get-Acl -LiteralPath $env:CO37_CONF_PRUEFEN).Owner;"
+        "$s=(New-Object Security.Principal.NTAccount($o))."
+        "Translate([Security.Principal.SecurityIdentifier]).Value;"
+        "if ($s -eq 'S-1-5-18' -or $s -eq 'S-1-5-32-544') { 'JA'; exit };"
+        "$a=(Get-LocalGroupMember -SID 'S-1-5-32-544' -EA SilentlyContinue)"
+        " | ForEach-Object { $_.SID.Value };"
+        "if ($a -contains $s) { 'JA' } else { 'NEIN' }"
+    )
+    try:
+        res = subprocess.run(
+            [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-Command", skript],
+            capture_output=True, text=True, timeout=60, env=umgebung,
+        )
+    except Exception:  # noqa: BLE001
+        return True
+    antwort = (res.stdout or "").strip().upper()
+    if res.returncode != 0 or antwort not in ("JA", "NEIN"):
+        # Unerwartete Lage - im Zweifel durchlassen, siehe oben. Aber
+        # ins Protokoll, sonst faellt eine dauerhaft kaputte Pruefung
+        # niemandem auf.
+        sys.stderr.write(
+            "Besitzpruefung der agent.conf nicht moeglich, "
+            "Datei wird uebernommen: %r\n" % (antwort or res.stderr)[:200])
+        return True
+    return antwort == "JA"
+
+
 uebernommen = {}
+if existing and not von_privilegierter_hand(CONF):
+    # Untergeschoben. Nichts davon uebernehmen - weder den Server, mit
+    # dem der Agent als SYSTEM spraeche, noch das Token.
+    sys.stderr.write(
+        "Die vorhandene agent.conf stammt nicht von einem Administrator "
+        "und wird ignoriert.\n")
+    existing = {}
+
 for schluessel in ("server", "token"):
     if existing.get(schluessel):
         uebernommen[schluessel] = existing[schluessel]
@@ -256,12 +330,28 @@ CONF.write_text("\n".join(out) + "\n", encoding="utf-8")
 #
 # Ueber SIDs statt Namen - "Administrators" heisst auf einem deutschen
 # Windows anders, und ein Befehl mit dem falschen Namen scheitert still.
+# Drei Schritte statt einem (F-49 der Pruefung vom 2026-09-01).
+#
+# "/inheritance:r" entfernt nur die VERERBTEN Rechte. Ein ausdruecklich
+# gesetzter Eintrag bleibt stehen, und "/grant:r" ersetzt nur die
+# genannten Identitaeten. Am 2026-09-01 auf einem Windows-Testhost
+# nachgestellt: ein Eintrag "Jeder: Vollzugriff" ueberlebt die
+# Absicherung unveraendert. Damit war F-06 auf einem Rechner, auf dem
+# jemand den Ordner vorher angelegt hatte, nie behoben - der konnte das
+# Dauertoken weiter lesen und den Server umbiegen.
+#
+# setowner zuerst: der Besitzer darf die Rechte jederzeit selbst wieder
+# aendern. reset danach: raeumt alle ausdruecklichen Eintraege weg.
+# Ordner VOR Datei, sonst erbt die Datei beim reset die alten
+# Ordnerrechte zurueck.
 for ziel, rechte in ((CONF_DIR, "(OI)(CI)(F)"), (CONF, "(F)")):
-    subprocess.run(
+    for schritt in (
+        [ICACLS, str(ziel), "/setowner", "*S-1-5-32-544"],
+        [ICACLS, str(ziel), "/reset"],
         [ICACLS, str(ziel), "/inheritance:r",
          "/grant:r", f"*S-1-5-18:{rechte}", f"*S-1-5-32-544:{rechte}"],
-        capture_output=True,
-    )
+    ):
+        subprocess.run(schritt, capture_output=True)
 
 res = registriere_aufgabe()
 

@@ -616,7 +616,11 @@ check("ein gueltiges Token wird gespeichert",
 print("--- Rechte an agent.conf (statisch) ---")
 check("der Agent kennt eine Funktion dafuer",
       "def sichere_rechte(" in agent_quelle)
-check("sie ruft icacls auf", '"icacls"' in agent_quelle)
+# Seit 0.37.13 ueber _sys32("icacls.exe") - voller Pfad aus einem
+# SYSTEM-Prozess (F-47). Der Name allein wuerde die Umstellung nicht
+# ueberleben, deshalb beides zulassen.
+check("sie ruft icacls auf",
+      '"icacls"' in agent_quelle or '_sys32("icacls.exe")' in agent_quelle)
 
 # Ueber SIDs, nicht ueber Namen. Auf einem deutschen Windows heisst die
 # Gruppe "Administratoren" - ein Befehl mit dem englischen Namen
@@ -717,13 +721,21 @@ _bis = _ts.find("# Ohne Serveradresse ist der Agent nicht lauffaehig")
 check("der Konfigurationsteil ist auffindbar", 0 < _von < _bis, f"{_von}..{_bis}")
 
 
-def _konfig(datei_inhalt, argv_server, argv_verify="true"):
-    """Fuehrt genau den Abschnitt des erzeugten Skripts aus."""
-    raum = {
-        "server": argv_server,
-        "verify": argv_verify,
-        "CONF": None,
-    }
+def _konfig(datei_inhalt, argv_server, argv_verify="true", besitz="JA"):
+    """
+    Fuehrt genau den Abschnitt des erzeugten Skripts aus.
+
+    'besitz' bildet die Antwort der Besitzpruefung nach (F-46): "JA" =
+    die vorhandene agent.conf stammt von einem Administrator, "NEIN" =
+    sie wurde untergeschoben. Der echte Weg dorthin ist ein
+    PowerShell-Aufruf, den es hier nicht gibt - deshalb die Attrappe.
+    """
+    import types as _t
+
+    class _Res:
+        returncode = 0
+        stdout = besitz
+        stderr = ""
 
     class _Datei:
         def exists(self):
@@ -732,7 +744,16 @@ def _konfig(datei_inhalt, argv_server, argv_verify="true"):
         def read_text(self, encoding=None):
             return datei_inhalt
 
-    raum["CONF"] = _Datei()
+    raum = {
+        "server": argv_server,
+        "verify": argv_verify,
+        "CONF": _Datei(),
+        "SYS32": Path("C:/Windows/System32"),
+        "os": _t.SimpleNamespace(environ={}),
+        "subprocess": _t.SimpleNamespace(run=lambda *a, **k: _Res()),
+        "sys": _t.SimpleNamespace(
+            stderr=_t.SimpleNamespace(write=lambda x: None)),
+    }
     exec(_ts[_von:_bis], raum)  # noqa: S102
     return raum["existing"]
 
@@ -768,6 +789,19 @@ check("verify_ssl von der Befehlszeile gilt",
 # 5. Erstinstallation ohne alles muss weiterhin scheitern.
 _e = _konfig(None, "")
 check("Erstinstallation ohne alles hat keinen Server", not _e.get("server"), _e)
+
+# 6. Untergeschobene Datei: nichts davon wird uebernommen (F-46).
+_e = _konfig(_alt, "", besitz="NEIN")
+check("untergeschobene agent.conf: Server wird verworfen",
+      not _e.get("server"), _e)
+check("untergeschobene agent.conf: auch das Token wird verworfen",
+      not _e.get("token"), _e)
+
+# 7. Aber mit CO37SERVER laeuft die Installation trotzdem - der Angreifer
+#    soll sie nicht verhindern koennen.
+_e = _konfig(_alt, "https://neu", besitz="NEIN")
+check("untergeschobene Datei blockiert eine Installation mit CO37SERVER nicht",
+      _e.get("server") == "https://neu", _e)
 
 # ======================================================================
 # Ein Abbruch darf den Host nicht ohne Agent zuruecklassen (F-48)
@@ -805,7 +839,10 @@ def _ablauf(conf_inhalt, argv_server):
     class _Res:
         returncode = 0
         stderr = ""
-        stdout = ""
+        # "JA" = die Besitzpruefung (F-46) haelt die vorhandene Datei fuer
+        # vertrauenswuerdig. Hier geht es um F-48, nicht um F-46 - der
+        # Wert muss nur definiert sein.
+        stdout = "JA"
 
     def _run(cmd, **kw):
         aufrufe.append(next((a for a in cmd if str(a).startswith("/")),
@@ -853,6 +890,7 @@ def _ablauf(conf_inhalt, argv_server):
         "Path": Path,
         "CONF": _conf, "CONF_DIR": _Ordner(), "INSTALL_DIR": _Ordner(),
         "ICACLS": "icacls.exe", "SCHTASKS": "schtasks.exe",
+        "SYS32": Path("C:/Windows/System32"),
         "server": argv_server, "verify": "true",
     }
     _von = _ts.find("# Lief auf diesem Rechner")
@@ -1009,5 +1047,157 @@ try:
 finally:
     os.umask(_alt)
 
+
+# ======================================================================
+# Rechte: /inheritance:r allein raeumt untergeschobene Eintraege nicht
+# weg (F-49)
+# ======================================================================
+# Am 2026-09-01 auf einem Windows-Testhost nachgestellt:
+#
+#   vorher:  Jeder  FullControl  vererbt=False   <- untergeschoben
+#            SYSTEM FullControl  vererbt=True
+#   icacls <datei> /inheritance:r /grant:r SYSTEM Administratoren
+#   nachher: Jeder  FullControl  vererbt=False   <- UEBERLEBT
+#            SYSTEM FullControl  vererbt=False
+#            Administratoren     vererbt=False
+#
+# "/inheritance:r" entfernt nur die VERERBTEN Eintraege, "/grant:r"
+# ersetzt nur die genannten Identitaeten. C:\ProgramData vererbt
+# "Benutzer: Write" und ERSTELLER-BESITZER (ebenfalls nachgemessen) - wer
+# dort vor der Installation eine agent.conf hinterlegt und sich selbst
+# Vollzugriff gibt, kann sie danach weiter lesen und schreiben. Damit war
+# F-06 auf einem so vorbereiteten Host nie behoben.
+#
+# Wirksam ist erst: setowner (der Besitzer darf die Rechte sonst selbst
+# zurueckdrehen), dann reset (raeumt alle ausdruecklichen Eintraege),
+# dann inheritance:r und grant:r. Auf dem Testhost geprueft - danach
+# stehen genau zwei Eintraege.
+print()
+print("--- Rechte werden vollstaendig neu gesetzt (F-49) ---")
+
+
+def _icacls_schritte(quelle, funktionsname):
+    """Die icacls-Aufrufe einer Funktion in der Reihenfolge des Codes."""
+    fn = next((k for k in ast.walk(ast.parse(quelle))
+               if isinstance(k, ast.FunctionDef) and k.name == funktionsname), None)
+    if fn is None:
+        return None
+    schalter = []
+    for k in ast.walk(fn):
+        if isinstance(k, ast.Constant) and isinstance(k.value, str) \
+                and k.value.startswith("/"):
+            schalter.append(k.value)
+    return schalter
+
+
+_agent_schritte = _icacls_schritte(agent_quelle, "sichere_rechte")
+check("agent.py: sichere_rechte() gefunden", _agent_schritte is not None)
+if _agent_schritte:
+    for _s in ("/setowner", "/reset", "/inheritance:r", "/grant:r"):
+        check(f"agent.py: {_s} kommt vor", _s in _agent_schritte, _agent_schritte)
+    check("agent.py: setowner steht vor reset",
+          _agent_schritte.index("/setowner") < _agent_schritte.index("/reset"))
+    check("agent.py: reset steht vor inheritance:r",
+          _agent_schritte.index("/reset") < _agent_schritte.index("/inheritance:r"))
+
+# Ueber den Syntaxbaum, NICHT ueber Textpositionen: die Begruendung
+# oben nennt "/inheritance:r" im Kommentar, und zwar vor dem Code. Die
+# erste Fassung dieser Pruefung verglich _ts.index(...) und meldete
+# deshalb einen Fehler, den es nicht gab. Zum fuenften Mal dieselbe
+# Falle - Zeichenkettensuchen treffen Kommentare.
+_tsbaum2 = ast.parse(_ts)
+_icacls_schleife = None
+for _k in ast.walk(_tsbaum2):
+    if isinstance(_k, ast.For):
+        _text = ast.dump(_k)
+        if "CONF_DIR" in _text and "setowner" in _text:
+            _icacls_schleife = _k
+            break
+check("Installationsskript: die Rechte-Schleife ist auffindbar",
+      _icacls_schleife is not None)
+
+if _icacls_schleife is not None:
+    _schalter = [k.value for k in ast.walk(_icacls_schleife)
+                 if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                 and k.value.startswith("/")]
+    for _s in ("/setowner", "/reset", "/inheritance:r", "/grant:r"):
+        check(f"Installationsskript: {_s} kommt vor", _s in _schalter, _schalter)
+    check("Installationsskript: setowner steht vor reset",
+          _schalter.index("/setowner") < _schalter.index("/reset"), _schalter)
+    check("Installationsskript: reset steht vor inheritance:r",
+          _schalter.index("/reset") < _schalter.index("/inheritance:r"),
+          _schalter)
+
+    # Ordner vor Datei - sonst erbt die Datei beim reset die alten
+    # Ordnerrechte zurueck.
+    _ziele = [k.id for k in ast.walk(_icacls_schleife.iter)
+              if isinstance(k, ast.Name)]
+    check("Installationsskript: Ordner wird vor der Datei behandelt",
+          _ziele.index("CONF_DIR") < _ziele.index("CONF"), _ziele)
+
+# ======================================================================
+# Eine vorbelegte agent.conf wird an ihrem BESITZER erkannt (F-46)
+# ======================================================================
+# Auf dem Testhost nachgemessen:
+#
+#   von SYSTEM angelegt (Installer) -> Besitzer VORDEFINIERT\Administratoren
+#   von einem Benutzer vorbelegt    -> Besitzer bleibt dieser Benutzer,
+#                                      AUCH nachdem die Installation lief
+#
+# Die Rechte taugen dafuer NICHT: wer Besitzer ist, darf sie selbst
+# setzen und kann eine untergeschobene Datei genauso aussehen lassen wie
+# eine installierte. Den Besitz an die Administratoren abzugeben kann ein
+# Unprivilegierter dagegen nicht. Der Vorschlag im Pruefdokument, die
+# Vererbung als Merkmal zu nehmen, war damit falsch.
+print()
+print("--- Vorbelegte agent.conf am Besitzer erkennen (F-46) ---")
+check("es gibt eine Besitzpruefung",
+      "def von_privilegierter_hand" in _ts)
+check("ein Administrator gilt als vertrauenswuerdig",
+      "S-1-5-32-544" in _ts and "Get-LocalGroupMember" in _ts)
+check("die Gruppe wird ueber die SID angesprochen, nicht ueber den Namen",
+      "-SID 'S-1-5-32-544'" in _ts)
+
+# Der Pfad darf NICHT als Argument uebergeben werden: "powershell
+# -Command <skript> <arg>" fuellt $args nicht, sondern versucht <arg> als
+# eigenen Befehl auszufuehren. Auf dem Testhost gesehen - die erste
+# Fassung lief immer in den Fehlerzweig und haette wegen des Rueckfalls
+# JEDE Datei durchgewinkt.
+# Nicht nur, dass die Variable im Skripttext steht - sondern dass der
+# Aufruf sie auch UEBERGIBT und den Pfad nicht als Argument anhaengt.
+# Genau daran ist die erste Fassung gescheitert, und eine Suche nach
+# "CO37_CONF_PRUEFEN" haette sie fuer richtig gehalten.
+check("der Pfad steht nicht mehr in $args", "$args[0]" not in _ts)
+_vph = next((k for k in ast.walk(ast.parse(_ts))
+             if isinstance(k, ast.FunctionDef)
+             and k.name == "von_privilegierter_hand"), None)
+check("von_privilegierter_hand() ist auffindbar", _vph is not None)
+if _vph is not None:
+    _run = next((k for k in ast.walk(_vph)
+                 if isinstance(k, ast.Call)
+                 and isinstance(k.func, ast.Attribute)
+                 and k.func.attr == "run"), None)
+    check("sie ruft subprocess.run auf", _run is not None)
+    if _run is not None:
+        _kw = {k.arg for k in _run.keywords}
+        check("der Aufruf uebergibt eine eigene Umgebung", "env" in _kw, _kw)
+        # Die Befehlsliste muss mit dem Skript enden - kommt danach noch
+        # etwas, versucht powershell es als eigenen Befehl auszufuehren.
+        _liste = _run.args[0]
+        _letztes = _liste.elts[-1] if isinstance(_liste, ast.List) else None
+        check("die Befehlsliste endet mit dem Skript",
+              isinstance(_letztes, ast.Name) and _letztes.id == "skript",
+              ast.dump(_letztes) if _letztes else "keine Liste")
+check("nur ein ausdrueckliches JA gilt als vertrauenswuerdig",
+      'antwort == "JA"' in _ts)
+check("eine unklare Antwort wird protokolliert",
+      "Besitzpruefung der agent.conf nicht moeglich" in _ts)
+
+# Und die Wirkung im Ablauf: eine als untergeschoben erkannte Datei darf
+# nichts beitragen - auch das Token nicht.
+_i = _ts.find("if existing and not von_privilegierter_hand")
+check("die Pruefung wird im Ablauf verwendet", _i > 0)
+check("bei einer untergeschobenen Datei wird alles verworfen",
+      "existing = {}" in _ts[_i:_i + 500], _ts[_i:_i + 400])
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

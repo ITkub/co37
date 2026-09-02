@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.12"
+AGENT_VERSION = "0.37.13"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -138,19 +138,48 @@ def sichere_rechte(pfad: Path) -> bool:
             log(f"Rechte an {pfad} nicht setzbar: {exc}", err=True)
             return False
 
-    try:
-        res = subprocess.run(
-            ["icacls", str(pfad), "/inheritance:r",
-             "/grant:r", f"{SID_SYSTEM}:(F)", f"{SID_ADMINS}:(F)"],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log(f"icacls nicht ausfuehrbar: {exc}", err=True)
-        return False
-    if res.returncode != 0:
-        log(f"Rechte an {pfad} nicht setzbar: "
-            f"{(res.stderr or res.stdout).strip()[:200]}", err=True)
-        return False
+    # Drei Schritte, nicht einer (F-49 der Pruefung vom 2026-09-01).
+    #
+    # '/inheritance:r' entfernt nur die VERERBTEN Rechte. Ein AUSDRUECKLICH
+    # gesetzter Eintrag bleibt stehen, und '/grant:r' ersetzt nur die
+    # genannten Identitaeten - fremde loescht es nicht. Auf einem
+    # Windows-Testhost am 2026-09-01 nachgestellt: ein Eintrag "Jeder:
+    # Vollzugriff" ueberlebt die Absicherung unveraendert.
+    #
+    # Das ist der Weg dorthin: C:\ProgramData laesst jeden Benutzer
+    # Unterverzeichnisse anlegen (vererbt "Benutzer: Write" und
+    # ERSTELLER-BESITZER, ebenfalls nachgemessen). Wer dort vor der
+    # Installation eine agent.conf hinterlegt und sich selbst Vollzugriff
+    # gibt, kann sie danach weiter lesen und schreiben - also das
+    # Dauertoken abholen und den Server umbiegen. Damit war F-06 auf
+    # einem so vorbereiteten Host nie behoben.
+    #
+    # setowner: der Besitzer darf die Rechte jederzeit selbst wieder
+    #           aendern (WRITE_DAC). Ohne diesen Schritt naehme der
+    #           Angreifer sich zurueck, was wir ihm gerade nehmen.
+    # reset:    setzt die Rechte auf die vom Elternteil geerbten zurueck
+    #           und raeumt dabei ALLE ausdruecklichen Eintraege weg.
+    # dann erst inheritance:r und grant:r wie bisher.
+    #
+    # Reihenfolge Ordner vor Datei ist Sache des Aufrufers - sonst erbt
+    # die Datei beim reset die alten Ordnerrechte zurueck.
+    schritte = (
+        [_sys32("icacls.exe"), str(pfad), "/setowner", SID_ADMINS],
+        [_sys32("icacls.exe"), str(pfad), "/reset"],
+        [_sys32("icacls.exe"), str(pfad), "/inheritance:r",
+         "/grant:r", f"{SID_SYSTEM}:(F)", f"{SID_ADMINS}:(F)"],
+    )
+    for schritt in schritte:
+        try:
+            res = subprocess.run(schritt, capture_output=True, text=True,
+                                 timeout=60)
+        except Exception as exc:  # noqa: BLE001
+            log(f"icacls nicht ausfuehrbar: {exc}", err=True)
+            return False
+        if res.returncode != 0:
+            log(f"Rechte an {pfad} nicht setzbar ({schritt[2]}): "
+                f"{(res.stderr or res.stdout).strip()[:200]}", err=True)
+            return False
     return True
 
 
