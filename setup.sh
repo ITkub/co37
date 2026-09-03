@@ -88,6 +88,16 @@ if [ -f "$BASE/data/secret.key" ]; then
   echo "    Vorhandener Verschluesselungsschluessel wird weiterverwendet."
 else
   SECRET_KEY=$(openssl rand -base64 48)
+  # Erst leer und eng anlegen, dann fuellen - genau wie fuenfzig Zeilen
+  # weiter unten bei backend.env. Vorher stand hier "schreiben, danach
+  # chmod 600": dazwischen lag der Schluessel, mit dem alle Checkmk-Secrets
+  # verschluesselt sind, mit der Umask-Vorgabe auf der Platte, ueblich 644.
+  # Steht seit der Pruefung vom 2026-08-31 unter "niedrig, liegen
+  # gelassen"; derselbe Fall in den Signaturwerkzeugen ist als F-35
+  # behoben. Kostet zwei Zeilen.
+  umask 177
+  : > "$BASE/data/secret.key"
+  umask 022
   echo "$SECRET_KEY" > "$BASE/data/secret.key"
   chmod 600 "$BASE/data/secret.key"
 fi
@@ -189,7 +199,33 @@ Environment="CO37_DB=sqlite:///$BASE/data/co37.db"
 Environment="CO37_DATA=$BASE/data"
 Environment="CO37_POLL_INTERVAL=60"
 Environment="CO37_OFFLINE_SECONDS=180"
-ExecStart=$BASE/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT
+# --no-proxy-headers ist Absicht und gehoert NICHT weggelassen
+# (F-58 der Pruefung vom 2026-09-03).
+#
+# uvicorn schaltet ProxyHeadersMiddleware ab Werk EIN und glaubt
+# X-Forwarded-For jedem Aufrufer aus 127.0.0.1 (forwarded_allow_ips,
+# Vorgabe "127.0.0.1"). Diese Middleware schreibt scope["client"] um -
+# also genau den Wert, auf dem die ganze Vertrauensentscheidung von CO-37
+# aufsetzt: peer_ip() liest ihn, via_trusted_proxy() vergleicht ihn mit
+# der eingetragenen Proxy-Liste, und client_ip() glaubt der Kopfzeile nur
+# dann. Eine Schicht darunter war sie da schon geglaubt worden.
+#
+# Nachgemessen am 2026-09-03, sieben Anmeldeversuche mit je einem anderen
+# erfundenen X-Forwarded-For:
+#
+#   ohne  --no-proxy-headers   401 401 401 401 401 401 401   (nie gesperrt)
+#   mit   --no-proxy-headers   401 401 401 401 401 429 429
+#
+# Im Pruefprotokoll stand danach die erfundene Adresse statt 127.0.0.1.
+# Das ist F-21 noch einmal, eine Ebene tiefer: dort wurde die Kopfzeile
+# von der falschen Seite gelesen, hier wird sie an CO-37 vorbei geglaubt.
+# Erreichbar fuer jeden, der vom Rechner selbst eine Verbindung zum
+# Backend aufbauen kann.
+#
+# Die Entscheidung, welchem Proxy zu glauben ist, gehoert an EINE Stelle -
+# und das ist die Einstellung "trusted_proxy" in CO-37, nicht die Vorgabe
+# eines Servers.
+ExecStart=$BASE/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT --no-proxy-headers
 Restart=always
 RestartSec=10
 

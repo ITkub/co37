@@ -90,7 +90,16 @@ cd /opt/co37 && bash build_packages.sh --deb-only
 
 Der MSI-Bau lädt beim ersten Mal die Python-Embeddable-Distribution von
 python.org und legt sie in `packaging/cache/` ab. Ohne Netzzugang die Datei
-`python-3.12.8-embed-amd64.zip` von Hand dort hinterlegen.
+von Hand dort hinterlegen. **Welche Fassung, steht in `packaging/build_msi.py`
+unter `PY_VERSION`** — dort nachsehen statt hier: an dieser Stelle stand der
+Dateiname fest eingetragen und war seit 0.37.4 falsch. Wer der Anleitung
+folgte, legte genau die Fassung ab, die F-15 loswerden sollte. Dieselbe
+Fehlerart wie in `i18n.js` (0.37.0) und bei den Pins des Agents (F-14): ein
+Wert an zwei Stellen, von denen nur eine wirkt.
+
+```
+grep PY_VERSION packaging/build_msi.py
+```
 
 ### 1.8 Oberfläche öffnen
 

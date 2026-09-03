@@ -114,11 +114,38 @@ vom Aufrufer geschickte Wert, und `https` ließ sich damit behaupten
 es bei nginx keine übliche anhängende Schreibweise; der praktisch
 wichtigere Fall ist der Proxy, der die Kopfzeile schlicht vergisst.
 
+**Wer der Kopfzeile glaubt, steht in CO-37 — nicht im Webserver.** Seit
+0.37.15 startet die systemd-Unit uvicorn mit `--no-proxy-headers`. Das ist
+Absicht: uvicorn wertet `X-Forwarded-For` sonst **selbst** aus und glaubt sie
+jedem Aufrufer aus `127.0.0.1`. Es überschreibt dabei die Adresse, an der
+CO-37 anschließend erkennt, ob die Anfrage überhaupt vom eingetragenen Proxy
+kommt — die Prüfung lief also gegen einen bereits gefälschten Wert. Sieben
+Anmeldeversuche mit je einer erfundenen Adresse blieben ohne Sperre, und im
+Prüfprotokoll stand die Erfindung (F-58 der Prüfung vom 03.09.2026).
+
+Wer die Unit von Hand ändert: den Schalter stehen lassen. Die Liste der
+Proxys, denen zu glauben ist, gehört in **Einstellungen → Proxy**.
+
 **Nicht nötig:** WebSocket-Unterstützung. CO-37 fragt zyklisch ab.
 
 **Größenbegrenzung für Anfragen:** Systemupdates werden als ZIP
 hochgeladen, derzeit rund 450 KB. Eine Grenze unterhalb von etwa 10 MB
 sollte angehoben werden.
+
+Seit 0.37.15 weist **CO-37 selbst** alles über **32 MiB** mit `413` ab
+(`CO37_MAX_BODY` in `/etc/co37/backend.env`, Angabe in Bytes). Bis dahin
+gab es gar keine Grenze: 200 MB an die absichtlich offene Anmelderoute
+`/api/v1/agent/enroll` wurden vollständig in den Speicher gelesen, bevor
+irgendeine Prüfung griff (F-56 der Prüfung vom 03.09.2026).
+
+Die Grenze im Proxy ersetzt das nicht und wird davon nicht ersetzt —
+**beide gehören gesetzt**. Der Proxy hält die Last vom Server fern, bevor
+sie überhaupt ankommt; die Grenze im Backend gilt auch dann, wenn jemand
+den Port direkt erreicht. Bei nginx:
+
+```nginx
+client_max_body_size 32m;
+```
 
 **Zeitüberschreitung:** Die längste Anfrage ist die Freigabe eines
 Neustarts, die dabei eine Downtime in Checkmk setzt. Sechzig Sekunden

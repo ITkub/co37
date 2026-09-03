@@ -27,6 +27,26 @@ class CheckmkClient:
         verify_ssl: bool = True,
         timeout: float = 20.0,
     ):
+        # Benutzer und Secret landen unveraendert in einer HTTP-Kopfzeile.
+        # httpx kodiert Kopfzeilen als ASCII und wirft sonst einen
+        # UnicodeEncodeError - der kam bisher ungefangen aus der Route
+        # heraus und wurde zu 500 (F-54 der Pruefung vom 2026-09-03, beim
+        # Fuzzing gefunden). Ein Umlaut im Automation-Benutzer genuegte.
+        #
+        # Hier statt in der Route, weil auch der Hintergrundbetrieb ueber
+        # get_checkmk() Clients baut. CheckmkError faengt die Route schon
+        # ab und macht daraus eine lesbare 400.
+        #
+        # Der Test deckt nebenbei Zeilenumbrueche ab: '\r' und '\n' sind
+        # in ASCII, wuerden also durchkommen. httpx weist sie selbst ab,
+        # aber auch das erst mit einem Abbruch mitten in der Route.
+        for name, wert in (("Benutzer", username), ("Secret", secret)):
+            if not wert.isascii() or any(c in wert for c in "\r\n\0"):
+                raise CheckmkError(
+                    f"Der Checkmk-{name} enthaelt Zeichen, die in einer "
+                    f"HTTP-Kopfzeile nicht zulaessig sind (nur ASCII, "
+                    f"keine Zeilenumbrueche).")
+
         self.base_url = f"{server_url.rstrip('/')}/{site}/check_mk/api/1.0"
         self.site = site
         self._headers = {
@@ -54,8 +74,25 @@ class CheckmkClient:
         if headers:
             hdrs.update(headers)
 
-        async with httpx.AsyncClient(verify=self._verify, timeout=self._timeout) as client:
-            resp = await client.request(method, url, json=json, params=params, headers=hdrs)
+        # Alles, was httpx an Netzfehlern wirft, wird hier zu CheckmkError
+        # (F-55 der Pruefung vom 2026-09-03). Vorher kam ein nicht
+        # erreichbarer Checkmk-Server als ConnectError/TimeoutException aus
+        # der Route heraus und wurde zu 500 "Internal Server Error" - fuer
+        # den haeufigsten Fall ueberhaupt, naemlich eine falsch getippte
+        # Adresse beim Einrichten. Gefunden, als der Ausgangs-Proxy des
+        # Testcontainers eine Verbindung abwies.
+        #
+        # Hier statt in den Routen: _request ist der einzige Ort, an dem
+        # dieser Client ueberhaupt ins Netz geht, und jede der acht
+        # Aufruferstellen faengt CheckmkError bereits ab.
+        try:
+            async with httpx.AsyncClient(verify=self._verify,
+                                         timeout=self._timeout) as client:
+                resp = await client.request(method, url, json=json,
+                                            params=params, headers=hdrs)
+        except httpx.HTTPError as exc:
+            raise CheckmkError(
+                f"Checkmk nicht erreichbar ({type(exc).__name__}): {exc}")
 
         if resp.status_code == 204:
             return None

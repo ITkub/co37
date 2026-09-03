@@ -127,6 +127,7 @@ REIHEN=(
   "agent-api       $PY tests/agent-api-test.py"
   "area            $PY tests/area-test.py"
   "host-patch      $PY tests/host-patch-test.py"
+  "eingaben        $PY tests/eingaben-test.py"
   "frontend        node tests/frontend-test.js PORT SESSION frontend/index.html"
   "roles           $PY tests/roles-test.py"
 )
@@ -150,12 +151,21 @@ if ! "$PY" tests/port-frei.py "$PORT"; then
 fi
 
 echo "Backend auf Port $PORT, Daten in $TMP"
+# --no-proxy-headers wie im Betrieb (F-58 der Pruefung vom 2026-09-03).
+# Ohne das misst die Testreihe etwas anderes als die Anlage tut - die
+# Pruefung, dass ein erfundenes X-Forwarded-For die Drosselung nicht
+# umgeht, waere hier gruen und im Betrieb rot.
+#
+# Der Kommentar steht VOR dem Block, nicht darin: eine Kommentarzeile
+# zwischen zwei mit "\" fortgesetzten Zeilen beendet den Befehl still,
+# und die Umgebungsvariablen kaemen nicht mehr an.
 (
   cd backend || exit 1
   CO37_SECRET_KEY="testsecret" \
   CO37_DB="sqlite:///$TMP/co37.db" \
   CO37_DATA="$TMP" \
-  "$PY" -m uvicorn main:app --port "$PORT" > "$TMP/backend.log" 2>&1
+  "$PY" -m uvicorn main:app --port "$PORT" --no-proxy-headers \
+      > "$TMP/backend.log" 2>&1
 ) &
 BACKEND_PID=$!
 

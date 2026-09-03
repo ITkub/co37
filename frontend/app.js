@@ -1819,14 +1819,40 @@ document.getElementById("roSave").onclick = async () => {
   toast(t("msg.saved"));
 };
 
-document.getElementById("roStart").onclick = async () => {
+/**
+ * Startet das Ausrollen ueber die dafuer vorgesehene Route.
+ *
+ * Steht als Funktion da, weil ZWEI Knoepfe darauf zeigen: der in den
+ * Einstellungen und der auf der Agents-Seite. Der zweite legte bis 0.37.15
+ * die selfupdate-Auftraege selbst an, in einer Schleife ueber
+ * /api/v1/hosts/{id}/jobs - und ging damit an allem vorbei, was
+ * start_agent_rollout() leistet:
+ *
+ *   - der Staffelung (erst der Pilot-Host, die anderen erst, wenn er sich
+ *     mit der neuen Fassung UND einem abgeschlossenen Auftrag meldet),
+ *   - der Doppel-Auftrag-Sperre in _queue_selfupdate(),
+ *   - dem Zustand, den die Einstellungsseite anzeigt.
+ *
+ * Wer den Knopf drueckte, schickte also die ganze Flotte auf einmal los -
+ * genau das, wogegen die Staffelung gebaut wurde. Keine Rechteausweitung,
+ * beide Wege sind Administratorsache; aber wenn ein Agent nach der
+ * Aktualisierung nicht mehr hochkommt, kommt auf diesem Weg keiner mehr
+ * hoch (Befund der Pruefung vom 2026-09-03).
+ *
+ * Eine Funktion statt zweier gleichlautender Stellen, damit sie nicht ein
+ * zweites Mal auseinanderlaufen.
+ */
+async function rolloutStarten(){
   const r = await api("POST", "/api/v1/agent-rollout/start");
   await loadRollout();
   await load();
   toast(r.started
     ? (r.mode === "staged" ? t("settings.rollout.pilot_updating", { pilot: r.pilot }) : t("settings.rollout.agents_updating", { anzahl: r.count }))
     : r.reason);
-};
+  return r;
+}
+
+document.getElementById("roStart").onclick = async () => { await rolloutStarten(); };
 
 document.getElementById("btnMakeToken").onclick = makeInstallToken;
 document.getElementById("copyLinux").onclick = () =>
@@ -1839,8 +1865,8 @@ document.getElementById("agUpdateAll").onclick = async () => {
     && h.agent_version && AGENT_VER && h.agent_version !== AGENT_VER);
   if (!stale.length){ toast(t("msg.agents_current")); return; }
   if (!confirm(t("ask.update_agents", { anzahl: stale.length, version: AGENT_VER }))) return;
-  for (const h of stale){ try { await api("POST", `/api/v1/hosts/${h.id}/jobs`, {job_type:"selfupdate", params:{}}); } catch(e){} }
-  toast(t("msg.agent_update_many", { anzahl: stale.length }));
+  // Nicht mehr selbst Auftraege anlegen - siehe rolloutStarten().
+  try { await rolloutStarten(); } catch(e){ return; }
   afterAction();
 };
 

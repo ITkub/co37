@@ -44,6 +44,7 @@ import ast
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import timedelta
@@ -555,6 +556,28 @@ if _muster:
     check("und der Ausdruck trifft die aktuelle PY_ZIP",
           re.fullmatch(_muster.group(1), _bm.PY_ZIP) is not None,
           _bm.PY_ZIP)
+
+# Dieselbe Frage fuer die Anleitung. In README.md stand der Dateiname fest
+# eingetragen und zeigte seit 0.37.4 (PY_VERSION 3.14.7) auf
+# "python-3.12.8-embed-amd64.zip" - wer der Anleitung folgte und die Datei
+# ohne Netz von Hand ablegte, legte genau die Fassung ab, die F-15
+# loswerden sollte. Dritter Fall derselben Art nach i18n.js (0.37.0) und
+# den Pins des Agents (F-14).
+#
+# Geprueft wird die Regel, nicht die Zahl: in der README darf ueberhaupt
+# kein Embeddable-Dateiname mehr stehen. Eine Pruefung auf "steht die
+# richtige Fassung drin" waere dieselbe Falle noch einmal - sie ginge bei
+# der naechsten Anhebung mit durch, solange jemand beide Stellen pflegt.
+_readme = (WURZEL / "README.md").read_text(encoding="utf-8")
+_fest = re.findall(r"python-\d+\.\d+\.\d+-embed-amd64\.zip", _readme)
+check("die README nennt keinen festen Embeddable-Dateinamen mehr",
+      not _fest, _fest)
+check("sie verweist stattdessen auf PY_VERSION",
+      "PY_VERSION" in _readme)
+# Gegenprobe: der Ausdruck findet so einen Namen ueberhaupt.
+check("der Ausdruck wuerde einen festen Namen finden",
+      re.findall(r"python-\d+\.\d+\.\d+-embed-amd64\.zip",
+                 "siehe python-3.12.8-embed-amd64.zip hier"))
 
 
 # ======================================================================
@@ -1256,6 +1279,119 @@ with _warn.catch_warnings(record=True) as _w:
 check("die Pruefung erkennt eine ungueltige Folge ueberhaupt",
       any("escape" in str(x.message) for x in _w),
       [str(x.message) for x in _w])
+
+
+
+# ======================================================================
+# Die geplante Aufgabe ueberlebt ein Upgrade (F-48, grosse Variante)
+# ======================================================================
+# Die kleine Variante (0.37.12) stellt die Aufgabe im Fehlerfall wieder
+# her. Die grosse sorgt dafuer, dass sie beim Upgrade gar nicht erst
+# geloescht wird: RemoveTask haengt jetzt zusaetzlich an
+# "NOT UPGRADINGPRODUCTCODE".
+#
+# Windows Installer deinstalliert die alte Fassung waehrend eines Upgrades
+# ganz gewoehnlich, mit REMOVE=ALL - deshalb griff die alte Bedingung auch
+# dort. UPGRADINGPRODUCTCODE ist genau in diesem Fall gesetzt.
+#
+# AM 2026-09-03 AUF DEM WINDOWS-TESTHOST GEMESSEN, mit zwei winzigen
+# Wegwerf-Paketen, die nur diese beiden Aktionen tragen und in ein
+# Protokoll schreiben:
+#
+#   ohne Bedingung   Upgrade -> REGISTER 1.0.0, REMOVE 1.0.0, REGISTER 2.0.0
+#   mit  Bedingung   Upgrade -> REGISTER 1.0.0,               REGISTER 2.0.0
+#   beide            Deinstallation -> REMOVE 2.0.0
+#
+# Die dritte Zeile ist die wichtige Gegenprobe: die Bedingung darf die
+# Aufgabe bei einer echten Deinstallation nicht stehen lassen.
+print()
+print("--- RemoveTask laeuft beim Upgrade nicht mehr (F-48 gross) ---")
+
+_ies = msi[msi.index("<InstallExecuteSequence>"):
+           msi.index("</InstallExecuteSequence>")]
+_zeilen = [z.strip() for z in _ies.splitlines()
+           if "<Custom Action=" in z]
+_remove = next((z for z in _zeilen if 'Action="RemoveTask"' in z), "")
+_register = next((z for z in _zeilen if 'Action="RegisterTask"' in z), "")
+check("die RemoveTask-Zeile ist auffindbar", bool(_remove), _zeilen)
+check("RemoveTask laeuft beim Upgrade nicht",
+      "NOT UPGRADINGPRODUCTCODE" in _remove, _remove)
+check("bei einer echten Deinstallation aber schon",
+      'REMOVE="ALL"' in _remove, _remove)
+# Gegenprobe: die Bedingung darf NICHT versehentlich auch an RegisterTask
+# haengen - dann liefe beim Upgrade weder das eine noch das andere, und
+# der Host haette danach gar keine Aufgabe mehr.
+check("RegisterTask traegt die Bedingung nicht",
+      "UPGRADINGPRODUCTCODE" not in _register, _register)
+
+# Und der Bau muss es nachpruefen. Eine Bedingung, die beim naechsten
+# Umbau still verschwindet, faellt sonst erst beim uebernaechsten Upgrade
+# eines Kunden auf.
+check("build_msi.py kennt eine erwartete Bedingung",
+      "ERWARTETE_BEDINGUNG" in msi
+      and "UPGRADINGPRODUCTCODE" in msi.split("ERWARTETE_BEDINGUNG")[1][:200],
+      msi.split("ERWARTETE_BEDINGUNG")[1][:120] if "ERWARTETE_BEDINGUNG" in msi else "")
+_pp = next((k for k in ast.walk(ast.parse(msi))
+            if isinstance(k, ast.FunctionDef) and k.name == "pruefe_paket"), None)
+check("pruefe_paket() wertet sie aus",
+      _pp is not None and "ERWARTETE_BEDINGUNG" in ast.unparse(_pp))
+
+# Wenn die Werkzeuge da sind: wirklich bauen und wirklich nachsehen.
+# Ohne wixl wird das gesagt statt uebergangen - eine ausgelassene
+# Pruefung, die wie eine bestandene aussieht, ist schlimmer als keine.
+if shutil.which("wixl") and shutil.which("msiinfo"):
+    _pdir = Path(tempfile.mkdtemp())
+    (_pdir / "marker.txt").write_text("probe\n")
+    _wxs = """<?xml version="1.0"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="P" Language="1033" Version="1.0.0" Manufacturer="P"
+           UpgradeCode="{3C1F5A70-9B2E-4D61-8A03-77E5C4B2A1D9}">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"/>
+    <Media Id="1" Cabinet="p.cab" EmbedCab="yes"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="P">
+          <Component Id="C.m" Guid="{8A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F0}">
+            <File Id="F.m" Name="marker.txt" Source="marker.txt" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="M" Level="1"><ComponentRef Id="C.m"/></Feature>
+    <Property Id="CO37PYEXE" Value="x"/>
+    <CustomAction Id="RemoveTask" Property="CO37PYEXE" ExeCommand="x"
+                  Execute="deferred" Impersonate="no" Return="ignore"/>
+    <InstallExecuteSequence>
+      <Custom Action="RemoveTask" Sequence="3499">BEDINGUNG</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>
+"""
+    _ergebnis = {}
+    for _name, _bed in (("mit", 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'),
+                        ("ohne", 'REMOVE="ALL"')):
+        (_pdir / f"{_name}.wxs").write_text(_wxs.replace("BEDINGUNG", _bed))
+        _r = subprocess.run(["wixl", "-o", str(_pdir / f"{_name}.msi"),
+                             str(_pdir / f"{_name}.wxs")],
+                            capture_output=True, text=True, cwd=_pdir)
+        if _r.returncode != 0:
+            _ergebnis[_name] = f"wixl: {_r.stderr[-120:]}"
+            continue
+        _e = subprocess.run(["msiinfo", "export", str(_pdir / f"{_name}.msi"),
+                             "InstallExecuteSequence"],
+                            capture_output=True, text=True)
+        _bedingungen = {z.split("\t")[0]: z.split("\t")[1]
+                        for z in _e.stdout.splitlines() if "\t" in z}
+        _ergebnis[_name] = _bedingungen.get("RemoveTask", "")
+    check("wixl traegt die Bedingung wirklich ins Paket",
+          "UPGRADINGPRODUCTCODE" in _ergebnis.get("mit", ""), _ergebnis.get("mit"))
+    check("und ohne sie steht sie auch nicht drin",
+          "UPGRADINGPRODUCTCODE" not in _ergebnis.get("ohne", "?"),
+          _ergebnis.get("ohne"))
+    shutil.rmtree(_pdir, ignore_errors=True)
+else:
+    print("       (wixl/msiinfo fehlen - der Bau selbst wurde NICHT geprueft)")
+
 
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

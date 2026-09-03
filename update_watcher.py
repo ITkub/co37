@@ -149,7 +149,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.37.13"
+WATCHER_VERSION = "0.37.14"
 WATCHER_INFO = STATE_DIR / "watcher.json"
 WATCHER_INFO_ALT = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
@@ -963,7 +963,20 @@ def do_update():
         write_status(status)
 
     finally:
-        shutil.rmtree(WORK_DIR, ignore_errors=True)
+        # Das ganze Arbeitsverzeichnis, nicht nur den ausgepackten Baum.
+        # Bis 0.37.14 stand hier WORK_DIR (= SAFE_DIR/_work); die Kopie des
+        # Pakets liegt aber eine Ebene darueber in SAFE_DIR und blieb
+        # deshalb liegen - gut 550 KB nach jedem Update, im Feld am
+        # 2026-08-31 auf KK-OPS01 gesehen und seitdem als "kein
+        # Sicherheitsproblem, aber unsauber" notiert.
+        #
+        # Es ist auch mehr als Unordnung: SAFE_DIR wird beim naechsten
+        # Update ohnehin geloescht und neu angelegt (siehe oben), das
+        # Paket liegt also nur solange herum, bis jemand das naechste
+        # einspielt. Danach ist es das naechste. Ein Verzeichnis, das
+        # dauerhaft ein Paket enthaelt, das gerade nicht gebraucht wird,
+        # laedt zu Verwechslungen ein.
+        shutil.rmtree(SAFE_DIR, ignore_errors=True)
         INCOMING_ZIP.unlink(missing_ok=True)
         INCOMING_SIG.unlink(missing_ok=True)
 

@@ -130,8 +130,35 @@ if _login:
     # Fassung steht oben im Kommentar und wuerde jede Suche gruen halten.
     _rufe = {k.func.id for k in _ast.walk(_login)
              if isinstance(k, _ast.Call) and isinstance(k.func, _ast.Name)}
-    check("login() bildet keinen Hash mehr selbst",
-          "hash_password" not in _rufe, sorted(_rufe))
+    # Frueher hiess diese Pruefung "login() bildet keinen Hash mehr
+    # selbst" und verbot hash_password() in der ganzen Funktion. Das war
+    # zu grob: seit 0.37.15 erneuert login() den Hash eines Bestandskontos
+    # mit schwaecheren scrypt-Vorgaben - aber ERST, nachdem das Passwort
+    # geprueft ist und der Fehlerpfad hinter ihr liegt.
+    #
+    # Was F-37 verlangt, ist praeziser: auf dem Weg zum 401 darf kein
+    # zweiter scrypt-Lauf liegen. Genau das wird jetzt geprueft - ueber
+    # die Zeilennummern im Syntaxbaum, nicht ueber das blosse Vorkommen.
+    _raise401 = [k.lineno for k in _ast.walk(_login)
+                 if isinstance(k, _ast.Raise)
+                 and isinstance(k.exc, _ast.Call)
+                 and getattr(k.exc.func, "id", "") == "HTTPException"
+                 and k.exc.args and getattr(k.exc.args[0], "value", None) == 401]
+    check("der Fehlerpfad mit 401 ist auffindbar", bool(_raise401), _raise401)
+    _hashzeilen = [k.lineno for k in _ast.walk(_login)
+                   if isinstance(k, _ast.Call)
+                   and getattr(k.func, "id", "") == "hash_password"]
+    check("vor dem 401 wird kein Hash gebildet",
+          all(z > max(_raise401) for z in _hashzeilen) if _raise401 else False,
+          f"hash_password in Zeile(n) {_hashzeilen}, 401 in {_raise401}")
+
+    # Gegenprobe zur Aussagekraft: die Zeilennummern muessen ueberhaupt
+    # etwas hergeben. Ohne das bestuende die Reihe auch bei leeren Listen.
+    check("die Pruefung hat ueberhaupt Zeilen zu vergleichen",
+          bool(_hashzeilen) and bool(_raise401),
+          (_hashzeilen, _raise401))
+    check("und das Erneuern liegt hinter der Passwortpruefung",
+          "veraltet" in _rufe, sorted(_rufe))
 
     # Und die Zeitmessung selbst - die ist der eigentliche Befund.
     zeiten = {}
@@ -180,6 +207,53 @@ if _login:
           "note_login_success" in {k.func.id for k in _ast.walk(_login)
                                    if isinstance(k, _ast.Call)
                                    and isinstance(k.func, _ast.Name)})
+
+# ======================================================================
+# Der Aufwand von scrypt (Kleinkram aus Runde 4, behoben 2026-09-03)
+# ======================================================================
+# Im Pruefdokument stand seit Runde 4: "scrypt mit N=2^14 entspricht dem
+# Stand von etwa 2010; heutige Empfehlungen liegen bei N=2^17. Das ist
+# eine Zahl, keine Umstellung." Die zweite Haelfte war falsch - N=2^17
+# braucht 128 MB je gleichzeitigem Anmeldeversuch und waere ein Hebel
+# gegen den eigenen Speicher gewesen. Gewaehlt wurde die von OWASP
+# ausdruecklich als gleichwertig genannte Variante 2^14/8/5: derselbe
+# Speicherbedarf wie bisher, vierfache Rechenzeit.
+#
+# Geprueft wird der AUFWAND, nicht die einzelnen Zahlen - sonst schriebe
+# die Reihe eine bestimmte Parameterwahl fest, und die naechste Anpassung
+# muesste sie mit aendern statt von ihr bestaetigt zu werden.
+print()
+print("--- Der Aufwand von scrypt ---")
+
+_alt = 2 ** 14 * 8 * 1        # Stand bis 0.37.14
+_jetzt = main.SCRYPT_N * main.SCRYPT_R * main.SCRYPT_P
+check("der Aufwand liegt deutlich ueber dem alten Stand",
+      _jetzt >= 4 * _alt, f"{_jetzt} gegen {_alt}")
+check("und der Speicherbedarf bleibt vertretbar",
+      128 * main.SCRYPT_N * main.SCRYPT_R <= 32 * 1024 * 1024,
+      f"{128 * main.SCRYPT_N * main.SCRYPT_R / 1048576:.0f} MB")
+# OpenSSL deckelt scrypt sonst bei 32 MB; ohne maxmem scheitert jede
+# Anhebung ueber N=2^15 mit "memory limit exceeded" statt zu rechnen.
+check("maxmem wird mitgegeben", "maxmem=SCRYPT_MAXMEM" in _q)
+
+# Und der Weg fuer Bestandskonten: die Vorgaben stehen IM Hash und werden
+# beim Pruefen von dort gelesen. Ohne Erneuern beim Anmelden erreicht eine
+# Anhebung der Konstanten kein einziges vorhandenes Konto - dieselbe
+# Falle wie bei F-14, ein Wert, den niemand liest.
+import hashlib as _hl  # noqa: E402
+import secrets as _sec  # noqa: E402
+
+_salt = _sec.token_bytes(16)
+_dk = _hl.scrypt(b"altes-passwort", salt=_salt, n=2 ** 14, r=8, p=1, dklen=32)
+_althash = f"scrypt$16384$8$1${_salt.hex()}${_dk.hex()}"
+check("ein alter Hash laesst sich weiterhin pruefen",
+      main.verify_password("altes-passwort", _althash))
+check("er gilt aber als veraltet", main.veraltet(_althash))
+check("ein frisch gebildeter nicht",
+      not main.veraltet(main.hash_password("neues-passwort")))
+check("und Unsinn gilt ebenfalls als veraltet",
+      main.veraltet("kaputt") and main.veraltet(""))
+
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

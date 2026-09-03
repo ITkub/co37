@@ -824,8 +824,11 @@ def build(version: str, out_dir: Path) -> Path:
          InstallFiles 4000. -->
     <InstallExecuteSequence>
       <!-- Vor dem Einspielen der neuen Dateien die alte Fassung entfernen.
-           Die geplante Aufgabe wird dabei von deren RemoveTask geloescht
-           und anschliessend von RegisterTask neu angelegt. -->
+           Bis 0.37.14 loeschte deren RemoveTask dabei die geplante Aufgabe,
+           und RegisterTask legte sie zweitausend Sequenznummern spaeter neu
+           an. Alles, was dazwischen abbrach, hinterliess einen Host ohne
+           Agent (F-48). Seit 0.37.15 wird sie beim Upgrade gar nicht erst
+           geloescht - siehe die Bedingung an RemoveTask weiter unten. -->
       <RemoveExistingProducts After="InstallInitialize"/>
       <!-- Nach CostFinalize, damit INSTALLDIR aufgeloest ist, und vor
            InstallInitialize: ab da schreibt der Installer das Skript fuer
@@ -836,7 +839,36 @@ def build(version: str, out_dir: Path) -> Path:
            Installation ohne Eigenschaft nie mehr nachreichen, weil die
            Aktion bei jedem weiteren Aufruf uebersprungen wird. -->
       <Custom Action="RegisterTask" Sequence="4001">NOT REMOVE</Custom>
-      <Custom Action="RemoveTask" Sequence="3499">REMOVE="ALL"</Custom>
+      <!-- Die grosse Variante von F-48 (2026-09-03).
+
+           REMOVE="ALL" allein trifft AUCH den Ausbau der alten Fassung
+           waehrend eines Upgrades: Windows Installer deinstalliert sie
+           dabei ganz gewoehnlich, mit REMOVE=ALL. Genau dort loeschte
+           RemoveTask die geplante Aufgabe - und ab da haengt alles daran,
+           dass RegisterTask sie wieder anlegt. Tut es das nicht, ist der
+           Host still, und eine CustomAction hat keine Rueckrollaktion.
+
+           UPGRADINGPRODUCTCODE setzt der Installer genau dann, wenn diese
+           Deinstallation Teil eines Upgrades ist; es enthaelt den
+           ProductCode der neuen Fassung. Mit der Bedingung bleibt die
+           Aufgabe beim Upgrade einfach stehen. RegisterTask legt sie
+           danach ohnehin neu an - schtasks laeuft mit /Delete und /F, das
+           ist gefahrlos wiederholbar.
+
+           Bei einer echten Deinstallation ist die Eigenschaft leer, die
+           Bedingung greift, und die Aufgabe wird entfernt wie bisher.
+
+           WIRKSAM AB WANN: die Bedingung steht im Paket, das ENTFERNT
+           wird - also in der bereits installierten Fassung. Ein Upgrade
+           von 0.37.14 auf 0.37.15 laeuft noch nach der alten Regel; erst
+           beim naechsten Upgrade danach greift sie. Dieselbe Sache wie
+           bei F-47 und F-49, nur eine Runde weiter.
+
+           Auf einem Windows-Testhost gemessen (2026-09-03), mit zwei
+           kleinen Wegwerf-Paketen, die nur diese beiden Aktionen tragen:
+           ohne die Bedingung lief RemoveTask beim Upgrade, mit ihr
+           nicht - und bei der Deinstallation in beiden Faellen. -->
+      <Custom Action="RemoveTask" Sequence="3499">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>
   </Product>
 </Wix>
@@ -886,6 +918,7 @@ def build(version: str, out_dir: Path) -> Path:
 MUSS_ENTHALTEN = (
     "CO37PYEXE",         # die Eigenschaft mit dem Pfad zu python.exe
     "RegisterTask",      # die Aktion, die die geplante Aufgabe anlegt
+    "UPGRADINGPRODUCTCODE",   # die Bedingung an RemoveTask (F-48, gross)
     "install_task.py",
     "agent.py",
 )
@@ -894,6 +927,11 @@ MUSS_ENTHALTEN = (
 # Wo die eigenen Aktionen im Ablauf stehen muessen. Siehe die Begruendung
 # an der InstallExecuteSequence weiter oben.
 ERWARTETE_SEQUENZ = {"SetPyExe": 1401, "RemoveTask": 3499, "RegisterTask": 4001}
+
+# Was in der Bedingungsspalte stehen MUSS. Die grosse Variante von F-48
+# haengt an genau diesem Wort - ohne es loescht die alte Fassung beim
+# Upgrade wieder die geplante Aufgabe.
+ERWARTETE_BEDINGUNG = {"RemoveTask": "UPGRADINGPRODUCTCODE"}
 
 
 def pruefe_paket(msi: Path):
@@ -945,6 +983,22 @@ def pruefe_paket(msi: Path):
 
     falsch = [f"{name}: erwartet {nr}, ist {ist.get(name, 'gar nicht da')}"
               for name, nr in ERWARTETE_SEQUENZ.items() if ist.get(name) != nr]
+
+    # Und die Bedingungen, nicht nur die Nummern. Die grosse Variante von
+    # F-48 haengt an einem einzigen Wort in der Bedingungsspalte; faellt es
+    # weg, sieht das Paket in jeder anderen Hinsicht richtig aus und
+    # loescht beim naechsten Upgrade wieder die geplante Aufgabe. Genau die
+    # Art Fehler, die man dem fertigen Paket nicht ansieht.
+    bedingung = {}
+    for zeile in res.stdout.splitlines():
+        teile = zeile.split("\t")
+        if len(teile) >= 3:
+            bedingung[teile[0]] = teile[1]
+    for name, muss in ERWARTETE_BEDINGUNG.items():
+        ist_bed = bedingung.get(name, "")
+        if muss.lower() not in ist_bed.lower():
+            falsch.append(f"{name}: Bedingung {ist_bed!r} enthaelt "
+                          f"{muss!r} nicht")
     if falsch:
         msi.unlink(missing_ok=True)
         raise SystemExit(

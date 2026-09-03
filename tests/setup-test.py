@@ -105,10 +105,36 @@ check("chown root:root auf die env-Datei",
 # Reihenfolge: die Datei muss eng angelegt werden, bevor etwas hineinkommt.
 # Sonst stuende der Token einen Moment lang mit 644 auf der Platte, und
 # genau in dem Moment kann jeder mitlesen.
-i_umask = quelle.find("umask 177")
 i_fuellen = quelle.find('cat > "$ENVFILE"')
+i_leer = quelle.find(': > "$ENVFILE"')
+# Nicht die ERSTE "umask 177" im Skript nehmen: seit secret.key genauso
+# behandelt wird, steht sie weiter oben und haette diese Pruefung auch
+# dann gruen gehalten, wenn die env-Datei ihre eigene verloren haette.
+i_umask = quelle.rfind("umask 177", 0, i_leer if i_leer > 0 else i_fuellen)
 check("die Datei wird eng angelegt, bevor sie gefuellt wird",
-      0 < i_umask < i_fuellen, f"umask@{i_umask} fuellen@{i_fuellen}")
+      0 < i_umask < i_leer < i_fuellen,
+      f"umask@{i_umask} leer@{i_leer} fuellen@{i_fuellen}")
+
+# Derselbe Fall fuenfzig Zeilen weiter oben: secret.key. Dort stand
+# "schreiben, danach chmod 600" - dazwischen lag der Schluessel, mit dem
+# alle Checkmk-Secrets verschluesselt sind, mit der Umask-Vorgabe auf der
+# Platte (ueblich 644). Seit der vierten Pruefungsrunde als "niedrig,
+# liegen gelassen" notiert, behoben am 2026-09-03.
+#
+# Ueber die Reihenfolge geprueft, nicht ueber das blosse Vorkommen von
+# "umask 177": das steht wegen der env-Datei ohnehin in der Datei, eine
+# Suche danach bliebe also auch ohne die Behebung gruen.
+i_key_schreiben = quelle.find('echo "$SECRET_KEY" > "$BASE/data/secret.key"')
+i_key_leer = quelle.find(': > "$BASE/data/secret.key"')
+check("secret.key wird eng angelegt, bevor der Schluessel hineinkommt",
+      0 < i_key_leer < i_key_schreiben,
+      f"leer@{i_key_leer} schreiben@{i_key_schreiben}")
+_umasks = [i for i in range(len(quelle))
+           if quelle.startswith("umask 177", i)]
+check("und davor steht eine enge umask",
+      any(u < i_key_leer for u in _umasks), (_umasks, i_key_leer))
+check("chmod 600 bleibt trotzdem stehen",
+      'chmod 600 "$BASE/data/secret.key"' in quelle)
 
 # ----------------------------------------------------------------------
 # Eigentuemer des Installationsverzeichnisses (F-02)

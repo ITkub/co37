@@ -9,24 +9,26 @@ Start:
     uvicorn main:app --host 0.0.0.0 --port 8080
 """
 import hashlib
+import json
 import os
 import re
 import shutil
 import secrets
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, get_args
 
 from fastapi import (
-    Depends, FastAPI, File, Form, Header, HTTPException, Query, Request,
-    UploadFile,
+    Depends, FastAPI, File, Form, Header, HTTPException,
+    Path as PfadParam, Query, Request, UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, PlainSerializer
+from pydantic import BaseModel, Field as PydField, PlainSerializer
 from typing_extensions import Annotated
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
@@ -330,6 +332,103 @@ def https_only_check(request: Request):
     )
 
 
+# ======================================================================
+# Obergrenze fuer den Anfragekoerper (F-56 der Pruefung vom 2026-09-03)
+# ======================================================================
+# Es gab keine. Weder uvicorn noch Starlette noch FastAPI setzen von sich
+# aus eine, und in setup.sh und REVERSE-PROXY.md stand dazu nichts.
+#
+# Nachgemessen am 2026-09-03 gegen ein Testbackend:
+#
+#   400 MB an PATCH /api/v1/hosts/1   -> 200 nach 19 s, Prozess bei 1,0 GB
+#   200 MB an POST /api/v1/agent/enroll -> 400 nach 4 s, Prozess bei 1,1 GB
+#
+# Die zweite Zeile ist die schlimmere: /agent/enroll ist ABSICHTLICH offen
+# (F-08 - der Schutz dort ist die Freigabe durch einen Menschen, nicht die
+# Anmeldung). Der Koerper wird vollstaendig in den Speicher gelesen, bevor
+# irgendeine Pruefung greift; die 400 kommt erst danach. Wer den Port
+# erreicht, kann den Dienst also ohne Zugangsdaten in den Speicher treiben
+# - und das Backend laeuft als einziger Prozess fuer alles.
+#
+# Die Drosselung aus F-08 hilft nicht: sie zaehlt Anmeldungen, nicht
+# Bytes, und 50 Versuche in 15 Minuten reichen bei dieser Groesse.
+#
+# Gezaehlt wird in beiden Formen: Content-Length vorab, weil das den Fall
+# ohne einen einzigen gelesenen Byte erledigt, UND beim Lesen mit, weil
+# eine Anfrage mit "Transfer-Encoding: chunked" gar keine Content-Length
+# hat. Nur das erste zu pruefen waere eine Schranke, die sich durch
+# Weglassen einer Kopfzeile umgehen laesst.
+#
+# 32 MiB: das groesste, was hier je legitim hereinkommt, ist das
+# Update-Paket ueber /api/v1/update/upload - zurzeit 573 KB. Die Grenze
+# ist bewusst grosszuegig; sie soll den Missbrauch abschneiden, nicht den
+# Betrieb.
+KOERPER_MAX = int(os.getenv("CO37_MAX_BODY", str(32 * 1024 * 1024)))
+
+
+class KoerperGrenze:
+    """Reines ASGI, damit abgewiesen wird, bevor jemand puffert."""
+
+    def __init__(self, app, grenze: int):
+        self.app = app
+        self.grenze = grenze
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        for name, wert in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    if int(wert) > self.grenze:
+                        return await self._zu_gross(send)
+                except ValueError:
+                    pass
+
+        gelesen = 0
+        ueberschritten = False
+        beantwortet = False
+
+        async def zaehlend():
+            nonlocal gelesen, ueberschritten
+            nachricht = await receive()
+            if nachricht["type"] == "http.request":
+                gelesen += len(nachricht.get("body", b""))
+                if gelesen > self.grenze:
+                    ueberschritten = True
+                    # Abbrechen statt weiterlesen - sonst puffert die
+                    # Anwendung genau das, was hier verhindert werden soll.
+                    return {"type": "http.disconnect"}
+            return nachricht
+
+        async def sendend(nachricht):
+            # Die Anwendung sieht nur ein abgebrochenes JSON und antwortet
+            # mit 400 "error parsing the body". Das ist der falsche Grund -
+            # der Aufrufer soll erfahren, dass seine Anfrage zu gross war,
+            # nicht dass sie kaputt war. Also die Antwort ersetzen.
+            nonlocal beantwortet
+            if not ueberschritten:
+                return await send(nachricht)
+            if beantwortet:
+                return
+            if nachricht["type"] == "http.response.start":
+                beantwortet = True
+                await self._zu_gross(send)
+
+        await self.app(scope, zaehlend, sendend)
+
+    async def _zu_gross(self, send):
+        koerper = (b'{"detail":"Die Anfrage ist zu gross."}')
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length",
+                                 str(len(koerper)).encode())]})
+        await send({"type": "http.response.body", "body": koerper})
+
+
+app.add_middleware(KoerperGrenze, grenze=KOERPER_MAX)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     denied = https_only_check(request)
@@ -349,13 +448,49 @@ SESSION_HOURS = int(os.getenv("CO37_SESSION_HOURS", "12"))
 
 # scrypt aus der Standardbibliothek. Kein argon2, kein bcrypt - das waeren
 # zusaetzliche Abhaengigkeiten fuer keinen Gewinn, den man hier merkt.
-SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
+#
+# WARUM NICHT N=2^17 (Pruefung vom 2026-09-03)
+#
+# Im Pruefdokument stand seit Runde 4: "scrypt mit N=2^14 entspricht dem
+# Stand von etwa 2010; heutige Empfehlungen liegen bei N=2^17. Das ist
+# eine Zahl, keine Umstellung." Die zweite Haelfte war falsch.
+#
+# scrypt braucht 128 * N * r Bytes. Nachgemessen in diesem Container:
+#
+#     N=2^14 r=8 p=1     58 ms     16 MB      (bisher)
+#     N=2^14 r=8 p=5    232 ms     16 MB      <- gewaehlt
+#     N=2^15 r=8 p=3    289 ms     32 MB
+#     N=2^16 r=8 p=2    575 ms     64 MB
+#     N=2^17 r=8 p=1    864 ms    128 MB
+#
+# Die Anmelderoute laeuft synchron im Threadpool - bei N=2^17 haelt jeder
+# gleichzeitige Anmeldeversuch 128 MB. Die Drosselung aus F-21/F-36 zaehlt
+# je Absenderadresse; genug verschiedene Adressen, und die Haertung des
+# Passworts waere ein Hebel, den Dienst in den Speicher zu treiben. Genau
+# das Muster, das im Pruefdokument unter "eine Sicherheitsmassnahme kann
+# eine andere unbrauchbar machen" steht (F-11).
+#
+# Die OWASP-Empfehlung nennt neben 2^17/8/1 ausdruecklich gleichwertige
+# Varianten mit kleinerem N und groesserem p, unter anderem 2^14/8/5. Die
+# ist hier die richtige: gleicher Speicherbedarf wie bisher, viermal so
+# viel Rechenzeit. Der Angreifer, gegen den scrypt schuetzt, hat die
+# Datenbank in der Hand und rechnet offline - fuer den zaehlt der Faktor.
+#
+# maxmem muss mitgegeben werden: OpenSSL deckelt sonst bei 32 MB, und
+# alles ueber N=2^15 scheitert mit "memory limit exceeded" statt zu
+# rechnen. Bei den bisherigen Werten fiel das nicht auf.
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 5
+# Grosszuegig, damit auch ein alter Hash mit anderen Werten nachgerechnet
+# werden kann - sonst liesse sich niemand mehr anmelden, dessen Passwort
+# unter anderen Vorgaben gesetzt wurde.
+SCRYPT_MAXMEM = 256 * 1024 * 1024
 
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     dk = hashlib.scrypt(password.encode(), salt=salt,
-                        n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32)
+                        n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32,
+                        maxmem=SCRYPT_MAXMEM)
     return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${dk.hex()}"
 
 
@@ -365,10 +500,32 @@ def verify_password(password: str, stored: str) -> bool:
         if kind != "scrypt":
             return False
         dk = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex),
-                            n=int(n), r=int(r), p=int(p), dklen=32)
+                            n=int(n), r=int(r), p=int(p), dklen=32,
+                            maxmem=SCRYPT_MAXMEM)
     except Exception:  # noqa: BLE001
         return False
     return secrets.compare_digest(dk.hex(), hash_hex)
+
+
+def veraltet(stored: str) -> bool:
+    """
+    Wurde dieser Hash mit schwaecheren Vorgaben gebildet als heute gelten?
+
+    Ohne diese Frage haetten Bestandskonten fuer immer den Stand von
+    0.37.14 - die Werte stehen im Hash und werden beim Pruefen von dort
+    gelesen, eine Anhebung der Konstanten erreicht sie also nie. Genau
+    dieselbe Falle wie bei F-14: ein Wert, den niemand liest.
+
+    Verglichen wird der Aufwand, nicht die einzelnen Zahlen: N*r*p ist
+    das, was der Angreifer offline bezahlen muss.
+    """
+    try:
+        kind, n, r, p, _, _ = stored.split("$")
+        if kind != "scrypt":
+            return True
+        return int(n) * int(r) * int(p) < SCRYPT_N * SCRYPT_R * SCRYPT_P
+    except Exception:  # noqa: BLE001
+        return True
 
 
 # Vergleichs-Hash fuer unbekannte Benutzernamen (F-37 der Pruefung vom
@@ -1153,10 +1310,24 @@ def get_checkmk(session: Session) -> Optional[CheckmkClient]:
     secret = decrypt(_setting(session, "cmk_secret"))
     if not all([url, site, user, secret]):
         return None
-    return CheckmkClient(
-        server_url=url, site=site, username=user, secret=secret,
-        verify_ssl=_setting(session, "cmk_verify_ssl", "true") == "true",
-    )
+    try:
+        return CheckmkClient(
+            server_url=url, site=site, username=user, secret=secret,
+            verify_ssl=_setting(session, "cmk_verify_ssl", "true") == "true",
+        )
+    except CheckmkError as exc:
+        # Seit F-54 kann schon der Aufbau scheitern. Sieben Aufrufer haengen
+        # an dieser Funktion, die wenigsten in einem try - und "None" heisst
+        # hier ueberall "nicht konfiguriert". Das ist der sichere Ausgang:
+        # agent_pre_reboot verweigert bei fehlendem Checkmk den Neustart,
+        # statt ihn ohne Downtime durchzulassen.
+        #
+        # Ueber set_checkmk_config kommt so ein Wert nicht mehr herein - die
+        # Route prueft ihn jetzt. Bleibt der Fall, dass sich das Secret nicht
+        # mehr entschluesseln laesst, weil der Schluessel gewechselt hat.
+        print(f"Checkmk-Zugang unbrauchbar, wird als nicht eingerichtet "
+              f"behandelt: {exc}", file=sys.stderr, flush=True)
+        return None
 
 
 async def downtime_targets(quelle: "Host | Area", cmk: CheckmkClient) -> list[str]:
@@ -1213,47 +1384,165 @@ UtcDT = Annotated[
 ]
 
 
+# ======================================================================
+# Kennungen aus dem Pfad (F-52 der Pruefung vom 2026-09-03)
+# ======================================================================
+# Python kennt keine Obergrenze fuer int. Pydantic nimmt deshalb auch
+# host_id=5446878413911239950336 an, die Route sucht damit brav in der
+# Datenbank - und SQLite bricht im Treiber ab:
+#
+#     OverflowError: Python int too large to convert to SQLite INTEGER
+#
+# Der Aufrufer bekommt 500 statt 404. Beim Fuzzing am 2026-09-03 mit
+# schemathesis 212-mal ausgeloest, ueber acht Routen. Keine Rechtegrenze
+# (alle liegen hinter der Anmeldung), aber ein 500 mit Rueckverfolgung im
+# Protokoll, wo ein 404 hingehoert - und jeder 500 sieht im Betrieb aus
+# wie ein Fehler des Servers, nicht wie eine unsinnige Anfrage.
+#
+# 2**63-1 ist die Grenze, die SQLite selbst zieht. Kleiner anzusetzen
+# waere geraten; das hier ist die tatsaechliche Schranke.
+ID_MAX = 2 ** 63 - 1
+Kennung = Annotated[int, PfadParam(ge=1, le=ID_MAX)]
+# Dieselbe Grenze fuer Kennungen, die als Abfrageparameter kommen -
+# /agent/pre-reboot?job_id=… und /jobs?host_id=… gehen denselben Weg in
+# dieselbe Datenbank.
+KennungAbfrage = Annotated[int, Query(ge=1, le=ID_MAX)]
+# Und dieselbe fuer Kennungen im Anfragekoerper. Die braucht es getrennt:
+# beim Fuzzing der Agent-Routen kam der Ueberlauf ueber
+# POST /api/v1/agent/report {"job_id": 3915028807853261463748608} herein -
+# also aus einer Route, die JEDER verwaltete Host mit seinem eigenen Token
+# erreicht, nicht nur ein angemeldeter Administrator. Damit ist F-52 kein
+# reines Innenverhaeltnis mehr: ein uebernommener Agent konnte jeden
+# Aufruf zu einem 500 machen.
+KennungFeld = Annotated[int, PydField(ge=1, le=ID_MAX)]
+# Mengenangaben aus dem Koerper gehen denselben Weg in dieselben Abfragen.
+MengeFeld = Annotated[int, PydField(ge=0, le=ID_MAX)]
+
+
+# ======================================================================
+# Laengen der Zeichenketten aus der Oberflaeche (F-57 derselben Pruefung)
+# ======================================================================
+# Der Heartbeat des Agents hat seit 0.36.7 kurz() und FELD_MAX, der Scan
+# seit 0.37.10 eigene Grenzen (F-34) - die Wege, auf denen ein
+# Administrator schreibt, hatten gar keine. Am 2026-09-03 nachgemessen:
+#
+#   PATCH /api/v1/hosts/1  {"display_name": <400 MB>}   -> 200
+#   Datenbank danach: 500 MB
+#
+# Danach traegt jede Host-Liste diesen Wert mit. Die Koerpergrenze
+# (F-56) deckelt das inzwischen bei 32 MiB - aber 32 MiB Anzeigename
+# sind immer noch keiner. Es braucht Administratorrechte und ist damit
+# keine Rechtegrenze; es ist dieselbe Groessenschranke, die der Agent
+# schon hat, an der Stelle, an der sie fehlte.
+#
+# Abgewiesen statt gekuerzt, anders als beim Heartbeat: hier sitzt ein
+# Mensch an einem Formular, der eine Rueckmeldung bekommen soll. Beim
+# Heartbeat wuerde ein 422 den Host aus dem Betrieb nehmen.
+TEXT_MAX = 120           # dieselbe Groesse wie FELD_MAX weiter unten
+LISTE_MAX = 500          # Checkmk-Hostnamen, Merkmale: so viele sieht niemand mehr an
+Text = Annotated[str, PydField(max_length=TEXT_MAX)]
+Textliste = Annotated[list[Text], PydField(max_length=LISTE_MAX)]
+
+
+# ======================================================================
+# Ein ausdrueckliches null in einem PATCH (F-51 derselben Pruefung)
+# ======================================================================
+# Die Patch-Modelle haben ueberall Optional[...] = None. Das heisst
+# "darf fehlen" - gelesen wurde es aber auch als "darf null sein". Beides
+# ist nicht dasselbe: model_dump(exclude_unset=True) laesst ein
+# weggelassenes Feld weg, ein ausdrueckliches null steht drin und wird
+# gesetzt.
+#
+# Was daraus wurde, am 2026-09-03 nachgestellt:
+#
+#     PATCH /api/v1/hosts/1  {"patch_days": null}
+#     -> 500, ABER die Zeile ist geschrieben (JSON-Spalte nimmt null)
+#     -> GET /api/v1/hosts liefert ab jetzt dauerhaft 500
+#
+# Der 500 kommt erst beim Bauen der Antwort, da ist das commit() schon
+# durch. Danach faellt jede Liste ueber diese eine Zeile - und die
+# Oberflaeche, die den Schaden beheben koennte, ist selbst tot. Nur noch
+# von Hand in der Datenbank zu reparieren.
+#
+# Es braucht Administratorrechte, ist also keine Rechteausweitung. Es
+# braucht aber auch keinen Angreifer: ein Client, der ungesetzte Felder
+# als null schickt statt sie wegzulassen, ist ein verbreitetes Muster.
+#
+# WER ENTSCHEIDET, ob null erlaubt ist: die ANTWORTFORM, nicht die
+# Datenbank. Die JSON-Spalten (patch_days, tags, checkmk_hosts) sind in
+# SQLite nullable - genau deshalb ist der Wert ja durchgerutscht -, aber
+# HostRead sagt list[str], nicht Optional[list[str]]. Die Antwortform ist
+# die Zusage an den Aufrufer, und sie waechst automatisch mit: wird ein
+# Feld dort spaeter optional, ist null hier ohne weiteres Zutun erlaubt.
+def _nimmt_none(annotation) -> bool:
+    return annotation is type(None) or type(None) in get_args(annotation)
+
+
+def null_felder(modell: type[BaseModel]) -> set[str]:
+    """Felder der Antwortform, die None tragen duerfen."""
+    return {name for name, feld in modell.model_fields.items()
+            if _nimmt_none(feld.annotation)}
+
+
+def patch_anwenden(objekt, payload: BaseModel, erlaubt: set[str],
+                   straffen: tuple = ()):
+    """
+    Uebertraegt die gesetzten Felder und weist null ab, wo keins hingehoert.
+
+    'straffen' nennt die Felder, deren Zeichenkette vorn und hinten
+    beschnitten wird.
+    """
+    for feld, wert in payload.model_dump(exclude_unset=True).items():
+        if wert is None and feld not in erlaubt:
+            raise HTTPException(
+                422, f"Fuer '{feld}' ist null kein gueltiger Wert. "
+                     f"Zum Nichtaendern das Feld weglassen.")
+        if feld in straffen and isinstance(wert, str):
+            wert = wert.strip()
+        setattr(objekt, feld, wert)
+
+
 class HostPatch(BaseModel):
-    display_name: Optional[str] = None
-    tags: Optional[list[str]] = None
-    checkmk_hosts: Optional[list[str]] = None
+    display_name: Optional[Text] = None
+    tags: Optional[Textliste] = None
+    checkmk_hosts: Optional[Textliste] = None
     checkmk_downtime_all: Optional[bool] = None
-    downtime_minutes: Optional[int] = None
+    downtime_minutes: Optional[MengeFeld] = None
     auto_reboot: Optional[bool] = None
-    maintenance_window: Optional[str] = None
+    maintenance_window: Optional[Text] = None
     patch_enabled: Optional[bool] = None
-    patch_days: Optional[list[str]] = None
-    patch_time: Optional[str] = None
+    patch_days: Optional[Textliste] = None
+    patch_time: Optional[Text] = None
     patch_auto_reboot: Optional[bool] = None
-    patch_grace_hours: Optional[int] = None
+    patch_grace_hours: Optional[MengeFeld] = None
 
 
 class HostOrder(BaseModel):
-    ids: list[int]
+    ids: list[KennungFeld]
 
 
 class HostArea(BaseModel):
-    area_id: Optional[int] = None
+    area_id: Optional[KennungFeld] = None
 
 
 class AreaCreate(BaseModel):
-    name: str
+    name: Text
 
 
 class AreaPatch(BaseModel):
-    name: Optional[str] = None
-    checkmk_hosts: Optional[list[str]] = None
+    name: Optional[Text] = None
+    checkmk_hosts: Optional[Textliste] = None
     checkmk_downtime_all: Optional[bool] = None
-    downtime_minutes: Optional[int] = None
+    downtime_minutes: Optional[MengeFeld] = None
     patch_enabled: Optional[bool] = None
-    patch_days: Optional[list[str]] = None
-    patch_time: Optional[str] = None
+    patch_days: Optional[Textliste] = None
+    patch_time: Optional[Text] = None
     patch_auto_reboot: Optional[bool] = None
-    patch_grace_hours: Optional[int] = None
+    patch_grace_hours: Optional[MengeFeld] = None
 
 
 class AreaOrder(BaseModel):
-    ids: list[int]
+    ids: list[KennungFeld]
 
 
 class AreaRead(BaseModel):
@@ -1317,6 +1606,12 @@ class HostRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# Aus der Antwortform abgeleitet, nicht von Hand aufgezaehlt - siehe die
+# Begruendung bei patch_anwenden(). Einmal beim Start, nicht je Anfrage.
+NULL_HOST = null_felder(HostRead)
+NULL_AREA = null_felder(AreaRead)
+
+
 class JobRead(BaseModel):
     id: int
     host_id: int
@@ -1359,24 +1654,24 @@ class JobCreate(BaseModel):
     reboot_after: bool = False
     # Nachlauf in Minuten. Meldet sich der Host erst danach, wird der Auftrag
     # verworfen. Vorgabe: 120 bei geplanten, 10 bei sofortigen Neustarts.
-    grace_minutes: Optional[int] = None
+    grace_minutes: Optional[MengeFeld] = None
     # Downtime-Dauer abweichend vom Vorgabewert des Hosts
-    downtime_minutes: Optional[int] = None
+    downtime_minutes: Optional[MengeFeld] = None
 
 
 class CheckmkConfig(BaseModel):
-    url: str
-    site: str
-    user: str
+    url: Text
+    site: Text
+    user: Text
     # Leer lassen, um das hinterlegte Secret unveraendert zu uebernehmen.
     # So kann man die URL aendern, ohne das Secret erneut eintippen zu muessen.
-    secret: str = ""
+    secret: Annotated[str, PydField(max_length=TEXT_MAX)] = ""
     verify_ssl: bool = True
 
 
 class DowntimeRequest(BaseModel):
     """Entweder minutes ab jetzt, oder start/end als ISO-Zeitstempel."""
-    minutes: Optional[int] = None
+    minutes: Optional[MengeFeld] = None
     start: Optional[datetime] = None
     end: Optional[datetime] = None
     comment: str = "CO-37: Manuelle Wartung"
@@ -1524,13 +1819,68 @@ class AgentHeartbeat(BaseModel):
     reboot_pending: bool = False
 
 
+# ----------------------------------------------------------------------
+# Grenzen fuer die Meldungen des Agents an einen Auftrag
+# ----------------------------------------------------------------------
+# /agent/scan-result hat seit 0.37.10 Grenzen (F-34), /agent/job-log seit
+# jeher 2 MiB je Auftrag (joblog.MAX_BYTES) - /agent/report und
+# /agent/notice hatten gar keine: log, error und result gingen ungekuerzt
+# in die Datenbank. Der Agent bestimmt alle drei frei, und wer einen Host
+# uebernommen hat, bestimmt sie ebenfalls.
+#
+# Die Koerpergrenze aus F-56 deckelt das inzwischen bei 32 MiB je
+# Anfrage. Das ist die Schranke gegen den Speicher, nicht gegen die
+# Datenbank: 32 MiB je Auftragsmeldung, beliebig oft wiederholt, laesst
+# die gemeinsame SQLite-Datei genauso volllaufen - und die trifft die
+# ganze Anlage, nicht nur den meldenden Host. Genau die Ueberlegung, die
+# bei F-34 zu Grenzen gefuehrt hat.
+#
+# Gekuerzt statt abgewiesen, wie beim Heartbeat: ein 422 auf eine
+# Auftragsmeldung liesse den Auftrag fuer immer auf "laeuft" stehen.
+#
+# 256 KiB fuer den Text: das ausfuehrliche Protokoll laeuft ohnehin ueber
+# /agent/job-log und wird dort bei 2 MiB gekappt; was hier ankommt, ist
+# die Zusammenfassung am Ende.
+BERICHT_TEXT_MAX = 256 * 1024
+BERICHT_RESULT_MAX = 64 * 1024      # result ist ein paar Kennzahlen
+
+
+def _bericht_text(wert: Optional[str]) -> Optional[str]:
+    if wert is None:
+        return None
+    text = str(wert)
+    if len(text) <= BERICHT_TEXT_MAX:
+        return text
+    return text[:BERICHT_TEXT_MAX] + "\n[gekuerzt]"
+
+
+def _bericht_result(wert) -> dict:
+    """
+    Das Ergebnis-Wörterbuch auf ein vertretbares Mass bringen.
+
+    Gemessen wird an der JSON-Darstellung, weil genau die in der Spalte
+    landet. Ist sie zu gross, wird der Inhalt NICHT halbiert - ein halbes
+    Woerterbuch waere schlimmer als keins, weil es aussieht wie ein
+    ganzes. Stattdessen bleibt ein Vermerk stehen.
+    """
+    if not isinstance(wert, dict):
+        return {}
+    try:
+        gross = len(json.dumps(wert)) > BERICHT_RESULT_MAX
+    except (TypeError, ValueError):
+        return {"gekuerzt": True, "grund": "nicht darstellbar"}
+    if not gross:
+        return wert
+    return {"gekuerzt": True, "grund": "zu gross", "schluessel": len(wert)}
+
+
 class AgentNotice(BaseModel):
     message: str
     result: dict = {}
 
 
 class AgentJobReport(BaseModel):
-    job_id: int
+    job_id: KennungFeld
     state: JobState
     log: Optional[str] = None
     error: Optional[str] = None
@@ -1553,7 +1903,7 @@ SCAN_MAX_UPDATES = 5000
 
 
 class AgentScanResult(BaseModel):
-    job_id: Optional[int] = None
+    job_id: Optional[KennungFeld] = None
     reboot_required: bool = False
     reboot_reasons: list = []
     updates: list[dict] = []
@@ -2367,7 +2717,7 @@ def agent_scan_result(
 
 
 class AgentJobLog(BaseModel):
-    job_id: int
+    job_id: KennungFeld
     text: str
     # Kurzer Fortschrittstext fuer die Uebersicht, z.B. "Installiere 3 von 12"
     progress: Optional[str] = None
@@ -2411,7 +2761,7 @@ def agent_job_log(
 
 @app.post("/api/v1/agent/pre-reboot")
 async def agent_pre_reboot(
-    job_id: int,
+    job_id: KennungAbfrage,
     x_agent_token: str = Header(...),
     session: Session = Depends(get_session),
 ):
@@ -2545,9 +2895,9 @@ async def agent_report(
         job.started_at = utcnow()
 
     job.state = payload.state
-    job.log = payload.log
-    job.error = payload.error
-    job.result = payload.result
+    job.log = _bericht_text(payload.log)
+    job.error = _bericht_text(payload.error)
+    job.result = _bericht_result(payload.result)
     if payload.state in (JobState.done, JobState.failed, JobState.cancelled):
         job.finished_at = utcnow()
     session.add(job)
@@ -2637,9 +2987,9 @@ def agent_notice(
         return {"ok": True, "attached": False}
 
     job.state = JobState.failed
-    job.error = payload.message
-    job.log = (job.log or "") + "\n" + payload.message
-    job.result = {**(job.result or {}), **payload.result}
+    job.error = _bericht_text(payload.message)
+    job.log = _bericht_text((job.log or "") + "\n" + payload.message)
+    job.result = _bericht_result({**(job.result or {}), **payload.result})
     session.add(job)
     session.commit()
     return {"ok": True, "attached": True, "job_id": job.id}
@@ -2907,7 +3257,7 @@ def advance_agent_rollout(session: Session):
 class RollConfig(BaseModel):
     autoroll: Optional[bool] = None
     mode: Optional[str] = None          # "staged" oder "all"
-    pilot_host_id: Optional[int] = None
+    pilot_host_id: Optional[KennungFeld] = None
 
 
 @app.get("/api/v1/agent-rollout", dependencies=[Depends(require_admin)])
@@ -3032,13 +3382,12 @@ def set_host_order(payload: HostOrder, session: Session = Depends(get_session)):
 @app.patch("/api/v1/hosts/{host_id}", response_model=HostRead,
            dependencies=[Depends(require_admin)])
 def update_host(
-    host_id: int, payload: HostPatch, session: Session = Depends(get_session)
+    host_id: Kennung, payload: HostPatch, session: Session = Depends(get_session)
 ):
     host = session.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host nicht gefunden")
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(host, field, value)
+    patch_anwenden(host, payload, NULL_HOST, straffen=("display_name",))
     if host.downtime_minutes < 1:
         host.downtime_minutes = 30
     # "and" statt "is not None" wertete bei genau 0 nicht aus - 0 ist in
@@ -3056,7 +3405,7 @@ def update_host(
 
 
 @app.delete("/api/v1/hosts/{host_id}")
-def delete_host(host_id: int, request: Request,
+def delete_host(host_id: Kennung, request: Request,
                 who: Principal = Depends(require_admin),
                 session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
@@ -3078,7 +3427,7 @@ def delete_host(host_id: int, request: Request,
 
 @app.post("/api/v1/hosts/{host_id}/reset-token",
           dependencies=[Depends(require_admin)])
-def reset_agent_token(host_id: int, request: Request,
+def reset_agent_token(host_id: Kennung, request: Request,
                       who: Principal = Depends(require_admin),
                       session: Session = Depends(get_session)):
     """
@@ -3107,7 +3456,7 @@ def reset_agent_token(host_id: int, request: Request,
 
 
 @app.post("/api/v1/hosts/{host_id}/approve", response_model=HostRead)
-def approve_host(host_id: int, request: Request,
+def approve_host(host_id: Kennung, request: Request,
                  who: Principal = Depends(require_admin),
                  session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
@@ -3128,7 +3477,7 @@ def approve_host(host_id: int, request: Request,
 
 
 @app.post("/api/v1/hosts/{host_id}/reject", response_model=HostRead)
-def reject_host(host_id: int, request: Request,
+def reject_host(host_id: Kennung, request: Request,
                 who: Principal = Depends(require_admin),
                 session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
@@ -3195,7 +3544,7 @@ def create_area(payload: AreaCreate, request: Request,
 
 
 @app.patch("/api/v1/areas/{area_id}", response_model=AreaRead)
-def update_area(area_id: int, payload: AreaPatch, request: Request,
+def update_area(area_id: Kennung, payload: AreaPatch, request: Request,
                 who: Principal = Depends(require_admin),
                 session: Session = Depends(get_session)):
     area = session.get(Area, area_id)
@@ -3204,8 +3553,7 @@ def update_area(area_id: int, payload: AreaPatch, request: Request,
     if payload.name is not None and not payload.name.strip():
         raise HTTPException(400, "Name fehlt")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(area, field, value.strip() if field == "name" else value)
+    patch_anwenden(area, payload, NULL_AREA, straffen=("name",))
     if area.downtime_minutes < 1:
         area.downtime_minutes = 30
     if area.patch_grace_hours is not None and area.patch_grace_hours < 1:
@@ -3228,7 +3576,7 @@ def update_area(area_id: int, payload: AreaPatch, request: Request,
 
 
 @app.delete("/api/v1/areas/{area_id}")
-def delete_area(area_id: int, request: Request,
+def delete_area(area_id: Kennung, request: Request,
                 who: Principal = Depends(require_admin),
                 session: Session = Depends(get_session)):
     area = session.get(Area, area_id)
@@ -3266,7 +3614,7 @@ def set_area_order(payload: AreaOrder, session: Session = Depends(get_session)):
 
 
 @app.post("/api/v1/hosts/{host_id}/area", response_model=HostRead)
-def set_host_area(host_id: int, payload: HostArea, request: Request,
+def set_host_area(host_id: Kennung, payload: HostArea, request: Request,
                   who: Principal = Depends(require_admin),
                   session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
@@ -3288,7 +3636,7 @@ def set_host_area(host_id: int, payload: HostArea, request: Request,
 
 @app.get("/api/v1/hosts/{host_id}/updates", response_model=list[UpdateRead],
          dependencies=[Depends(require_login)])
-def host_updates(host_id: int, session: Session = Depends(get_session)):
+def host_updates(host_id: Kennung, session: Session = Depends(get_session)):
     return session.exec(
         select(UpdatePackage).where(UpdatePackage.host_id == host_id)
     ).all()
@@ -3300,7 +3648,7 @@ def host_updates(host_id: int, session: Session = Depends(get_session)):
 @app.post("/api/v1/hosts/{host_id}/jobs", response_model=JobRead,
           dependencies=[Depends(require_login)])
 def create_job(
-    host_id: int, payload: JobCreate, request: Request,
+    host_id: Kennung, payload: JobCreate, request: Request,
     who: Principal = Depends(require_login),
     session: Session = Depends(get_session),
 ):
@@ -3471,7 +3819,7 @@ def create_job(
 
 @app.get("/api/v1/jobs/{job_id}/log", dependencies=[Depends(require_login)])
 def job_log(
-    job_id: int,
+    job_id: Kennung,
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ):
@@ -3570,7 +3918,7 @@ def last_jobs(session: Session = Depends(get_session)):
 
 
 @app.delete("/api/v1/jobs/{job_id}", dependencies=[Depends(require_login)])
-def cancel_job(job_id: int, request: Request,
+def cancel_job(job_id: Kennung, request: Request,
                who: Principal = Depends(require_login),
                session: Session = Depends(get_session)):
     """Bricht einen wartenden Auftrag ab. Laufende bleiben unberuehrt."""
@@ -3600,8 +3948,13 @@ def cancel_job(job_id: int, request: Request,
 @app.get("/api/v1/jobs", response_model=list[JobRead],
          dependencies=[Depends(require_login)])
 def list_jobs(
-    host_id: Optional[int] = None,
-    limit: int = Query(default=100, le=500),
+    host_id: Optional[KennungAbfrage] = None,
+    # ge=1 stand hier nicht (F-53 der Pruefung vom 2026-09-03). SQLite
+    # behandelt ein negatives LIMIT als "keine Grenze" - limit=-1 lieferte
+    # also ALLE Auftraege und hob genau die Schranke auf, die F-38
+    # eingezogen hat. Nachgemessen: limit=5 gab 5 Zeilen, limit=-1 gab
+    # alle. Kein Fehler, keine Meldung, nur eine wirkungslose Obergrenze.
+    limit: int = Query(default=100, ge=1, le=500),
     session: Session = Depends(get_session),
 ):
     # Abgelaufene Auftraege auch dann kennzeichnen, wenn sich der Host gar
@@ -3677,10 +4030,13 @@ async def set_checkmk_config(
         if not secret:
             raise HTTPException(400, "Kein Automation-Secret hinterlegt")
 
-    probe = CheckmkClient(
-        payload.url, payload.site, payload.user, secret, payload.verify_ssl
-    )
+    # Der Aufbau steht MIT im try: seit F-54 kann schon er scheitern, wenn
+    # Benutzer oder Secret nicht in eine HTTP-Kopfzeile passen. Ausserhalb
+    # waere das wieder ein 500.
     try:
+        probe = CheckmkClient(
+            payload.url, payload.site, payload.user, secret, payload.verify_ssl
+        )
         info = await probe.test_connection()
     except CheckmkError as exc:
         raise HTTPException(400, f"Verbindung fehlgeschlagen: {exc}")
@@ -3750,7 +4106,7 @@ async def checkmk_hosts(session: Session = Depends(get_session)):
 # Downtime von Hand
 # ----------------------------------------------------------------------
 @app.get("/api/v1/hosts/{host_id}/downtime", dependencies=[Depends(require_login)])
-async def get_downtimes(host_id: int, session: Session = Depends(get_session)):
+async def get_downtimes(host_id: Kennung, session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host nicht gefunden")
@@ -3773,7 +4129,7 @@ async def get_downtimes(host_id: int, session: Session = Depends(get_session)):
 
 @app.post("/api/v1/hosts/{host_id}/downtime", dependencies=[Depends(require_login)])
 async def set_downtime(
-    host_id: int, payload: DowntimeRequest, request: Request,
+    host_id: Kennung, payload: DowntimeRequest, request: Request,
     who: Principal = Depends(require_login),
     session: Session = Depends(get_session),
 ):
@@ -3832,7 +4188,7 @@ async def set_downtime(
 
 
 @app.delete("/api/v1/hosts/{host_id}/downtime", dependencies=[Depends(require_login)])
-async def clear_downtime(host_id: int, request: Request,
+async def clear_downtime(host_id: Kennung, request: Request,
                          who: Principal = Depends(require_login),
                          session: Session = Depends(get_session)):
     host = session.get(Host, host_id)
@@ -4318,6 +4674,20 @@ def login(payload: LoginIn, request: Request,
 
     note_login_success(ip)
 
+    # Der einzige Zeitpunkt, an dem das Klartextpasswort vorliegt und
+    # geprueft ist: hier gehoert ein Hash aus einer schwaecheren Fassung
+    # erneuert. Sonst bleibt jedes Bestandskonto fuer immer auf dem Stand,
+    # unter dem es angelegt wurde - die Vorgaben stehen im Hash und werden
+    # beim Pruefen von dort gelesen.
+    #
+    # Kostet den zweiten scrypt-Lauf, aber nur einmal je Konto. Die
+    # Zeitmessung aus F-37 beruehrt das nicht: sie vergleicht bekannte
+    # gegen unbekannte NAMEN, und ein unbekannter Name kommt hier gar
+    # nicht an.
+    if veraltet(user.password_hash):
+        user.password_hash = hash_password(payload.password)
+        session.add(user)
+
     # Der Zwang gilt als bestaetigt, sobald sich jemand ueber HTTPS
     # angemeldet hat. Damit entfaellt der Rueckfall.
     if _PROXY_CFG["https_only"] and _PROXY_CFG["deadline"] \
@@ -4358,10 +4728,21 @@ def login(payload: LoginIn, request: Request,
         # fremden Seiten gar nicht erst mit. Damit ist CSRF erledigt, ohne
         # dass es dafuer ein eigenes Verfahren braucht.
         samesite="strict",
-        # Nur wenn der Zugang ohnehin auf HTTPS beschraenkt ist. Sonst
-        # naehme der Browser das Cookie ueber den unverschluesselten
-        # Zugang nicht an - und niemand koennte sich mehr anmelden.
-        secure=_PROXY_CFG["https_only"],
+        # Secure, sobald diese Anmeldung TATSAECHLICH verschluesselt
+        # ankommt - nicht erst, wenn der Schalter "nur HTTPS" gesetzt ist.
+        #
+        # Vorher hing es allein am Schalter. Wer einen TLS-Proxy betreibt,
+        # den Schalter aber (wie ab Werk) aus laesst, bekam ein Cookie
+        # ohne Secure: der Browser haette es auch ueber http:// wieder
+        # mitgeschickt, etwa wenn jemand die Adresse ohne "s" aufruft oder
+        # umgeleitet wird. Stand seit der vierten Pruefungsrunde als
+        # "nett, kostet nichts" liegen.
+        #
+        # Das oder verhindert genau den Fall, gegen den der alte Kommentar
+        # sich richtete: ohne Proxy und ohne Schalter kommt die Anmeldung
+        # ueber http an, request_is_https() sagt Nein, und der Browser
+        # bekommt ein Cookie, das er auch annimmt.
+        secure=_PROXY_CFG["https_only"] or request_is_https(request),
         path="/",
     )
     return resp
@@ -4527,7 +4908,7 @@ def create_user(payload: UserCreate, request: Request,
 
 
 @app.patch("/api/v1/users/{user_id}/rechte")
-def set_user_rechte(user_id: int, payload: UserRechte, request: Request,
+def set_user_rechte(user_id: Kennung, payload: UserRechte, request: Request,
                     who: Principal = Depends(require_admin),
                     session: Session = Depends(get_session)):
     """
@@ -4566,7 +4947,7 @@ def set_user_rechte(user_id: int, payload: UserRechte, request: Request,
 
 
 @app.post("/api/v1/users/{user_id}/password")
-def reset_password(user_id: int, payload: PasswordReset, request: Request,
+def reset_password(user_id: Kennung, payload: PasswordReset, request: Request,
                    who: Principal = Depends(require_admin),
                    session: Session = Depends(get_session)):
     user = session.get(User, user_id)
@@ -4594,7 +4975,7 @@ def reset_password(user_id: int, payload: PasswordReset, request: Request,
 
 
 @app.delete("/api/v1/users/{user_id}")
-def delete_user(user_id: int, request: Request,
+def delete_user(user_id: Kennung, request: Request,
                 who: Principal = Depends(require_admin),
                 session: Session = Depends(get_session)):
     user = session.get(User, user_id)
@@ -4820,7 +5201,7 @@ def list_install_tokens(who: Principal = Depends(require_admin),
 
 
 @app.delete("/api/v1/install-token/{token_id}")
-def revoke_install_token(token_id: int, request: Request,
+def revoke_install_token(token_id: Kennung, request: Request,
                          who: Principal = Depends(require_admin),
                          session: Session = Depends(get_session)):
     row = session.get(InstallToken, token_id)

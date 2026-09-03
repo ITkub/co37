@@ -1538,6 +1538,40 @@ global.setTimeout = origSetTimeout;
     check("display_name bleibt escaped", !out.includes("<img"));
   }
 
+  // ------------------------------------------------------------------
+  // "Alle Agents aktualisieren" geht ueber die Rollout-Route
+  // ------------------------------------------------------------------
+  // Der Knopf legte die selfupdate-Auftraege bis 0.37.15 selbst an, in
+  // einer Schleife ueber /api/v1/hosts/{id}/jobs. Damit fehlten die
+  // Staffelung (erst der Pilot) und die Doppel-Auftrag-Sperre - wer ihn
+  // drueckte, schickte die ganze Flotte auf einmal los. Der zweite Knopf
+  // in den Einstellungen machte es von Anfang an richtig; die beiden
+  // waren auseinandergelaufen.
+  //
+  // Geprueft wird am Quelltext, weil der Knopf in dieser Attrappe nicht
+  // klickbar ist. Der Block wird auf die Klammernebene abgegrenzt statt
+  // mit einer Suche ueber die ganze Datei - sonst faende die Pruefung
+  // irgendein anderes POST auf /jobs und bliebe gruen.
+  {
+    const start = appjs.indexOf('getElementById("agUpdateAll")');
+    check("der Knopf agUpdateAll ist auffindbar", start > 0);
+    const ende = appjs.indexOf("\n};", start);
+    const block = appjs.slice(start, ende > 0 ? ende : start + 1200);
+    check("agUpdateAll legt keine Auftraege mehr selbst an",
+          !/\/jobs`/.test(block) && !block.includes("job_type:\"selfupdate\""),
+          block.slice(0, 300));
+    check("agUpdateAll geht ueber rolloutStarten()",
+          block.includes("rolloutStarten("), block.slice(0, 300));
+    check("rolloutStarten benutzt die Rollout-Route",
+          /async function rolloutStarten\(\)\s*\{[^]*?agent-rollout\/start/.test(appjs));
+    // Gegenprobe: der zweite Knopf zeigt auf dieselbe Funktion, damit die
+    // beiden nicht ein zweites Mal auseinanderlaufen koennen.
+    const ro = appjs.indexOf('getElementById("roStart")');
+    check("roStart benutzt dieselbe Funktion",
+          ro > 0 && appjs.slice(ro, ro + 200).includes("rolloutStarten("),
+          appjs.slice(ro, ro + 120));
+  }
+
   console.log(`\nFehler: ${fails}`);
   process.exit(fails ? 1 : 0);
 })();

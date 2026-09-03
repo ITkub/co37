@@ -322,6 +322,36 @@ check("der Eingang bleibt unter data/",
       w_roh.DATA_DIR in Path(w_roh.STATUS_EINGANG).parents,
       w_roh.STATUS_EINGANG)
 
+# ----------------------------------------------------------------------
+# Das Arbeitsverzeichnis wird ganz geraeumt
+# ----------------------------------------------------------------------
+# Der finally-Zweig raeumte bis 0.37.14 nur WORK_DIR (= SAFE_DIR/_work).
+# Die Kopie des Pakets liegt aber eine Ebene darueber, direkt in SAFE_DIR,
+# und blieb liegen - gut 550 KB nach jedem Update, am 2026-08-31 auf
+# KK-OPS01 gesehen.
+#
+# Ueber den Syntaxbaum, weil im Kommentar daneben beide Namen stehen und
+# eine Zeichenkettensuche deshalb nichts aussagt.
+import ast as _ast2  # noqa: E402
+
+_baum_w = _ast2.parse(quelle)
+_do = next((k for k in _ast2.walk(_baum_w)
+            if isinstance(k, _ast2.FunctionDef) and k.name == "do_update"), None)
+check("do_update() ist auffindbar", _do is not None)
+_finallys = [k for k in _ast2.walk(_do or _ast2.Module(body=[], type_ignores=[]))
+             if isinstance(k, _ast2.Try) and k.finalbody]
+_geraeumt = set()
+for _t in _finallys:
+    for _knoten in _ast2.walk(_ast2.Module(body=_t.finalbody, type_ignores=[])):
+        if (isinstance(_knoten, _ast2.Call)
+                and _ast2.unparse(_knoten.func) == "shutil.rmtree"
+                and _knoten.args):
+            _geraeumt.add(_ast2.unparse(_knoten.args[0]))
+check("der finally-Zweig raeumt SAFE_DIR, nicht nur WORK_DIR",
+      "SAFE_DIR" in _geraeumt, sorted(_geraeumt))
+check("und es gibt ueberhaupt einen finally-Zweig mit rmtree",
+      bool(_geraeumt), sorted(_geraeumt))
+
 # Und der Hebel selbst darf nicht zurueckkommen: kein chown auf einen
 # Benutzer mehr. Kommentarzeilen aussortiert - der Befund wird oben im
 # Quelltext erklaert, und den Namen dort zu treffen waere ein Fehlalarm.

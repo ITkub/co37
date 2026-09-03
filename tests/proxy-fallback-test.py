@@ -12,6 +12,7 @@ laesst statt eine Viertelstunde zu warten.
     python3 tests/proxy-fallback-test.py
 """
 import os
+import shutil
 import sys
 import tempfile
 from datetime import timedelta
@@ -252,6 +253,125 @@ check("Grossschreibung zaehlt genauso",
 req = fake_request(peer="192.0.2.77", headers={"x-forwarded-proto": "https"})
 check("von fremder Adresse wird die Kopfzeile ignoriert",
       main.request_is_https(req) is False)
+
+
+# ======================================================================
+# uvicorn glaubt die Kopfzeile ab Werk selbst (F-58)
+# ======================================================================
+# Alles oben prueft die FUNKTIONEN. Die haben recht: client_ip() glaubt
+# X-Forwarded-For nur, wenn peer_ip() ein eingetragener Proxy ist.
+#
+# Nur kommt peer_ip() nicht aus dem Netz, sondern aus scope["client"] -
+# und uvicorn schaltet ProxyHeadersMiddleware ab Werk EIN. Die schreibt
+# genau diesen Wert aus X-Forwarded-For um, fuer jeden Aufrufer aus
+# 127.0.0.1 (forwarded_allow_ips, Vorgabe "127.0.0.1"). Eine Ebene unter
+# der sorgfaeltigen Pruefung war die Kopfzeile also schon geglaubt.
+#
+# Am 2026-09-03 gemessen, sieben Anmeldeversuche mit je einem anderen
+# erfundenen X-Forwarded-For:
+#
+#   ohne  --no-proxy-headers   401 401 401 401 401 401 401   (nie gesperrt)
+#   mit   --no-proxy-headers   401 401 401 401 401 429 429
+#
+# Und im Pruefprotokoll stand danach die erfundene Adresse.
+#
+# Diese Reihe startet dafuer ein EIGENES Backend - zweimal, mit und ohne
+# den Schalter. Gegen die Funktionen laesst sich das nicht pruefen: der
+# Fehler sitzt in der Schicht darunter, und genau deshalb ist er fuenf
+# Pruefrunden lang durchgerutscht.
+print()
+print("--- uvicorn glaubt X-Forwarded-For nicht mehr von selbst (F-58) ---")
+
+import json as _json  # noqa: E402
+import socket as _socket  # noqa: E402
+import subprocess as _sub  # noqa: E402
+import time as _time  # noqa: E402
+import urllib.error as _uerr  # noqa: E402
+import urllib.request as _ureq  # noqa: E402
+
+
+def _freier_port():
+    s = _socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _versuche(extra_args):
+    """Startet ein Backend, macht sieben Anmeldeversuche, gibt die Codes."""
+    port = _freier_port()
+    daten = Path(tempfile.mkdtemp())
+    umgebung = dict(os.environ,
+                    CO37_SECRET_KEY="test",
+                    CO37_DB=f"sqlite:///{daten}/x.db",
+                    CO37_DATA=str(daten))
+    proc = _sub.Popen(
+        [sys.executable, "-m", "uvicorn", "main:app", "--port", str(port)]
+        + extra_args,
+        cwd=str(Path(__file__).resolve().parent.parent / "backend"),
+        env=umgebung, stdout=_sub.DEVNULL, stderr=_sub.DEVNULL)
+    codes, protokoll = [], []
+    try:
+        for _ in range(60):
+            _time.sleep(0.5)
+            try:
+                _ureq.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2)
+                break
+            except Exception:  # noqa: BLE001
+                if proc.poll() is not None:
+                    return ["Backend gestorben"], []
+        for i in range(1, 8):
+            req = _ureq.Request(
+                f"http://127.0.0.1:{port}/api/v1/login",
+                data=_json.dumps({"username": "a", "password": "b"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json",
+                         "X-Forwarded-For": f"203.0.113.{i}"})
+            try:
+                with _ureq.urlopen(req, timeout=30) as r:
+                    codes.append(r.status)
+            except _uerr.HTTPError as e:
+                codes.append(e.code)
+        import sqlite3 as _sq
+        with _sq.connect(f"{daten}/x.db") as c:
+            protokoll = [r[0] for r in c.execute(
+                "select from_ip from auditentry order by id desc limit 3")]
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+        shutil.rmtree(daten, ignore_errors=True)
+    return codes, protokoll
+
+
+_mit, _prot_mit = _versuche(["--no-proxy-headers"])
+check("mit --no-proxy-headers greift die Drosselung", 429 in _mit, _mit)
+check("und im Protokoll steht die echte Adresse",
+      all(p == "127.0.0.1" for p in _prot_mit) and bool(_prot_mit), _prot_mit)
+
+# Gegenprobe: ohne den Schalter darf sie NICHT greifen. Ohne diese Haelfte
+# sagte die Reihe nichts - eine Drosselung, die immer greift, bestuende
+# die obere Pruefung auch dann, wenn der Schalter gar nichts tut.
+_ohne, _prot_ohne = _versuche([])
+check("ohne ihn greift sie nicht - der Schalter ist also der Grund",
+      429 not in _ohne, _ohne)
+check("und im Protokoll steht dann die erfundene Adresse",
+      any(p.startswith("203.0.113.") for p in _prot_ohne), _prot_ohne)
+
+# Und der Betrieb muss ihn setzen, nicht nur der Testlauf.
+_setup = (Path(__file__).resolve().parent.parent / "setup.sh").read_text(
+    encoding="utf-8")
+_zeile = next((z for z in _setup.splitlines() if z.startswith("ExecStart=")), "")
+check("die systemd-Unit startet uvicorn mit --no-proxy-headers",
+      "--no-proxy-headers" in _zeile, _zeile)
+_rt = (Path(__file__).resolve().parent.parent / "run-tests.sh").read_text(
+    encoding="utf-8")
+check("und das Testgeruest ebenso - sonst misst es etwas anderes",
+      "--no-proxy-headers" in _rt)
+
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)
