@@ -1199,5 +1199,63 @@ _i = _ts.find("if existing and not von_privilegierter_hand")
 check("die Pruefung wird im Ablauf verwendet", _i > 0)
 check("bei einer untergeschobenen Datei wird alles verworfen",
       "existing = {}" in _ts[_i:_i + 500], _ts[_i:_i + 400])
+
+
+# ======================================================================
+# Die mitgelieferten Skripte uebersetzen sauber (2026-09-02)
+# ======================================================================
+# Der Anlass: install_task.py und uninstall_task.py stehen in build_msi.py
+# als rohe Zeichenketten (r'''...'''). Was darin steht, wird NICHT beim
+# Uebersetzen von build_msi.py geprueft - es ist dort nur Text. Geprueft
+# wird es erst auf dem Zielrechner, beim Installationslauf.
+#
+# Am 2026-09-02 auf dem Windows-Testhost gesehen: der Docstring von
+# von_privilegierter_hand nennt "VORDEFINIERT\\Administratoren". Aussen
+# ist alles roh, der Docstring drinnen war es nicht - Python meldete bei
+# JEDEM Lauf
+#
+#     SyntaxWarning: "\\A" is an invalid escape sequence
+#
+# nach stderr. Heute eine Warnung, ab Python 3.15 ein Fehler; eine
+# CustomAction, die etwas nach stderr schreibt, ist ausserdem genau das,
+# was einen Installationslauf schwer lesbar macht.
+#
+# Uebersetzt wird mit aufgezeichneten Warnungen: eine einzige reicht zum
+# Durchfallen.
+print()
+print("--- Die erzeugten Windows-Skripte uebersetzen ohne Warnung ---")
+
+import warnings as _warn  # noqa: E402
+
+_skripte = {}
+for _name in ("TASK_SCRIPT", "UNINSTALL_SCRIPT"):
+    for _k in ast.parse(msi).body:
+        if (isinstance(_k, ast.Assign)
+                and getattr(_k.targets[0], "id", "") == _name):
+            _skripte[_name] = ast.literal_eval(_k.value)
+
+check("beide Skripte sind auffindbar", len(_skripte) == 2, list(_skripte))
+
+for _name, _text in _skripte.items():
+    with _warn.catch_warnings(record=True) as _w:
+        _warn.simplefilter("always")
+        try:
+            compile(_text, _name, "exec")
+            _fehler = [str(x.message) for x in _w]
+        except SyntaxError as _exc:
+            _fehler = [f"SyntaxError: {_exc}"]
+    check(f"{_name} uebersetzt ohne Warnung", not _fehler, _fehler)
+
+# Gegenprobe: dieselbe Pruefung schlaegt an, wenn die Warnung wieder
+# hineinkommt. Ohne das sagte die Reihe nichts - ein compile(), das
+# stillschweigend alles durchlaesst, sieht genauso aus.
+_kaputt = 'def f():\n    """C:\\Administratoren"""\n'
+with _warn.catch_warnings(record=True) as _w:
+    _warn.simplefilter("always")
+    compile(_kaputt, "gegenprobe", "exec")
+check("die Pruefung erkennt eine ungueltige Folge ueberhaupt",
+      any("escape" in str(x.message) for x in _w),
+      [str(x.message) for x in _w])
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

@@ -148,20 +148,28 @@ if CONF.exists():
 # und der Installer meldete Fehler 1721. Auf KK-WIN01 am 2026-09-01
 # passiert, in 0.37.11 zurueckgenommen.
 #
-# DER BEFUND BLEIBT DAMIT OFFEN. Sauber loesen liesse er sich nur, wenn
-# das Skript eine Erstinstallation von einem Upgrade unterscheiden kann -
-# etwa an den Rechten der vorhandenen Datei (eine aus einer frueheren
-# Installation hat kein vererbtes (I), siehe die Feldbestaetigung zu
-# F-06) oder an der MSI-Eigenschaft 'Installed'. Beides laesst sich ohne
-# ein laufendes Windows nicht pruefen, und ein zweiter Fehlversuch kostet
-# wieder eine Flotte. Gehoert auf einen Windows-Testhost.
+# GEKLAERT am 2026-09-01 auf einem Windows-Testhost. Der Gedanke, eine
+# untergeschobene Datei an den RECHTEN zu erkennen (kein vererbtes (I)),
+# war falsch: wer Besitzer einer Datei ist, setzt ihre Rechte selbst und
+# kann sie beliebig aussehen lassen. Was ein Unprivilegierter nicht kann,
+# ist den BESITZ an die Administratoren abgeben - daran haengt die
+# Pruefung jetzt. Siehe von_privilegierter_hand() gleich darunter.
 #
-# Der schmale Rest des Angriffs: eine ERSTinstallation ohne CO37SERVER
-# auf einem Rechner, auf dem vorher jemand eine agent.conf hinterlegt
-# hat. Mit CO37SERVER gewinnt immer die Befehlszeile.
+# Am 2026-09-02 im Feld nachgestellt, alle drei Faelle:
+#   installierte Datei (Besitzer Administratoren) -> uebernommen
+#   vorbelegt von einem Unprivilegierten          -> verworfen
+#   von Hand von einem Administrator angelegt     -> uebernommen
 def von_privilegierter_hand(pfad):
-    """
+    r"""
     Stammt diese Datei von jemandem, der ohnehin alles darf?
+
+    Der Docstring ist roh (r""), weil "VORDEFINIERT\Administratoren"
+    darin steht. Ohne das r meldet Python beim Uebersetzen
+    "invalid escape sequence '\A'" - heute eine Warnung, ab 3.15 ein
+    Fehler. Am 2026-09-02 auf dem Testhost gesehen: das erzeugte
+    install_task.py schrieb die Warnung bei JEDEM Installationslauf
+    nach stderr. Der Wortlaut steht so im Paket, nicht in dieser
+    Datei - hier aussen ist alles roh, drinnen war es das nicht.
 
     Der Besitzer ist das verlaessliche Merkmal (F-46, geklaert am
     2026-09-01 auf einem Windows-Testhost). Nachgemessen:
