@@ -149,7 +149,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.37.14"
+WATCHER_VERSION = "0.37.17"
 WATCHER_INFO = STATE_DIR / "watcher.json"
 WATCHER_INFO_ALT = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
@@ -815,6 +815,44 @@ def pruefe_kein_rueckschritt(neue_version: str):
         f"'touch {DOWNGRADE_OK}' und erneut ausloesen."
     )
 
+def raeume_arbeitsverzeichnis():
+    """
+    Raeumt das Arbeitsverzeichnis und den Eingang.
+
+    ZWEIMAL AUFGERUFEN, und das ist Absicht: einmal im Normalfall vor dem
+    Neustart des Watchers, einmal im finally fuer die Abbruchwege. Der
+    Aufruf ist wiederholbar - rmtree mit ignore_errors und unlink mit
+    missing_ok.
+
+    WARUM NICHT NUR IM finally (F-60 der Pruefung vom 2026-09-04):
+
+    Genau dort stand es, und es hat kein einziges Mal gelaufen. Am Ende
+    des try-Zweigs steht
+
+        run(["systemctl", "restart", "co37-watcher"], timeout=30)
+
+    und systemctl beendet dabei den laufenden Prozess. Was danach kommt -
+    auch ein finally - findet nicht mehr statt. Der Zweig greift also nur,
+    wenn der Watcher sich NICHT selbst ausgetauscht hat.
+
+    Und das ist praktisch nie: build_release.py schreibt bei jedem Bau
+    WATCHER_VERSION neu in diese Datei, damit sichtbar ist, welcher
+    Watcher laeuft. Die Datei unterscheidet sich damit in jedem Release
+    von der installierten, self_changed ist jedes Mal wahr, der Neustart
+    kommt jedes Mal.
+
+    Aufgefallen ist es erst im Feld: nach dem Update auf 0.37.17 lag
+    state/work weiterhin voll da, obwohl 0.37.15 die Zeile schon
+    enthielt. Die Pruefung dazu hatte den QUELLTEXT angesehen und
+    bestaetigt, dass dort SAFE_DIR steht - nicht, ob die Stelle erreicht
+    wird. Dieselbe Familie wie die Besitzpruefung aus F-46, die im
+    Quelltext richtig aussah und nie lief.
+    """
+    shutil.rmtree(SAFE_DIR, ignore_errors=True)
+    INCOMING_ZIP.unlink(missing_ok=True)
+    INCOMING_SIG.unlink(missing_ok=True)
+
+
 def do_update():
     status = read_status()
     status["state"] = "running"
@@ -934,6 +972,10 @@ def do_update():
         status["finished_at"] = datetime.now(timezone.utc).isoformat()
         write_status(status)
 
+        # VOR dem Neustart aufraeumen. Was danach steht, laeuft nicht mehr
+        # (F-60, siehe raeume_arbeitsverzeichnis).
+        raeume_arbeitsverzeichnis()
+
         if self_changed:
             # Zum Schluss, damit der laufende Vorgang abgeschlossen ist.
             append_log(status, "upd.log.restart_watcher")
@@ -963,22 +1005,9 @@ def do_update():
         write_status(status)
 
     finally:
-        # Das ganze Arbeitsverzeichnis, nicht nur den ausgepackten Baum.
-        # Bis 0.37.14 stand hier WORK_DIR (= SAFE_DIR/_work); die Kopie des
-        # Pakets liegt aber eine Ebene darueber in SAFE_DIR und blieb
-        # deshalb liegen - gut 550 KB nach jedem Update, im Feld am
-        # 2026-08-31 auf KK-OPS01 gesehen und seitdem als "kein
-        # Sicherheitsproblem, aber unsauber" notiert.
-        #
-        # Es ist auch mehr als Unordnung: SAFE_DIR wird beim naechsten
-        # Update ohnehin geloescht und neu angelegt (siehe oben), das
-        # Paket liegt also nur solange herum, bis jemand das naechste
-        # einspielt. Danach ist es das naechste. Ein Verzeichnis, das
-        # dauerhaft ein Paket enthaelt, das gerade nicht gebraucht wird,
-        # laedt zu Verwechslungen ein.
-        shutil.rmtree(SAFE_DIR, ignore_errors=True)
-        INCOMING_ZIP.unlink(missing_ok=True)
-        INCOMING_SIG.unlink(missing_ok=True)
+        # Fuer die Abbruchwege. Der Normalfall raeumt schon weiter oben auf,
+        # weil dieser Zweig ihn nicht mehr erreicht - siehe F-60.
+        raeume_arbeitsverzeichnis()
 
 
 def main():

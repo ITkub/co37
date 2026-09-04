@@ -340,17 +340,102 @@ _do = next((k for k in _ast2.walk(_baum_w)
 check("do_update() ist auffindbar", _do is not None)
 _finallys = [k for k in _ast2.walk(_do or _ast2.Module(body=[], type_ignores=[]))
              if isinstance(k, _ast2.Try) and k.finalbody]
-_geraeumt = set()
+_geraeumt_finally = set()
 for _t in _finallys:
     for _knoten in _ast2.walk(_ast2.Module(body=_t.finalbody, type_ignores=[])):
-        if (isinstance(_knoten, _ast2.Call)
-                and _ast2.unparse(_knoten.func) == "shutil.rmtree"
-                and _knoten.args):
-            _geraeumt.add(_ast2.unparse(_knoten.args[0]))
-check("der finally-Zweig raeumt SAFE_DIR, nicht nur WORK_DIR",
-      "SAFE_DIR" in _geraeumt, sorted(_geraeumt))
-check("und es gibt ueberhaupt einen finally-Zweig mit rmtree",
-      bool(_geraeumt), sorted(_geraeumt))
+        if isinstance(_knoten, _ast2.Call):
+            _geraeumt_finally.add(_ast2.unparse(_knoten.func))
+check("der finally-Zweig raeumt ueber raeume_arbeitsverzeichnis()",
+      any("raeume_arbeitsverzeichnis" in a for a in _geraeumt_finally),
+      sorted(_geraeumt_finally))
+
+# ----------------------------------------------------------------------
+# F-60: das Aufraeumen muss VOR dem Neustart stehen
+# ----------------------------------------------------------------------
+# Bis 0.37.17 stand es ausschliesslich im finally - und ist kein einziges
+# Mal gelaufen. Am Ende des try-Zweigs steht
+#
+#     run(["systemctl", "restart", "co37-watcher"], timeout=30)
+#
+# und systemctl beendet dabei den laufenden Prozess. Was danach kommt,
+# auch ein finally, findet nicht mehr statt. Der Zweig greift nur, wenn
+# der Watcher sich NICHT selbst ausgetauscht hat - und das ist praktisch
+# nie, weil build_release.py bei jedem Bau WATCHER_VERSION in diese Datei
+# schreibt.
+#
+# Die Vorgaengerpruefung hat den QUELLTEXT angesehen und bestaetigt, dass
+# dort SAFE_DIR steht. Nicht, ob die Stelle erreicht wird. Aufgefallen ist
+# es im Feld, nach dem Update auf 0.37.17: state/work lag weiterhin voll
+# da, obwohl 0.37.15 die Zeile schon enthielt.
+def _zeilen_raeumen(knoten):
+    return [k.lineno for k in _ast2.walk(knoten)
+            if isinstance(k, _ast2.Call)
+            and getattr(k.func, "id", "") == "raeume_arbeitsverzeichnis"]
+
+
+def _zeilen_neustart(knoten):
+    """Wo der Watcher sich selbst neu startet - ueber den Syntaxbaum.
+
+    Nicht ueber eine Textsuche: 'systemctl restart co37-watcher' steht
+    seit 0.37.18 auch im Docstring von raeume_arbeitsverzeichnis, als
+    Begruendung. Eine Suche faende die Erklaerung und nicht den Aufruf.
+    """
+    treffer = []
+    for k in _ast2.walk(knoten):
+        if not (isinstance(k, _ast2.Call)
+                and getattr(k.func, "id", "") == "run" and k.args):
+            continue
+        werte = [e.value for e in _ast2.walk(k.args[0])
+                 if isinstance(e, _ast2.Constant) and isinstance(e.value, str)]
+        if "co37-watcher" in werte and "restart" in werte:
+            treffer.append(k.lineno)
+    return treffer
+
+
+_raeumen = _zeilen_raeumen(_do) if _do else []
+_neustart = _zeilen_neustart(_do) if _do else []
+check("do_update() raeumt ueberhaupt auf", bool(_raeumen), _raeumen)
+check("und startet den Watcher neu - sonst prueft die naechste Zeile nichts",
+      bool(_neustart), _neustart)
+check("aufgeraeumt wird VOR dem Neustart",
+      bool(_raeumen) and bool(_neustart) and min(_raeumen) < min(_neustart),
+      f"raeumen in {_raeumen}, Neustart in {_neustart}")
+check("und zusaetzlich im finally, fuer die Abbruchwege",
+      bool(_geraeumt_finally), sorted(_geraeumt_finally))
+
+# Die Funktion selbst, wirklich ausgefuehrt - nicht nur gelesen. Auf
+# eigenen Pfaden, damit hier niemals /opt/co37 angefasst wird: die Reihe
+# koennte auch auf dem Server laufen.
+_f60 = TMP / "f60"
+(_f60 / "work" / "_work" / "backend").mkdir(parents=True)
+(_f60 / "work" / "incoming.zip").write_bytes(b"PK\x03\x04paket")
+(_f60 / "work" / "incoming.sig").write_text("signatur", encoding="ascii")
+(_f60 / "work" / "_work" / "backend" / "main.py").write_text("x", encoding="ascii")
+(_f60 / "eingang").mkdir()
+(_f60 / "eingang" / "incoming.zip").write_bytes(b"PK\x03\x04eingang")
+(_f60 / "eingang" / "incoming.sig").write_text("sig", encoding="ascii")
+
+_alt = (watcher.SAFE_DIR, watcher.INCOMING_ZIP, watcher.INCOMING_SIG)
+watcher.SAFE_DIR = _f60 / "work"
+watcher.INCOMING_ZIP = _f60 / "eingang" / "incoming.zip"
+watcher.INCOMING_SIG = _f60 / "eingang" / "incoming.sig"
+try:
+    check("vorher liegt etwas da", (_f60 / "work" / "incoming.zip").is_file())
+    watcher.raeume_arbeitsverzeichnis()
+    check("das Arbeitsverzeichnis ist danach weg",
+          not (_f60 / "work").exists(), list((_f60 / "work").rglob("*"))
+          if (_f60 / "work").exists() else "")
+    check("und der Eingang ebenfalls geleert",
+          not (_f60 / "eingang" / "incoming.zip").exists()
+          and not (_f60 / "eingang" / "incoming.sig").exists())
+    # Zweimal aufrufen muss gefahrlos sein - genau das passiert im
+    # Normalfall, einmal oben und einmal im finally.
+    watcher.raeume_arbeitsverzeichnis()
+    check("ein zweiter Aufruf schadet nicht", True)
+except Exception as _exc:  # noqa: BLE001
+    check("raeume_arbeitsverzeichnis() laeuft durch", False, _exc)
+finally:
+    watcher.SAFE_DIR, watcher.INCOMING_ZIP, watcher.INCOMING_SIG = _alt
 
 # Und der Hebel selbst darf nicht zurueckkommen: kein chown auf einen
 # Benutzer mehr. Kommentarzeilen aussortiert - der Befund wird oben im
