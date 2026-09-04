@@ -35,11 +35,51 @@
 # acht Fassungen wie unter 3.12, cffi und charset-normalizer mit echten
 # cp314-Raedern, cryptography ueber abi3 (cp311-abi3 gilt auch fuer 3.14).
 # Die Datei musste dafuer nicht geaendert werden.
-certifi==2026.7.22
-cffi==2.1.1
-charset-normalizer==3.5.1
-cryptography==50.0.1
-idna==3.19
-pycparser==3.0
-requests==2.34.2
-urllib3==2.7.0
+#
+# HASHES (die letzte Haertung aus der Pruefungsliste, 2026-09-04)
+#
+# Ein Pin sagt "diese Fassung". Er sagt nicht "diese Datei". Wer ein
+# PyPI-Konto uebernimmt, kann eine Veroeffentlichung zurueckziehen und
+# unter derselben Nummer eine andere Datei hochladen - der Pin passt
+# weiterhin, und das MSI wuerde den neuen Inhalt einsammeln, mit dem
+# Release-Schluessel signieren und als SYSTEM auf jeden Windows-Host
+# ausliefern. Genau die Kette, die F-07 fuer den eigenen Code schliesst,
+# lag fuer die Bibliotheken daneben offen. Stand seit der dritten
+# Pruefungsrunde als "Restrisiko, bewusst offen" (F-14).
+#
+# --require-hashes im pip-Aufruf macht daraus "diese Datei". Es zieht
+# ausserdem zwei Regeln nach, die pip dann selbst erzwingt: jede
+# Anforderung muss mit == gepinnt sein, und es darf keine ungenannte
+# mittelbare Abhaengigkeit hereinkommen.
+#
+# WAS HIER STEHT, sind genau die acht Dateien, die der Bau auswaehlt -
+# nicht alle Dateien der jeweiligen Fassung. charset-normalizer allein
+# haette 172. Die Auswahl haengt an drei Dingen im pip-Aufruf von
+# build_msi.py: --platform win_amd64, --python-version aus PY_VERSION und
+# --only-binary=:all:.
+#
+# DESHALB: wer PY_VERSION anhebt, muss die Hashes NEU ERZEUGEN. Die
+# ABI-gebundenen Raeder (cffi, charset-normalizer) heissen dann cp315
+# statt cp314 und sind hier nicht aufgefuehrt - der Bau bricht mit einem
+# Hash-Fehler ab. Das ist gewollt: er soll anhalten und nicht raten.
+#
+#     python3 tools/pin-hashes.py            # zeigt, was sich aendert
+#     python3 tools/pin-hashes.py --schreiben # traegt es ein
+#
+# Erzeugt am 2026-09-04 gegen PY_VERSION 3.14.7.
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+cffi==2.1.1 \
+    --hash=sha256:3222ba5d678f80a030e6afbcc33dc1ae5cb45facabb61cee2c7016b8432fde48
+charset-normalizer==3.5.1 \
+    --hash=sha256:c658c50ac0c98cd755a2dd50b7977d3bca7df401dcc47fbdfa87db53ef7d4e8b
+cryptography==50.0.1 \
+    --hash=sha256:aed8db4f6d71c51efb89530e12d9464e7bf2923d46c3205dc794a2a93f8c0648
+idna==3.19 \
+    --hash=sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+urllib3==2.7.0 \
+    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897

@@ -455,13 +455,20 @@ check("und installiert darueber, nicht ueber eine eigene Namensliste",
 check("die frueher fest eingetragene Namensliste ist weg",
       re.search(r'"requests",\s*"urllib3",\s*"certifi"', msi) is None)
 
-# Jede Zeile mit ==, sonst waere die Luecke nur kleiner statt zu.
+# Jede Anforderung mit ==, sonst waere die Luecke nur kleiner statt zu.
 # Steht bewusst VOR dem Aufruf von lies_pins: die Funktion beendet bei
 # einer losen Zeile den Prozess (so soll der Bau sich verhalten), und ein
 # Test, der mittendrin aussteigt, meldet den Rest nicht mehr.
-lose = [z for z in req_text.splitlines()
-        if z.split("#", 1)[0].strip() and "==" not in z]
-check("keine Zeile ohne feste Fassung", not lose, lose)
+#
+# Seit die Hashes mit in der Datei stehen, sind die --hash-Zeilen keine
+# eigenen Anforderungen mehr, sondern Fortsetzungen. Die erste Fassung
+# dieser Pruefung sah jede davon als "Zeile ohne feste Fassung" - deshalb
+# wird hier zuerst zusammengefasst, wie es der Bau auch tut.
+_zusammen = re.sub(r"\\\s*\n", " ", req_text)
+lose = [z for z in _zusammen.splitlines()
+        if z.split("#", 1)[0].strip()
+        and "==" not in z.split("#", 1)[0]]
+check("keine Anforderung ohne feste Fassung", not lose, lose)
 
 # Aufgerufen statt gesucht: die Funktionen sollen sich richtig verhalten,
 # nicht nur vorhanden sein.
@@ -489,6 +496,72 @@ except SystemExit:
 check("Kommentare und Leerzeilen stoeren nicht",
       _bm.lies_pins("# nur ein Hinweis\n\nrequests==2.34.2\n")
       == {"requests": "2.34.2"})
+
+# ----------------------------------------------------------------------
+# Die Hashes: gepinnt wird eine Datei, nicht eine Fassungsnummer
+# ----------------------------------------------------------------------
+# Ein Pin sagt "diese Fassung". Wer ein PyPI-Konto uebernimmt, kann eine
+# Veroeffentlichung zurueckziehen und unter derselben Nummer eine andere
+# Datei hochladen - der Pin passt weiterhin. Das MSI haette den neuen
+# Inhalt eingesammelt, mit dem Release-Schluessel signiert und als SYSTEM
+# auf jeden Windows-Host ausgeliefert. Stand seit Runde 3 als "Restrisiko,
+# bewusst offen" (F-14), behoben am 2026-09-04.
+print()
+print("--- Die Bibliotheken sind an Dateien gebunden, nicht an Nummern ---")
+
+check("der pip-Aufruf verlangt Hashes", '"--require-hashes"' in msi)
+# Der Schalter allein genuegt nicht als Nachweis: pip schaltet die Pruefung
+# auch von selbst ein, sobald IRGENDEINE Anforderung einen Hash traegt.
+# Faellt der letzte Hash aus der Datei, faellt ohne den Schalter auch die
+# Pruefung weg - lautlos. Deshalb beides, und deshalb die naechste Zeile.
+_hashes = _bm.lies_hashes(req_text)
+check("jede Anforderung traegt einen Hash",
+      not _bm.fehlende_hashes(pins, _hashes),
+      _bm.fehlende_hashes(pins, _hashes))
+check("und zwar sha256 in voller Laenge",
+      all(re.fullmatch(r"sha256:[0-9a-f]{64}", h)
+          for hs in _hashes.values() for h in hs),
+      [h for hs in _hashes.values() for h in hs if len(h) != 71])
+check("fuer alle acht Pakete", len(_hashes) == len(pins),
+      (len(_hashes), len(pins)))
+
+# Die Pruefung selbst, in beide Richtungen. Ohne die Gegenprobe bestuende
+# sie auch dann, wenn fehlende_hashes() immer eine leere Liste liefert.
+check("ein Paket ohne Hash wird bemerkt",
+      _bm.fehlende_hashes({"requests": "2.34.2"}, {}) == ["requests"])
+check("ein abgeschnittener Hash ebenfalls",
+      _bm.fehlende_hashes({"requests": "2.34.2"},
+                          {"requests": ["sha256:abc"]}) != [])
+check("ein vollstaendiger Hash geht durch",
+      _bm.fehlende_hashes({"requests": "2.34.2"},
+                          {"requests": ["sha256:" + "a" * 64]}) == [])
+
+# Und das Lesen der Datei mit Fortsetzungszeilen - der Teil, an dem die
+# alte Fassung von lies_pins gescheitert waere.
+_probe = ("requests==2.34.2 \\\n    --hash=sha256:" + "b" * 64 + "\n"
+          "urllib3==2.7.0 \\\n    --hash=sha256:" + "c" * 64 + "\n")
+check("Fortsetzungszeilen werden zusammengefasst",
+      _bm.lies_pins(_probe) == {"requests": "2.34.2", "urllib3": "2.7.0"},
+      _bm.lies_pins(_probe))
+check("und die Hashes richtig zugeordnet",
+      _bm.lies_hashes(_probe) == {"requests": ["sha256:" + "b" * 64],
+                                  "urllib3": ["sha256:" + "c" * 64]},
+      _bm.lies_hashes(_probe))
+# Eine unscharfe Angabe muss auch MIT Hash abgewiesen werden - sonst
+# haette man sich die Schranke von oben gerade wieder aufgemacht.
+try:
+    _bm.lies_pins("requests>=2.0 \\\n    --hash=sha256:" + "d" * 64 + "\n")
+    check("eine unscharfe Angabe mit Hash wird abgewiesen", False)
+except SystemExit:
+    check("eine unscharfe Angabe mit Hash wird abgewiesen", True)
+
+# Das Werkzeug zum Neuerzeugen muss es geben und es darf nicht mitgehen:
+# tools/ bleibt seit F-45 aus dem Paket.
+_pinhashes = WURZEL / "tools" / "pin-hashes.py"
+check("tools/pin-hashes.py liegt bereit", _pinhashes.is_file())
+check("und die Datei nennt den Weg dorthin",
+      "pin-hashes.py" in req_text)
+
 
 # Namen nach PEP 503 - charset_normalizer und charset-normalizer sind
 # dasselbe Paket, und die .dist-info-Ordner schreiben es mit Unterstrich.

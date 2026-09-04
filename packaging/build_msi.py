@@ -474,9 +474,61 @@ def stable_guid(name: str) -> str:
 # lautlos aus wie die Datei vorher.
 
 
+def fehlende_hashes(pins: dict, hashes: dict) -> list[str]:
+    """
+    Welche Anforderungen ohne Hash dastehen.
+
+    pip weist eine fehlende Angabe mit --require-hashes zwar auch ab -
+    aber erst, nachdem es den Index befragt und die Datei geladen hat, und
+    mit einer Meldung ueber "hash-checking mode". Hier steht der Grund im
+    Klartext, und der Bau haelt an, bevor irgendetwas heruntergeladen ist.
+
+    Geprueft wird ausserdem die Form: sha256 und 64 Hexstellen. Ein
+    abgeschnittener Hash faellt sonst erst bei pip auf und sieht dort aus
+    wie eine Manipulation.
+    """
+    schlecht = []
+    for name in sorted(pins):
+        eintraege = hashes.get(name) or []
+        if not eintraege:
+            schlecht.append(name)
+            continue
+        for h in eintraege:
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", h):
+                schlecht.append(f"{name} (unbrauchbare Angabe: {h!r})")
+    return schlecht
+
+
 def normname(name: str) -> str:
     """Paketnamen nach PEP 503 vergleichbar machen."""
     return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def _logische_zeilen(text: str):
+    """
+    Fasst Fortsetzungszeilen zusammen und wirft Kommentare weg.
+
+    Seit die Hashes mit in der Datei stehen, ist eine Anforderung ueber
+    mehrere Zeilen verteilt:
+
+        requests==2.34.2 \\
+            --hash=sha256:2a0d60c1...
+
+    Wer hier zeilenweise liest, sieht eine Fassung mit einem angehaengten
+    Backslash und eine Zeile, die wie ein Paket namens "--hash" aussieht.
+    """
+    puffer = ""
+    for roh in text.splitlines():
+        zeile = roh.split("#", 1)[0].strip()
+        if not zeile:
+            continue
+        if zeile.endswith("\\"):
+            puffer += zeile[:-1].strip() + " "
+            continue
+        yield (puffer + zeile).strip()
+        puffer = ""
+    if puffer.strip():
+        yield puffer.strip()
 
 
 def lies_pins(text: str) -> dict[str, str]:
@@ -485,20 +537,37 @@ def lies_pins(text: str) -> dict[str, str]:
 
     Alles andere ist ein Fehler und wird als solcher gemeldet - eine Zeile
     ohne "==" (etwa ">=" oder ein blosser Name) waere genau die Luecke,
-    die hier geschlossen werden soll.
+    die hier geschlossen werden soll. --hash-Angaben duerfen dahinter
+    stehen; sie werden hier abgeschnitten und von lies_hashes() gelesen.
     """
     pins: dict[str, str] = {}
-    for roh in text.splitlines():
-        zeile = roh.split("#", 1)[0].strip()
-        if not zeile:
-            continue
-        treffer = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)", zeile)
+    for zeile in _logische_zeilen(text):
+        anforderung = zeile.split("--hash=", 1)[0].strip()
+        treffer = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)",
+                               anforderung)
         if not treffer:
             raise SystemExit(
                 f"agent/requirements.txt: Zeile ohne feste Fassung: {zeile!r}"
             )
         pins[normname(treffer.group(1))] = treffer.group(2)
     return pins
+
+
+def lies_hashes(text: str) -> dict[str, list[str]]:
+    """
+    Welche Dateihashes zu welchem Paket gehoeren.
+
+    Getrennt von lies_pins(), damit der Bau BEIDES einzeln pruefen kann:
+    fehlt die Fassung, ist es eine Sache; fehlt der Hash, eine andere.
+    """
+    hashes: dict[str, list[str]] = {}
+    for zeile in _logische_zeilen(text):
+        teile = zeile.split("--hash=")
+        treffer = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)==", teile[0].strip())
+        if not treffer:
+            continue
+        hashes[normname(treffer.group(1))] = [t.strip() for t in teile[1:]]
+    return hashes
 
 
 def lies_installiert(site_dir: Path) -> dict[str, str]:
@@ -618,9 +687,20 @@ def build(version: str, out_dir: Path) -> Path:
         raise SystemExit(f"Fehlt: {AGENT_REQ}")
     # Erst lesen, dann installieren: eine Zeile ohne feste Fassung soll den
     # Bau anhalten, bevor irgendetwas heruntergeladen ist.
-    pins = lies_pins(AGENT_REQ.read_text(encoding="utf-8"))
+    req_text = AGENT_REQ.read_text(encoding="utf-8")
+    pins = lies_pins(req_text)
     if not pins:
         raise SystemExit(f"{AGENT_REQ} nennt keine Pakete")
+
+    # Und jede Anforderung braucht mindestens einen Hash.
+    fehlende = fehlende_hashes(pins, lies_hashes(req_text))
+    if fehlende:
+        raise SystemExit(
+            "In agent/requirements.txt fehlen die Hashes fuer: "
+            + ", ".join(fehlende)
+            + "\nMit 'python3 tools/pin-hashes.py --schreiben' erzeugen. "
+              "Ein Pin ohne Hash bindet an eine Fassung, nicht an eine "
+              "Datei - siehe den Kopf der Datei.")
 
     # Die Liste kommt aus agent/requirements.txt, nicht aus dieser Datei -
     # sonst steht sie an zwei Stellen und nur eine wird gepflegt. Darin
@@ -630,17 +710,29 @@ def build(version: str, out_dir: Path) -> Path:
     #
     # Ausdruecklich Windows-Wheels anfordern. Ohne --platform wuerde pip die
     # Pakete fuer das Bausystem (Linux) holen, die unter Windows nicht laufen.
+    #
+    # --require-hashes bindet an die DATEI statt an die Fassungsnummer
+    # (2026-09-04). Die drei Angaben darueber bestimmen mit, welche Datei
+    # pip auswaehlt - wer eine davon aendert, aendert die erwarteten
+    # Hashes mit. Siehe den Kopf von agent/requirements.txt.
     res = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--quiet",
          "--target", str(site_dir),
          "--platform", "win_amd64",
          "--python-version", ".".join(PY_VERSION.split(".")[:2]),
          "--only-binary=:all:",
+         "--require-hashes",
          "-r", str(AGENT_REQ)],
         capture_output=True, text=True,
     )
     if res.returncode != 0:
-        raise SystemExit(f"pip fehlgeschlagen: {res.stderr[-600:]}")
+        hinweis = ""
+        if "hash" in (res.stderr + res.stdout).lower():
+            hinweis = ("\n\nDas sieht nach den Hashes aus. Haeufigster Grund: "
+                       "PY_VERSION wurde angehoben, damit waehlt pip andere "
+                       "Raeder (cp314 -> cp315). Neu erzeugen mit "
+                       "'python3 tools/pin-hashes.py --schreiben'.")
+        raise SystemExit(f"pip fehlgeschlagen: {res.stderr[-600:]}{hinweis}")
 
     # Gegenprobe am Ergebnis, nicht an der Absicht - dieselbe Regel wie
     # beim fertigen MSI weiter unten. Faengt zwei Faelle: ein Pin, der
