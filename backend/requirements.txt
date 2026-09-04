@@ -1,10 +1,62 @@
 # Alle Fassungen festgenagelt. Ein Update, das sich beim Einspielen
 # selbst zusammensucht, ist bei jedem Kunden ein anderes.
 #
-# Stand geprueft am 2026-08-24: pip-audit meldet null Befunde, und der
-# volle Testlauf laeuft damit durch. Beim Anheben beides wiederholen -
-# tests/deps-test.py haelt nur den Abgleich zwischen dieser Datei und dem,
-# was tatsaechlich installiert ist, nicht den Stand der Schwachstellen.
+# Stand geprueft am 2026-09-04: pip-audit meldet null Befunde ueber ALLE
+# 29 Eintraege. Beim Anheben wiederholen - tests/deps-test.py haelt nur
+# den Abgleich zwischen dieser Datei und dem, was tatsaechlich
+# installiert ist, nicht den Stand der Schwachstellen.
+#
+# ----------------------------------------------------------------------
+# WARUM HIER 29 PAKETE STEHEN UND NICHT 8 (2026-09-04)
+# ----------------------------------------------------------------------
+# Bis 0.37.16 nannte diese Datei acht Pakete. Installiert waren dreissig.
+# Die anderen zweiundzwanzig zog pip beim Aufloesen dazu, in der Fassung,
+# die PyPI im Augenblick des Updates gerade auslieferte.
+#
+# Das ist derselbe Befund wie F-14 beim Windows-Agenten, nur eine Ebene
+# tiefer - und er war nicht theoretisch. Am 2026-09-04 auf KK-OPS01
+# gegen eine frische Aufloesung verglichen:
+#
+#     anyio        installiert 4.14.2   frisch aufgeloest 4.15.0
+#     SQLAlchemy   installiert 2.0.51   frisch aufgeloest 2.0.52
+#     greenlet     installiert 3.5.4    frisch aufgeloest 3.5.5
+#     websockets   installiert 17.0.1   frisch aufgeloest 17.1
+#
+# Vier Pakete, die sich beim naechsten Update von selbst geaendert
+# haetten. Fuer ein uebernommenes PyPI-Konto von 'anyio' oder 'h11'
+# braucht es damit gar keine Fassungstricks - es genuegt, eine neue
+# Fassung zu veroeffentlichen. Der Watcher ruft "pip install -r" bei
+# JEDEM Update auf, und was hier hereinkommt, laeuft anschliessend als
+# der Benutzer, dem das Backend gehoert.
+#
+# Die Aufteilung unten ist nur zum Lesen da. Fuer pip sind alle Zeilen
+# gleich; die Trennung sagt, welche wir absichtlich ausgesucht haben und
+# welche daran haengen.
+#
+# BEIM ANHEBEN einer der oberen Fassungen gehoert der untere Block neu
+# erzeugt - sonst passen die mittelbaren Fassungen nicht mehr zur neuen
+# oberen, und pip loest den Konflikt still zu seinen Gunsten auf:
+#
+#     /opt/co37/venv/bin/pip install -q -r backend/requirements.txt
+#     /opt/co37/venv/bin/pip list --format=freeze
+#
+# Erzeugt wird der Block auf der ZIELPLATTFORM, nicht auf dem
+# Entwicklungsrechner: KK-OPS01 laeuft auf Python 3.13, ein Container mit
+# 3.11 loest anders auf.
+#
+# WAS HIER BEWUSST NICHT STEHT: --hash-Angaben, wie sie
+# agent/requirements.txt seit 0.37.16 traegt. Zehn dieser Pakete sind
+# kompiliert, ihre Raeder haengen an Python-Nebenversion UND Architektur
+# (cp311 gegen cp313, x86_64 gegen aarch64). Der Agent wird auf genau
+# einer Plattform gebaut, die wir bestimmen - das Backend installiert auf
+# dem Rechner des Kunden. Eine Hash-Liste wuerde dort jedes Update
+# scheitern lassen, und ein gescheitertes "pip install" im Watcher heisst
+# fehlgeschlagenes Update und Ruecklauf. Erst festnageln, welche
+# Plattformen unterstuetzt sind; dann kann man darueber reden.
+
+# ----------------------------------------------------------------------
+# Ausgesucht
+# ----------------------------------------------------------------------
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 sqlmodel==0.0.39
@@ -24,3 +76,33 @@ python-multipart==0.0.32
 # FastAPI-Sprung einen Konflikt, den man aufloesen MUSS - das faellt beim
 # Bauen sofort auf und ist genau die Absicht.
 starlette==1.6.0
+
+# ----------------------------------------------------------------------
+# Mittelbar - haengen an den oberen, nicht selbst ausgesucht
+# ----------------------------------------------------------------------
+# Abgelesen am 2026-09-04 auf KK-OPS01 (Python 3.13.5), also an dem
+# Stand, der dort seit dem Einspielen von 0.37.15 laeuft und getestet
+# ist. Bewusst NICHT die neueste Aufloesung: das waere neben dem Pinnen
+# gleichzeitig ein Versionssprung gewesen, und zwei Dinge auf einmal
+# sind eine Aenderung, die niemand mehr auseinanderhalten kann.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+cffi==2.1.0
+click==8.4.2
+greenlet==3.5.4
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+idna==3.18
+pycparser==3.0
+pydantic_core==2.46.4
+python-dotenv==1.2.2
+PyYAML==6.0.3
+SQLAlchemy==2.0.51
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==17.0.1
