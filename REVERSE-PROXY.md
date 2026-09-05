@@ -129,14 +129,28 @@ Proxys, denen zu glauben ist, gehört in **Einstellungen → Proxy**.
 **Nicht nötig:** WebSocket-Unterstützung. CO-37 fragt zyklisch ab.
 
 **Größenbegrenzung für Anfragen:** Systemupdates werden als ZIP
-hochgeladen, derzeit rund 450 KB. Eine Grenze unterhalb von etwa 10 MB
+hochgeladen, derzeit rund 600 KB. Eine Grenze unterhalb von etwa 10 MB
 sollte angehoben werden.
 
-Seit 0.37.15 weist **CO-37 selbst** alles über **32 MiB** mit `413` ab
-(`CO37_MAX_BODY` in `/etc/co37/backend.env`, Angabe in Bytes). Bis dahin
-gab es gar keine Grenze: 200 MB an die absichtlich offene Anmelderoute
-`/api/v1/agent/enroll` wurden vollständig in den Speicher gelesen, bevor
-irgendeine Prüfung griff (F-56 der Prüfung vom 03.09.2026).
+Seit 0.37.15 weist **CO-37 selbst** zu große Anfragen mit `413` ab. Bis
+dahin gab es gar keine Grenze: 200 MB an die absichtlich offene
+Anmelderoute `/api/v1/agent/enroll` wurden vollständig in den Speicher
+gelesen, bevor irgendeine Prüfung griff (F-56 der Prüfung vom
+03.09.2026).
+
+Seit 0.37.19 ist es **eine Grenze je Route** statt einer für alle
+(F-62 der Prüfung vom 04.09.2026):
+
+| Route | Grenze |
+|---|---|
+| alles Übrige | **1 MiB** (`CO37_MAX_BODY` in `/etc/co37/backend.env`, Angabe in Bytes) |
+| `/api/v1/agent/scan-result` | 8 MiB |
+| `/api/v1/update/upload` | **64 MiB** |
+
+Die einheitlichen 32 MiB waren zu großzügig: der Körper wird vollständig
+gelesen, bevor irgendeine Route etwas prüft — vor der Anmeldung, vor dem
+Agent-Token, sogar vor der Drosselung. Eine bereits gesperrte Adresse
+kostete den Server damit weiterhin 320 ms je Anfrage, beliebig oft.
 
 Die Grenze im Proxy ersetzt das nicht und wird davon nicht ersetzt —
 **beide gehören gesetzt**. Der Proxy hält die Last vom Server fern, bevor
@@ -144,8 +158,21 @@ sie überhaupt ankommt; die Grenze im Backend gilt auch dann, wenn jemand
 den Port direkt erreicht. Bei nginx:
 
 ```nginx
-client_max_body_size 32m;
+client_max_body_size 64m;
 ```
+
+**64m, nicht 32m** — der Wert muss zur *höchsten* Grenze im Backend
+passen, sonst ist der Proxy die engere Schranke und ein Systemupdate über
+32 MB käme nicht mehr durch. Heute sind die Pakete rund 600 KB, das fällt
+also nicht auf; es fällt erst in dem Augenblick auf, in dem ein Paket
+wächst, und dann sucht man an der falschen Stelle.
+
+Bei **Nginx Proxy Manager / NPMplus** steht der Wert nicht in einer
+Datei, sondern in der Oberfläche: *Hosts → Proxy Hosts → den Eintrag
+bearbeiten → Reiter „Advanced" → Custom Nginx Configuration*. Der Block
+landet im `server`-Abschnitt genau dieses Hosts; andere Proxy Hosts
+bleiben unberührt. Ab Werk setzt NPM global `client_max_body_size 0;`,
+also unbegrenzt — ohne diesen Eintrag gibt es im Proxy gar keine Grenze.
 
 **Zeitüberschreitung:** Die längste Anfrage ist die Freigabe eines
 Neustarts, die dabei eine Downtime in Checkmk setzt. Sechzig Sekunden

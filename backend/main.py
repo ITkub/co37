@@ -15,6 +15,7 @@ import re
 import shutil
 import secrets
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -152,6 +153,28 @@ async def lifespan(app: FastAPI):
             print(f"{removed} alte Auftragsprotokolle entfernt", flush=True)
     except Exception:  # noqa: BLE001
         pass
+
+    # Das Pruefprotokoll waechst nur ueber audit(), und dort wird die
+    # Frist auch geprueft - fuer den laufenden Betrieb genuegt das. Hier
+    # steht es trotzdem, fuer den Fall, dass ueber Monate niemand etwas
+    # tut: dann kaeme sonst nie ein Aufruf, der nachsieht, und Eintraege
+    # blieben ueber die Frist hinaus liegen.
+    global _letzte_bereinigung
+    try:
+        with Session(engine) as session:
+            entfernt = pruefprotokoll_bereinigen(session)
+            if entfernt:
+                session.commit()
+                print(f"{entfernt} alte Protokolleintraege entfernt",
+                      flush=True)
+        # Den Zaehler mitsetzen, sonst haengt der naechste Lauf davon ab,
+        # wie lange die Maschine schon laeuft: time.monotonic() ist unter
+        # Linux die Betriebsdauer, und auf einem Server mit Wochen Uptime
+        # waere die Frist beim allerersten audit() sofort abgelaufen.
+        _letzte_bereinigung = time.monotonic()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Pruefprotokoll konnte nicht bereinigt werden: {exc}",
+              flush=True)
 
     yield
 
@@ -1047,6 +1070,81 @@ AUDIT_ACTOR_MAX = 120
 AUDIT_ACTION_MAX = 80
 AUDIT_DETAIL_MAX = 1000
 
+# ----------------------------------------------------------------------
+# Aufbewahrungsfrist fuer das Pruefprotokoll (F-64, Pruefung 2026-09-05)
+# ----------------------------------------------------------------------
+# Bis 0.37.19 wurde nie etwas geloescht. Das war kein Versehen, sondern
+# eine Entscheidung - siehe AuditEntry: wer sich selbst herausschreiben
+# kann, macht das Protokoll wertlos. Nur ist "nie loeschen" keine Loesung,
+# sondern die Abwesenheit einer.
+#
+# BSI OPS.1.1.5.A5 (Basis-Anforderung, MUSS), am Primaertext der Edition
+# 2023 gelesen:
+#
+#     "Protokollierungsdaten MUESSEN nach einem festgelegten Prozess
+#      geloescht werden. Es MUSS technisch unterbunden werden, dass
+#      Protokollierungsdaten unkontrolliert geloescht oder veraendert
+#      werden."
+#
+# Beide Haelften, und die zweite ist der Grund fuer die Bauform hier. Das
+# BSI nennt KEINE Zahl - gefordert ist ein festgelegter Prozess, nicht
+# eine bestimmte Frist. 365 Tage sind die Festlegung dieser Anlage.
+#
+# WARUM DIE FRIST NUR IN DER UMGEBUNG STEHT UND NICHT IN DER OBERFLAECHE:
+# OPS.1.1.5.A10 verlangt, dass die ausfuehrenden Administrierenden selbst
+# keine Berechtigung haben, Protokolldaten zu veraendern oder zu loeschen.
+# Eine Frist, die ein Administrator im Dashboard auf einen Tag stellen
+# kann, waere genau diese Berechtigung durch die Hintertuer: Frist runter,
+# warten, Frist zurueck. Deshalb CO37_AUDIT_DAYS in
+# /etc/co37/backend.env - dafuer braucht es root, und root ist in dieser
+# Anlage bewusst jemand anderes als die Administratorenrolle.
+#
+# 0 schaltet die Bereinigung ab. Ausdruecklich, nicht als Vorgabe.
+AUDIT_DAYS = int(os.getenv("CO37_AUDIT_DAYS", "365"))
+
+# Nachgesehen wird hoechstens einmal am Tag, und zwar in audit() selbst.
+# Das ist kein Zufall: das Protokoll kann NUR ueber audit() wachsen. Wer
+# dort nachsieht, sieht genau dann nach, wenn etwas dazugekommen ist, und
+# braucht weder einen Zeitgeber noch einen Faden noch eine Route.
+AUDIT_PRUNE_INTERVAL = 24 * 3600
+
+# None heisst "noch nie gelaufen", nicht 0.0. Der Unterschied ist nicht
+# kosmetisch: time.monotonic() ist unter Linux die Betriebsdauer der
+# Maschine. Mit 0.0 als Anfangswert haengt es davon ab, wie lange der
+# Rechner schon laeuft, ob der allererste Aufruf aufraeumt - auf einem
+# frisch gestarteten Server jahrelang nicht, auf einem seit Wochen
+# laufenden sofort. Die Pruefreihe ist genau darueber gestolpert.
+_letzte_bereinigung: Optional[float] = None
+
+
+def pruefprotokoll_bereinigen(session: Session) -> int:
+    """
+    Entfernt Eintraege, die aelter als AUDIT_DAYS sind, und vermerkt das
+    im Protokoll.
+
+    Der Vermerk ist keine Zierde. Eine Loeschung, die man dem Protokoll
+    nicht ansieht, ist selbst eine unbemerkte Aenderung am Protokoll -
+    also das, wogegen es da ist. Wer spaeter eine Luecke sieht, soll
+    daneben stehen haben, wer sie wann gerissen hat und warum.
+
+    Ohne commit, wie audit() auch: der Aufrufer schliesst die Transaktion.
+    """
+    if AUDIT_DAYS <= 0:
+        return 0
+    grenze = utcnow() - timedelta(days=AUDIT_DAYS)
+    alt = session.exec(
+        select(AuditEntry).where(AuditEntry.at < grenze)
+    ).all()
+    if not alt:
+        return 0
+    for zeile in alt:
+        session.delete(zeile)
+    session.add(AuditEntry(
+        actor="system", action="audit.pruned",
+        detail=f"{len(alt)} Eintraege aelter als {AUDIT_DAYS} Tage entfernt",
+        from_ip=None))
+    return len(alt)
+
 
 def audit(session: Session, actor: str, action: str,
           detail: str = None, request: Request = None):
@@ -1062,6 +1160,23 @@ def audit(session: Session, actor: str, action: str,
     das man mit einem Zeilenumbruch im Benutzernamen faelschen kann, ist
     keins.
     """
+    global _letzte_bereinigung
+    jetzt = time.monotonic()
+    if AUDIT_DAYS > 0 and (_letzte_bereinigung is None
+                           or jetzt - _letzte_bereinigung
+                           >= AUDIT_PRUNE_INTERVAL):
+        # Den Zeitpunkt VOR dem Lauf setzen. Sonst versucht es eine
+        # scheiternde Bereinigung bei jedem einzelnen Eintrag erneut.
+        _letzte_bereinigung = jetzt
+        try:
+            pruefprotokoll_bereinigen(session)
+        except Exception as exc:  # noqa: BLE001
+            # Eine misslungene Bereinigung darf den Vorgang nicht
+            # mitreissen, zu dem dieser Eintrag gehoert. Der Eintrag ist
+            # wichtiger als das Aufraeumen.
+            print(f"Pruefprotokoll konnte nicht bereinigt werden: {exc}",
+                  flush=True)
+
     session.add(AuditEntry(
         actor=kurz(actor, AUDIT_ACTOR_MAX),
         action=kurz(action, AUDIT_ACTION_MAX),

@@ -824,6 +824,41 @@ journalctl -u co37-watcher -n 40 --no-pager
 
 ---
 
+# Prüfprotokoll
+
+Unter **Einstellungen → Prüfprotokoll** steht, wer was wann getan hat —
+Anmeldungen (auch die gescheiterten), Freigaben, Rollenänderungen,
+Updates, Neustarts.
+
+**Es wird nur angehängt.** Es gibt keine Route zum Ändern oder Löschen,
+und zwar mit Absicht: wer sich selbst herausschreiben kann, macht das
+Protokoll wertlos.
+
+**Aufbewahrungsfrist: 365 Tage.** Ältere Einträge werden automatisch
+entfernt, und die Bereinigung schreibt selbst eine Zeile ins Protokoll
+(`audit.pruned`) mit Anzahl und Frist — eine Lücke, die man nicht sieht,
+wäre eine unbemerkte Änderung am Protokoll.
+
+Ändern lässt sich die Frist nur in `/etc/co37/backend.env`:
+
+```
+CO37_AUDIT_DAYS=365
+```
+
+`0` schaltet die Bereinigung ab. **Absichtlich nicht in der Oberfläche:**
+BSI IT-Grundschutz OPS.1.1.5.A10 verlangt, dass Administrierende die
+Protokolldaten nicht selbst löschen können. Eine Frist, die im Dashboard
+auf einen Tag stellbar wäre, wäre genau diese Möglichkeit durch die
+Hintertür — Frist runter, warten, Frist zurück. Für `backend.env` braucht
+es root, und root ist hier bewusst jemand anderes als die
+Administratorenrolle.
+
+Die Länge der Felder ist begrenzt (Akteur 120, Aktion 80, Beschreibung
+1000 Zeichen). Ohne das ließ sich das Protokoll ohne Zugangsdaten mit
+einem überlangen Benutzernamen an der Anmeldung vollschreiben.
+
+---
+
 # Wenn du dich aussperrst
 
 Drei Fälle: das einzige Administratorkonto ist deaktiviert, das Passwort ist
