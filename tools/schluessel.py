@@ -133,14 +133,59 @@ def _ableiten(passphrase: bytes, salt: bytes,
         maxmem=SCRYPT_MAXMEM, dklen=32))
 
 
-def behaelter_passwort(roh: bytes, passphrase: bytes) -> bytes:
+def _kopf_pruefen(kopf: dict, pfad=None):
+    """
+    Die Angaben aus der Kopfzeile auf Brauchbarkeit pruefen.
+
+    Ohne das kam bei einer beschaedigten Zeile ein nackter Rueckverfolg
+    heraus - 'KeyError: salt', 'invalid literal for int()' (F-68 der
+    Pruefung vom 2026-09-05). Das ist der denkbar schlechteste Zeitpunkt
+    fuer eine unverstaendliche Meldung: wer hier steht, versucht gerade,
+    an den wertvollsten Schluessel zu kommen, den er besitzt, vermutlich
+    unter Druck und womoeglich nach einem Plattenschaden.
+
+    Die Meldung nennt deshalb die Datei, die kaputte Angabe und den Weg
+    zurueck.
+    """
+    wo = f"\n    {pfad}" if pfad else ""
+    for name in ("n", "r", "p", "salt"):
+        if name not in kopf:
+            sys.exit(f"Die Kopfzeile der Schluesseldatei ist unvollstaendig - "
+                     f"'{name}' fehlt.{wo}\n\n"
+                     f"Erwartet wird eine erste Zeile der Form\n"
+                     f"    {KOPF_VORSATZ}n=16384 r=8 p=5 salt=<32 Hexzeichen>\n\n"
+                     f"Ist die Zeile verlorengegangen, hilft die "
+                     f"Papiersicherung (--sicherung).")
+    try:
+        n, r, p = int(kopf["n"]), int(kopf["r"]), int(kopf["p"])
+    except ValueError:
+        sys.exit(f"Die Kopfzeile der Schluesseldatei enthaelt keine Zahlen "
+                 f"fuer n, r, p.{wo}")
+    # scrypt verlangt eine Zweierpotenz. Die Obergrenzen sind da, damit
+    # eine verfaelschte Zeile nicht in einen Speicheranfall laeuft, bevor
+    # ueberhaupt jemand etwas merkt.
+    if n < 2 ** 10 or n > 2 ** 20 or n & (n - 1):
+        sys.exit(f"Unbrauchbares n in der Kopfzeile: {n}.{wo}")
+    if not (1 <= r <= 64) or not (1 <= p <= 64):
+        sys.exit(f"Unbrauchbares r/p in der Kopfzeile: r={r}, p={p}.{wo}")
+    try:
+        salt = bytes.fromhex(kopf["salt"])
+    except ValueError:
+        sys.exit(f"Das Salz in der Kopfzeile ist keine Hexzahl: "
+                 f"{kopf['salt']!r}.{wo}")
+    if not 8 <= len(salt) <= 64:
+        sys.exit(f"Das Salz in der Kopfzeile hat eine unbrauchbare Laenge: "
+                 f"{len(salt)} Byte.{wo}")
+    return salt, n, r, p
+
+
+def behaelter_passwort(roh: bytes, passphrase: bytes, pfad=None) -> bytes:
     """Aus der Passphrase des Menschen die des PKCS8-Behaelters machen."""
     kopf = _kopfzeile_lesen(roh)
     if not kopf:
         return passphrase
-    return _ableiten(
-        passphrase, bytes.fromhex(kopf["salt"]),
-        int(kopf["n"]), int(kopf["r"]), int(kopf["p"]))
+    salt, n, r, p = _kopf_pruefen(kopf, pfad)
+    return _ableiten(passphrase, salt, n, r, p)
 
 
 def _eingabe(text: str) -> str:
@@ -240,7 +285,7 @@ def laden(pfad: Path, umgebung: str, zweck: str):
     roh = pfad.read_bytes()
     if not ist_verschluesselt(roh):
         return serialization.load_pem_private_key(roh, password=None)
-    pw = behaelter_passwort(roh, passphrase_holen(umgebung, zweck))
+    pw = behaelter_passwort(roh, passphrase_holen(umgebung, zweck), pfad)
     try:
         return serialization.load_pem_private_key(roh, password=pw)
     except ValueError:
@@ -311,7 +356,7 @@ sich nicht ersetzen.
     roh = pfad.read_bytes()
     try:
         serialization.load_pem_private_key(
-            roh, password=behaelter_passwort(roh, neu))
+            roh, password=behaelter_passwort(roh, neu, pfad))
     except ValueError:
         sys.exit("Die neu geschriebene Datei laesst sich nicht oeffnen. "
                  "Sicherung einspielen.")

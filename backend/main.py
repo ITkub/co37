@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydField, PlainSerializer
 from typing_extensions import Annotated
-from sqlalchemy import func, or_
+from sqlalchemy import delete, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -1128,22 +1128,48 @@ def pruefprotokoll_bereinigen(session: Session) -> int:
     daneben stehen haben, wer sie wann gerissen hat und warum.
 
     Ohne commit, wie audit() auch: der Aufrufer schliesst die Transaktion.
+
+    EIN Loeschbefehl, nicht einer je Zeile (F-67, Pruefung vom
+    2026-09-05). Die erste Fassung holte alle faelligen Zeilen als Objekte
+    und rief session.delete() darauf auf. Nachgemessen, dieselbe Maschine,
+    dieselbe Datenbank:
+
+        Eintraege   Zeile fuer Zeile   ein Befehl
+             5 000        0,12 s          0,02 s
+            20 000        0,68 s          0,05 s
+            50 000        1,89 s          0,17 s
+           200 000        6,62 s          0,49 s
+
+    Das laeuft nicht im Hintergrund, sondern INNERHALB der Anfrage, die
+    zufaellig die erste nach Ablauf des Tages ist - und haelt so lange die
+    Schreibsperre von SQLite. Sechseinhalb Sekunden, in denen keine andere
+    Anfrage schreiben kann, ist ein Ausfall, auch wenn er nur einmal
+    vorkommt. Und einmal vorkommen wird er: beim allerersten Lauf auf
+    einer Anlage, die laenger als die Frist in Betrieb ist, faellt der
+    gesamte Ueberhang auf einmal an.
+
+    Der Speicher war nie das Problem (gemessen: unter 1 MiB, SQLAlchemy
+    liefert die Zeilen stueckweise). Es war die Zahl der Befehle.
+
+    synchronize_session=False, weil die Sitzung des Aufrufers zu diesem
+    Zeitpunkt eigene Objekte offen hat: SQLAlchemy soll die geloeschten
+    Zeilen nicht in seinem Gedaechtnis nachfuehren, sondern die Datenbank
+    entscheiden lassen. Gelesen wird hier ohnehin nichts davon.
     """
     if AUDIT_DAYS <= 0:
         return 0
     grenze = utcnow() - timedelta(days=AUDIT_DAYS)
-    alt = session.exec(
-        select(AuditEntry).where(AuditEntry.at < grenze)
-    ).all()
-    if not alt:
+    ergebnis = session.exec(
+        delete(AuditEntry).where(AuditEntry.at < grenze)
+        .execution_options(synchronize_session=False))
+    anzahl = ergebnis.rowcount or 0
+    if not anzahl:
         return 0
-    for zeile in alt:
-        session.delete(zeile)
     session.add(AuditEntry(
         actor="system", action="audit.pruned",
-        detail=f"{len(alt)} Eintraege aelter als {AUDIT_DAYS} Tage entfernt",
+        detail=f"{anzahl} Eintraege aelter als {AUDIT_DAYS} Tage entfernt",
         from_ip=None))
-    return len(alt)
+    return anzahl
 
 
 def audit(session: Session, actor: str, action: str,

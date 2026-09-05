@@ -146,6 +146,46 @@ check("genau deshalb steht scrypt davor",
 
 
 # ======================================================================
+# Eine beschaedigte Kopfzeile (F-67 der Pruefung vom 2026-09-05)
+# ======================================================================
+print()
+print("--- Beschaedigte Kopfzeile ---")
+# Bis 0.37.21 kam hier ein nackter Rueckverfolg heraus: KeyError 'salt',
+# "invalid literal for int()". Das ist der schlechteste denkbare
+# Zeitpunkt fuer eine unverstaendliche Meldung - wer hier steht, versucht
+# gerade an den wertvollsten Schluessel zu kommen, den er besitzt,
+# vermutlich nach einem Plattenschaden.
+_ENDE = b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n"
+_kaputt = {
+    "salt fehlt":            b"# CO-37 scrypt n=16384 r=8 p=5\n" + _ENDE,
+    "n fehlt":               b"# CO-37 scrypt r=8 p=5 salt=" + b"aa" * 16 + b"\n" + _ENDE,
+    "salt ist kein Hex":     b"# CO-37 scrypt n=16384 r=8 p=5 salt=zzzz\n" + _ENDE,
+    "n ist keine Zahl":      b"# CO-37 scrypt n=viel r=8 p=5 salt=" + b"aa" * 16 + b"\n" + _ENDE,
+    "n ist absurd gross":    b"# CO-37 scrypt n=1073741824 r=8 p=5 salt=" + b"aa" * 16 + b"\n" + _ENDE,
+    "n keine Zweierpotenz":  b"# CO-37 scrypt n=16385 r=8 p=5 salt=" + b"aa" * 16 + b"\n" + _ENDE,
+    "Salz zu kurz":          b"# CO-37 scrypt n=16384 r=8 p=5 salt=aabb\n" + _ENDE,
+}
+for _name, _roh in _kaputt.items():
+    try:
+        schluessel.behaelter_passwort(_roh, b"passphrase", "/pfad/zur/datei.pem")
+        _erg = "durchgelaufen, keine Meldung"
+    except SystemExit as e:
+        _erg = str(e)
+    except Exception as e:  # noqa: BLE001
+        _erg = f"ROHE AUSNAHME {type(e).__name__}: {e}"
+    check(f"{_name}: verstaendliche Meldung statt Rueckverfolg",
+          isinstance(_erg, str) and not _erg.startswith("ROHE")
+          and _erg != "durchgelaufen, keine Meldung",
+          _erg.splitlines()[0][:70] if isinstance(_erg, str) else _erg)
+    check(f"{_name}: die Meldung nennt die Datei",
+          isinstance(_erg, str) and "/pfad/zur/datei.pem" in _erg)
+
+# Und die Gegenprobe: eine heile Kopfzeile geht weiterhin durch.
+check("eine heile Kopfzeile wird nicht abgewiesen",
+      schluessel.behaelter_passwort(zu, PW, "/pfad") == abgeleitet)
+
+
+# ======================================================================
 # Laden ueber die Umgebung und die Fehlermeldung
 # ======================================================================
 print()

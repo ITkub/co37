@@ -143,6 +143,48 @@ check("und nichts vermerkt",
 
 
 # ======================================================================
+# Ein Loeschbefehl, nicht einer je Zeile (F-67)
+# ======================================================================
+print()
+print("--- Ein Befehl statt tausend ---")
+# Die erste Fassung holte jede faellige Zeile als Objekt und rief
+# session.delete() darauf auf. Gemessen: 200 000 Eintraege brauchten
+# 6,62 s statt 0,49 s - und zwar INNERHALB der Anfrage, die zufaellig die
+# erste nach Ablauf des Tages ist, mit der Schreibsperre von SQLite in
+# der Hand.
+#
+# Gezaehlt wird hier, was wirklich an die Datenbank geht. Eine Pruefung
+# auf "steht delete( im Quelltext" saehe dasselbe und wuesste nichts.
+from sqlalchemy import event  # noqa: E402
+
+befehle = []
+
+
+def _mitschreiben(conn, cursor, anweisung, parameter, kontext, viele):
+    if anweisung.lstrip().upper().startswith("DELETE"):
+        befehle.append(anweisung)
+
+
+leeren()
+for _ in range(50):
+    eintrag(400)
+event.listen(main.engine, "before_cursor_execute", _mitschreiben)
+try:
+    with Session(main.engine) as s:
+        entfernt = main.pruefprotokoll_bereinigen(s)
+        s.commit()
+finally:
+    event.remove(main.engine, "before_cursor_execute", _mitschreiben)
+check("fuenfzig Eintraege sind weg", entfernt == 50, entfernt)
+check("dafuer ging genau EIN Loeschbefehl an die Datenbank",
+      len(befehle) == 1, f"{len(befehle)} Befehle")
+check("und der loescht ueber eine Bedingung, nicht ueber eine Kennung",
+      bool(befehle) and " WHERE " in befehle[0].upper()
+      and "id" not in befehle[0].split("WHERE")[-1],
+      befehle[0].replace("\n", " ")[:90] if befehle else "")
+
+
+# ======================================================================
 # Abschalten
 # ======================================================================
 print()

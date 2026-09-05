@@ -174,6 +174,85 @@ landet im `server`-Abschnitt genau dieses Hosts; andere Proxy Hosts
 bleiben unberührt. Ab Werk setzt NPM global `client_max_body_size 0;`,
 also unbegrenzt — ohne diesen Eintrag gibt es im Proxy gar keine Grenze.
 
+---
+
+## Der Proxy darf `X-Forwarded-For` nicht von jedem glauben
+
+**Das ist die gefährlichste Einstellung auf dieser Seite.** Am 2026-09-05
+auf der eigenen Anlage nachgemessen und in drei Zeilen belegt (F-66).
+
+Nginx kann die Absenderadresse einer Anfrage durch den Inhalt von
+`X-Forwarded-For` ersetzen. Ob es das tut, hängt an `set_real_ip_from` —
+der Liste der Quellen, denen dabei geglaubt wird. **Nginx Proxy Manager
+und NPMplus liefern diese Liste ab Werk mit allen privaten Netzen:**
+
+```nginx
+real_ip_recursive on;
+real_ip_header X-Forwarded-For;
+set_real_ip_from 127.0.0.0/8;
+set_real_ip_from 10.0.0.0/8;
+set_real_ip_from 172.16.0.0/12;
+set_real_ip_from 192.168.0.0/16;
+```
+
+Damit darf **jedes Gerät in irgendeinem privaten Netz**, das den Proxy
+erreicht, seine eigene Adresse frei bestimmen. Was daran hängt:
+
+- **Jede IP-Beschränkung am Proxy** (`allow 192.168.2.0/24; deny all;`)
+  wird gegen die ERSETZTE Adresse geprüft — also gegen die, die der
+  Aufrufer selbst geschickt hat.
+- **Die Drosselung der Anmeldung in CO-37.** Sie zählt je Adresse. Wer
+  die Adresse wechseln kann, hat keine Grenze mehr: statt fünf Versuchen
+  je Viertelstunde sind es fünf **je erfundener Adresse**.
+- **Das Prüfprotokoll.** Es hält fest, was der Aufrufer behauptet hat.
+
+Nachgemessen, alle drei Aufrufe aus demselben Container, alle drei
+tatsächlich von `127.0.0.1`:
+
+```
+ohne Kopfzeile                        -> 403   (allow-Liste greift)
+X-Forwarded-For: 192.168.2.99         -> 200   (allow-Liste umgangen)
+X-Forwarded-For: 8.8.8.8              -> 403   (die erfundene wird geprüft)
+```
+
+Und im Prüfprotokoll von CO-37 standen anschließend zwei fehlgeschlagene
+Anmeldungen von `192.168.2.99` und `192.168.2.123` — zwei Adressen, die
+es nicht gibt.
+
+**Das ist derselbe Fehler wie F-58, eine Schicht höher.** Dort glaubte
+uvicorn die Kopfzeile an CO-37 vorbei; das ist seit 0.37.15 mit
+`--no-proxy-headers` abgestellt. Hier glaubt sie der Proxy — und CO-37
+kann nichts dagegen tun: es vertraut dem Proxy zu Recht, der Proxy ist
+belogen worden.
+
+### Was zu tun ist
+
+`set_real_ip_from` darf **nur** die Adressen enthalten, von denen
+tatsächlich ein vorgeschalteter Proxy kommt. Steht nginx selbst am Rand
+des Netzes — der Normalfall — gehört die Liste **leer**. Dann ist
+`$remote_addr` die echte Socket-Adresse, und keine Kopfzeile kann daran
+etwas ändern.
+
+Bei NPMplus steht die Liste in der globalen `nginx.conf` des Containers
+und lässt sich nicht in der Oberfläche ändern; sie gehört über einen
+eigenen Konfigurationsschnipsel überschrieben oder beim Anbieter
+angesprochen.
+
+### Gegenprobe
+
+Vom Proxy selbst, mit einer Adresse aus der erlaubten Liste:
+
+```
+curl -sk -o /dev/null -w "%{http_code}\n" \
+  -H "X-Forwarded-For: <eine erlaubte Adresse>" \
+  https://<dein-host>/api/health
+```
+
+**403 ist richtig.** Kommt 200, glaubt der Proxy die Kopfzeile, und jede
+IP-Beschränkung davor ist Zierde.
+
+---
+
 **Zeitüberschreitung:** Die längste Anfrage ist die Freigabe eines
 Neustarts, die dabei eine Downtime in Checkmk setzt. Sechzig Sekunden
 genügen, bei sehr vielen Checkmk-Hosts eher hundertzwanzig.
