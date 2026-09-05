@@ -104,6 +104,13 @@ VERBOTEN = [
     ("GET",    "/api/v1/install-script", None),
     ("GET",    "/api/v1/agent-rollout", None),
     ("POST",   "/api/v1/agent-rollout/start", {}),
+    # Weiterleitung an eine zentrale Protokollierung. Schwerer als es
+    # aussieht: wer sie abschalten kann, nimmt die Aufsicht weg, und wer
+    # die Zieladresse setzt, lenkt jeden Protokolleintrag - inklusive
+    # Benutzernamen und Adressen - auf einen Rechner seiner Wahl.
+    ("GET",    "/api/v1/syslog-settings", None),
+    ("POST",   "/api/v1/syslog-settings", {"host": "127.0.0.1"}),
+    ("POST",   "/api/v1/syslog-settings/test", {}),
     ("GET",    "/api/v1/diagnostics", None),
     ("GET",    "/api/v1/watcher", None),
     ("GET",    "/api/v1/schema", None),

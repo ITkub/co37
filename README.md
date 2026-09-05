@@ -859,6 +859,72 @@ einem überlangen Benutzernamen an der Anmeldung vollschreiben.
 
 ---
 
+# Weiterleitung an eine zentrale Protokollierung
+
+**Einstellungen → Protokollierung.** Ab Werk **aus**.
+
+CO-37 schrieb bis 0.37.22 ausschließlich in die eigene Datenbank. Für ein
+einzelnes kleines Netz reicht das; in einem Betrieb mit Logserver oder
+SIEM ist es der Unterschied zwischen einsetzbar und nicht einsetzbar.
+Zwei BSI-Bausteine verlangen es ausdrücklich — OPS.1.1.5.A6 und
+OPS.1.1.7.A15.
+
+| Feld | Bedeutung |
+|---|---|
+| Ziel, Port | Adresse des Logservers, Vorgabe 514 |
+| Übertragung | `udp`, `tcp` oder `tls` |
+| Facility | `local0` … `local7`, `auth`, `authpriv`, `daemon`, `user` |
+| Zertifikat prüfen | nur bei `tls`; **an** lassen, außer der Logserver hat ein eigenes Zertifikat |
+
+**Format ist RFC 5424**, nicht das ältere RFC 3164 — dem fehlen Jahr und
+Zeitzone im Zeitstempel, und CO-37 arbeitet durchgängig in UTC. Bei `tcp`
+und `tls` mit vorangestellter Länge nach RFC 6587, damit der Empfänger
+weiß, wo eine Meldung endet.
+
+```
+<131>1 2026-09-05T12:00:00.000000Z kk-ops01 co37 - login.failed
+  [co37@0 actor="mike" src="192.168.2.10"] Anmeldung fehlgeschlagen
+```
+
+Die Felder stehen einzeln in den strukturierten Daten, damit ein SIEM sie
+ohne Textzerlegung findet.
+
+**Was hinausgeht:** jeder Eintrag des Prüfprotokolls und jedes
+abgeschlossene Auftragsereignis (erledigt, fehlgeschlagen, abgebrochen).
+**Nicht** die Auftragsprotokolle selbst — ein `apt upgrade` erzeugt
+tausende Zeilen je Host, das flutet jedes SIEM und kostet dort Geld nach
+Datenvolumen. Die stehen weiterhin als Datei bereit.
+
+**Der Knopf „Testen"** stellt eine Meldung sofort zu und sagt, ob sie
+durchging. Das ist die einzige Stelle, an der synchron gesendet wird.
+
+## Was passiert, wenn der Logserver weg ist
+
+**Nichts, was du merkst.** Das ist keine Nebensache, sondern die Regel,
+nach der das gebaut ist: Meldungen gehen in eine Warteschlange, ein
+eigener Faden stellt zu. Der Aufrufer wartet nie.
+
+Gemessen gegen einen Server, der absichtlich nicht antwortet: **4
+Mikrosekunden je Meldung**. Ohne diese Trennung wären es 100 Millisekunden
+— eine Anmeldung, die zwei Minuten braucht, weil ein Logserver neu
+startet, wäre ein selbst gebautes Verfügbarkeitsproblem.
+
+**Die Warteschlange ist auf 5000 Einträge begrenzt und wirft bei Überlauf
+weg.** Bewusst so: eine unbegrenzte Warteschlange frisst bei einem
+tagelang toten Logserver den Arbeitsspeicher und nimmt das Backend mit.
+Ein verlorener Protokolleintrag ist ärgerlich, ein Backend, das wegen der
+Protokollierung stirbt, ist ein Ausfall.
+
+Wie viele verloren gingen, wird gezählt und beim nächsten erfolgreichen
+Kontakt **selbst gemeldet** (`queue.dropped`). Eine stille Lücke wäre das
+Schlechteste von beidem. Der Zähler steht auch in der Oberfläche.
+
+**Das Prüfprotokoll in der Datenbank bleibt die Wahrheit**, die
+Weiterleitung ist die Kopie. Geht die Kopie schief, ändert das am
+Eintrag nichts.
+
+---
+
 # Wenn du dich aussperrst
 
 Drei Fälle: das einzige Administratorkonto ist deaktiviert, das Passwort ist

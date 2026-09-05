@@ -36,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import joblog
+import syslogfwd
 import license
 import migrate
 import update_manager
@@ -131,6 +132,7 @@ async def lifespan(app: FastAPI):
             # Proxy-Einstellungen in den Zwischenspeicher: sie werden bei
             # jeder einzelnen Anfrage gebraucht.
             load_proxy_config(session)
+            load_syslog_config(session)
             load_license(session)
     except Exception as exc:  # noqa: BLE001
         print(f"Startbenutzer konnte nicht angelegt werden: {exc}", flush=True)
@@ -658,6 +660,16 @@ SET_LICENSE = "license_key"
 # gewaehlt haben, und fuer die Anmeldeseite - dort ist noch kein Benutzer
 # bekannt. Englisch ist die Vorgabe der Vorgabe.
 SET_LANGUAGE = "default_language"
+
+# Weiterleitung an eine zentrale Protokollierung (OPS.1.1.5.A6,
+# OPS.1.1.7.A15). Ab Werk aus - eine Anlage ohne Logserver soll nicht
+# gegen eine Adresse laufen, die es nicht gibt.
+SET_SYSLOG_ON = "syslog_enabled"
+SET_SYSLOG_HOST = "syslog_host"
+SET_SYSLOG_PORT = "syslog_port"
+SET_SYSLOG_TRANSPORT = "syslog_transport"
+SET_SYSLOG_FACILITY = "syslog_facility"
+SET_SYSLOG_VERIFY = "syslog_verify"
 SPRACHEN = ("en", "de")
 
 
@@ -1172,6 +1184,44 @@ def pruefprotokoll_bereinigen(session: Session) -> int:
     return anzahl
 
 
+def load_syslog_config(session: Session):
+    """
+    Einstellungen aus der Datenbank in den Dienst uebernehmen.
+
+    Wird beim Start und nach jeder Aenderung aufgerufen - wie
+    load_proxy_config(). Der Faden laeuft weiter, er liest die Werte bei
+    jedem Durchlauf frisch.
+    """
+    try:
+        syslogfwd.DIENST.einstellen(
+            aktiv=_setting(session, SET_SYSLOG_ON, "false") == "true",
+            ziel=_setting(session, SET_SYSLOG_HOST, "") or "",
+            port=int(_setting(session, SET_SYSLOG_PORT, "514") or 514),
+            transport=_setting(session, SET_SYSLOG_TRANSPORT, "udp"),
+            facility=_setting(session, SET_SYSLOG_FACILITY, "local0"),
+            pruefe_zertifikat=_setting(session, SET_SYSLOG_VERIFY, "true") != "false")
+    except Exception as exc:  # noqa: BLE001
+        print(f"syslog-Einstellungen nicht uebernommen: {exc}", flush=True)
+
+
+# Welche Vorgaenge wie schwer wiegen. Alles, was nicht hier steht, geht
+# als 'notice' hinaus. Die Einstufung folgt der Frage "will das jemand
+# um drei Uhr nachts sehen?", nicht der Frage "ist das interessant".
+SYSLOG_SEVERITY = {
+    "login.failed": "error",
+    "login.locked": "error",
+    "user.role-set": "critical",
+    "user.created": "critical",
+    "user.deleted": "critical",
+    "token.revoked": "critical",
+    "proxy.trusted-set": "critical",
+    "update.trigger": "critical",
+    "audit.pruned": "warning",
+    "job.failed": "error",
+    "host.unreachable": "error",
+}
+
+
 def audit(session: Session, actor: str, action: str,
           detail: str = None, request: Request = None):
     """
@@ -1203,11 +1253,23 @@ def audit(session: Session, actor: str, action: str,
             print(f"Pruefprotokoll konnte nicht bereinigt werden: {exc}",
                   flush=True)
 
+    ip = client_ip(request)
     session.add(AuditEntry(
         actor=kurz(actor, AUDIT_ACTOR_MAX),
         action=kurz(action, AUDIT_ACTION_MAX),
         detail=None if detail is None else kurz(detail, AUDIT_DETAIL_MAX),
-        from_ip=client_ip(request)))
+        from_ip=ip))
+
+    # Und hinaus an die zentrale Protokollierung. Steht ABSICHTLICH nach
+    # dem session.add: der Eintrag in der eigenen Datenbank ist die
+    # Wahrheit, die Weiterleitung ist die Kopie. Geht die Kopie schief,
+    # darf das an der Wahrheit nichts aendern - melden() wirft deshalb
+    # nie und legt nur in eine Warteschlange ab.
+    syslogfwd.DIENST.melden(
+        action, detail or action,
+        severity=SYSLOG_SEVERITY.get(action, "notice"),
+        zeitpunkt=utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        actor=actor, src=ip)
 
 
 class Principal:
@@ -3124,6 +3186,24 @@ async def agent_report(
         job.finished_at = utcnow()
     session.add(job)
 
+    # An die zentrale Protokollierung (OPS.1.1.7.A15 nennt "Ausfall sowie
+    # Nichterreichbarkeit von zu verwaltenden Systemen" ausdruecklich).
+    #
+    # Auftragsereignisse laufen NICHT ueber audit(): das Pruefprotokoll
+    # haelt fest, was ein Mensch veranlasst hat, nicht was eine Maschine
+    # gemeldet hat. Wuerde jeder Auftragsabschluss dort landen, saehe man
+    # vor lauter Betrieb die Rechteaenderungen nicht mehr. Der Logserver
+    # will beides - deshalb hier ein eigener Weg.
+    if payload.state in (JobState.done, JobState.failed, JobState.cancelled):
+        syslogfwd.DIENST.melden(
+            f"job.{payload.state.value}",
+            f"Auftrag {job.job_type.value} auf {host.hostname}: "
+            f"{payload.state.value}",
+            severity="error" if payload.state is JobState.failed else "notice",
+            zeitpunkt=utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            host=host.hostname, job=job.id, type=job.job_type.value,
+            error=(job.error or "")[:200] or None)
+
     if payload.reboot_required is not None:
         host.reboot_required = payload.reboot_required
         session.add(host)
@@ -3213,6 +3293,13 @@ def agent_notice(
     job.log = _bericht_text((job.log or "") + "\n" + payload.message)
     job.result = _bericht_result({**(job.result or {}), **payload.result})
     session.add(job)
+    syslogfwd.DIENST.melden(
+        "job.failed",
+        f"Selbstaktualisierung auf {host.hostname} fehlgeschlagen",
+        severity="error",
+        zeitpunkt=utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        host=host.hostname, job=job.id, type="selfupdate",
+        error=_bericht_text(payload.message)[:200] or None)
     session.commit()
     return {"ok": True, "attached": True, "job_id": job.id}
 
@@ -5400,6 +5487,114 @@ def set_proxy_settings(payload: ProxySettings, request: Request,
     session.commit()
     load_proxy_config(session)
     return get_proxy_settings(request, session)
+
+
+class SyslogSettings(BaseModel):
+    enabled: Optional[bool] = None
+    # 253 ist die Obergrenze fuer einen DNS-Namen. Begrenzt wie jedes
+    # andere Textfeld auch (F-63) - der Wert landet in der Datenbank und
+    # in Protokolleintraegen.
+    host: Optional[Annotated[str, PydField(max_length=253)]] = None
+    port: Optional[Annotated[int, PydField(ge=1, le=65535)]] = None
+    transport: Optional[Text] = None
+    facility: Optional[Text] = None
+    verify_tls: Optional[bool] = None
+
+
+@app.get("/api/v1/syslog-settings", dependencies=[Depends(require_admin)])
+def get_syslog_settings(session: Session = Depends(get_session)):
+    return {
+        "enabled": _setting(session, SET_SYSLOG_ON, "false") == "true",
+        "host": _setting(session, SET_SYSLOG_HOST, "") or "",
+        "port": int(_setting(session, SET_SYSLOG_PORT, "514") or 514),
+        "transport": _setting(session, SET_SYSLOG_TRANSPORT, "udp"),
+        "facility": _setting(session, SET_SYSLOG_FACILITY, "local0"),
+        "verify_tls": _setting(session, SET_SYSLOG_VERIFY, "true") != "false",
+        # Zaehler aus dem laufenden Dienst, nicht aus der Datenbank:
+        # verworfene Meldungen sind ein Betriebszustand, kein Zustand der
+        # Anlage. Nach einem Neustart faengt er bei null an, und das ist
+        # richtig so.
+        "dropped": syslogfwd.DIENST.verworfen,
+        "queue": syslogfwd.DIENST.warteschlange.qsize(),
+    }
+
+
+@app.post("/api/v1/syslog-settings", dependencies=[Depends(require_admin)])
+def set_syslog_settings(payload: SyslogSettings, request: Request,
+                        who: Principal = Depends(require_admin),
+                        session: Session = Depends(get_session)):
+    if payload.transport is not None and payload.transport not in ("udp", "tcp", "tls"):
+        raise HTTPException(400, "transport muss udp, tcp oder tls sein.")
+    if payload.facility is not None and payload.facility not in syslogfwd.FACILITIES:
+        raise HTTPException(
+            400, "Unbekannte facility: " + ", ".join(syslogfwd.FACILITIES))
+
+    if payload.host is not None:
+        set_setting(session, SET_SYSLOG_HOST, payload.host.strip())
+    if payload.port is not None:
+        set_setting(session, SET_SYSLOG_PORT, str(payload.port))
+    if payload.transport is not None:
+        set_setting(session, SET_SYSLOG_TRANSPORT, payload.transport)
+    if payload.facility is not None:
+        set_setting(session, SET_SYSLOG_FACILITY, payload.facility)
+    if payload.verify_tls is not None:
+        set_setting(session, SET_SYSLOG_VERIFY,
+                    "true" if payload.verify_tls else "false")
+
+    if payload.enabled is not None:
+        ziel = _setting(session, SET_SYSLOG_HOST, "") or ""
+        if payload.enabled and not ziel:
+            raise HTTPException(400, "Ohne Zieladresse laesst sich die "
+                                     "Weiterleitung nicht einschalten.")
+        set_setting(session, SET_SYSLOG_ON, "true" if payload.enabled else "false")
+        # Wer die Weiterleitung abschaltet, nimmt die Aufsicht weg. Das
+        # gehoert ins Pruefprotokoll, und zwar schwer gewichtet.
+        audit(session, who.name,
+              "syslog.on" if payload.enabled else "syslog.off",
+              f"{_setting(session, SET_SYSLOG_TRANSPORT, 'udp')}://{ziel}:"
+              f"{_setting(session, SET_SYSLOG_PORT, '514')}", request)
+
+    session.commit()
+    load_syslog_config(session)
+    return get_syslog_settings(session)
+
+
+@app.post("/api/v1/syslog-settings/test", dependencies=[Depends(require_admin)])
+def test_syslog(request: Request, who: Principal = Depends(require_admin),
+                session: Session = Depends(get_session)):
+    """
+    Eine Testmeldung schicken und sagen, ob sie durchging.
+
+    Anders als melden() wird hier SYNCHRON zugestellt und der Fehler
+    zurueckgegeben. Das ist der einzige Ort, an dem das richtig ist: wer
+    auf "Testen" drueckt, wartet auf genau diese Antwort. Ueberall sonst
+    waere Warten ein Fehler.
+    """
+    d = syslogfwd.DIENST
+    ziel = _setting(session, SET_SYSLOG_HOST, "") or ""
+    if not ziel:
+        raise HTTPException(400, "Keine Zieladresse eingetragen.")
+    # Einstellungen uebernehmen, auch wenn noch nicht eingeschaltet -
+    # sonst kann man nicht testen, bevor man scharf schaltet.
+    d.einstellen(
+        aktiv=True, ziel=ziel,
+        port=int(_setting(session, SET_SYSLOG_PORT, "514") or 514),
+        transport=_setting(session, SET_SYSLOG_TRANSPORT, "udp"),
+        facility=_setting(session, SET_SYSLOG_FACILITY, "local0"),
+        pruefe_zertifikat=_setting(session, SET_SYSLOG_VERIFY, "true") != "false")
+    roh = syslogfwd.bauen(
+        d.facility, "notice", utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        d.quelle, "syslog.test", {"actor": who.name},
+        f"CO-37 Testmeldung von {who.name}")
+    d._schliessen()
+    d._letzter_fehlversuch = 0.0
+    ok = d._senden(roh)
+    load_syslog_config(session)
+    if not ok:
+        raise HTTPException(
+            502, f"Die Testmeldung ging nicht durch. {d.transport}://"
+                 f"{d.ziel}:{d.port} nicht erreichbar oder abgewiesen.")
+    return {"ok": True, "sent": f"{d.transport}://{d.ziel}:{d.port}"}
 
 
 @app.get("/api/v1/install-token")
