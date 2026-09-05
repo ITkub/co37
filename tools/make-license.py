@@ -47,7 +47,17 @@ except ImportError:
 # entfernt - und ein einmal eingecheckter Schluessel ist praktisch nicht
 # mehr aus der Historie zu entfernen.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import schluessel  # noqa: E402
+# Als 'werkzeug' und nicht unter seinem eigenen Namen: in dieser Datei
+# heisst eine lokale Variable an mehreren Stellen 'schluessel' - und das
+# ist auch der richtige Name dafuer, ein Lizenzschluessel IST einer.
+#
+# Python entscheidet aber je FUNKTION anhand der Zuweisungen, ob ein Name
+# lokal ist, nicht anhand der Reihenfolge im Text. Eine Zuweisung ganz
+# unten macht den Namen fuer die ganze Funktion lokal - auch fuer eine
+# Verwendung dreissig Zeilen darueber. Genau daran ist --verschluesseln
+# beim ersten Einsatz gescheitert (UnboundLocalError), obwohl die
+# Zuweisung in einem Zweig stand, der gar nicht durchlaufen wurde.
+import schluessel as werkzeug  # noqa: E402
 
 HOME = Path(os.environ.get("CO37_LICENSE_HOME", Path.home() / ".co37"))
 PRIVAT = HOME / "license-private.pem"
@@ -97,7 +107,7 @@ def lade_privat() -> Ed25519PrivateKey:
     if not PRIVAT.is_file():
         sys.exit(f"Kein privater Schluessel unter {PRIVAT}.\n"
                  f"Erst erzeugen:  python make-license.py --init")
-    return schluessel.laden(PRIVAT, UMGEBUNG, ZWECK)
+    return werkzeug.laden(PRIVAT, UMGEBUNG, ZWECK)
 
 
 def init():
@@ -127,9 +137,9 @@ def init():
 
     print("Dieser Schluessel wird mit einer Passphrase geschuetzt.")
     print("Mehrere zufaellige Woerter, mindestens "
-          f"{schluessel.MIN_LEN} Zeichen.")
-    pw = schluessel.passphrase_fragen(ZWECK, bestaetigen=True)
-    schluessel.schluessel_schreiben(PRIVAT, schluessel.als_pem(privat, pw))
+          f"{werkzeug.MIN_LEN} Zeichen.")
+    pw = werkzeug.passphrase_fragen(ZWECK, bestaetigen=True)
+    werkzeug.schluessel_schreiben(PRIVAT, werkzeug.als_pem(privat, pw))
 
     roh = privat.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
@@ -368,7 +378,7 @@ def sicherung():
     # Entschluesselt: eine Papiersicherung, zu der man zusaetzlich die
     # Passphrase braucht, ist keine Sicherung. Der Zettel gehoert dafuer
     # in den Safe.
-    roh = schluessel.als_pem(lade_privat()).decode("ascii")
+    roh = werkzeug.als_pem(lade_privat()).decode("ascii")
 
     pruefsumme = sha256(roh.encode("ascii")).hexdigest()[:16]
     print("=" * 68)
@@ -463,7 +473,7 @@ def main():
     if a.init:
         return init()
     if a.verschluesseln:
-        return schluessel.verschluesseln(
+        return werkzeug.verschluesseln(
             PRIVAT, UMGEBUNG, ZWECK, "Der Lizenzschluessel")
     if a.sicherung:
         return sicherung()
@@ -541,13 +551,19 @@ def main():
         if input("Trotzdem ausstellen? [ja/nein] ").strip().lower() != "ja":
             sys.exit("Abgebrochen.")
 
-    schluessel = ausstellen(a.kunde, hosts, a.jahre, a.unbefristet, ab=beginn)
+    # 'lizenz' und nicht 'schluessel': seit 0.37.21 gibt es das Modul
+    # tools/schluessel.py, und eine gleichnamige lokale Variable macht den
+    # Modulnamen in DIESER Funktion unbrauchbar - Python entscheidet
+    # anhand der Zuweisung, nicht anhand der Reihenfolge. Der Aufruf von
+    # werkzeug.verschluesseln() weiter oben scheiterte deshalb mit
+    # UnboundLocalError, obwohl er lange vor dieser Zeile steht.
+    lizenz = ausstellen(a.kunde, hosts, a.jahre, a.unbefristet, ab=beginn)
     print()
-    zeigen(schluessel)
+    zeigen(lizenz)
     print()
     print("Diesen Schluessel an den Kunden geben:")
     print()
-    print(f"  {schluessel}")
+    print(f"  {lizenz}")
     print()
     print(f"Im Register vermerkt: {REGISTER}")
 

@@ -323,6 +323,137 @@ check("--sicherung gibt den ENTSCHLUESSELTEN Schluessel aus",
 
 
 # ======================================================================
+# --verschluesseln von aussen, fuer BEIDE Werkzeuge
+# ======================================================================
+print()
+print("--- --verschluesseln, beide Werkzeuge ---")
+# Diese Pruefung fehlte bei der ersten Fassung, und der Fehler kam
+# prompt: tools/make-license.py hat an mehreren Stellen eine lokale
+# Variable 'schluessel' - und Python entscheidet je Funktion anhand der
+# ZUWEISUNGEN, ob ein Name lokal ist, nicht anhand der Reihenfolge im
+# Text. Der Aufruf schluessel.verschluesseln() ganz oben in main()
+# scheiterte deshalb mit UnboundLocalError, obwohl die Zuweisung in einem
+# Zweig steht, der bei --verschluesseln gar nicht durchlaufen wird.
+#
+# Die Modulfunktion allein zu pruefen genuegte nicht. Nur der Aufruf von
+# aussen, so wie ein Mensch ihn tippt, faengt so etwas.
+#
+# Keine gleichnamige lokale Variable mehr - das ist die allgemeine Regel,
+# nicht nur der eine Fall.
+import ast as _ast  # noqa: E402
+
+for _werkzeug in ("sign-release.py", "make-license.py"):
+    _q = (WURZEL / "tools" / _werkzeug).read_text(encoding="utf-8")
+    _baum = _ast.parse(_q)
+    _modul = [n.names[0].asname or n.names[0].name for n in _ast.walk(_baum)
+              if isinstance(n, _ast.Import)
+              and n.names[0].name == "schluessel"]
+    _kollision = []
+    for _k in _ast.walk(_baum):
+        if not isinstance(_k, _ast.FunctionDef):
+            continue
+        _lokale = {t.id for n in _ast.walk(_k) if isinstance(n, _ast.Assign)
+                   for t in n.targets if isinstance(t, _ast.Name)}
+        if set(_modul) & _lokale:
+            _kollision.append(_k.name)
+    check(f"{_werkzeug}: keine lokale Variable verdeckt das Modul",
+          not _kollision, _kollision)
+
+if os.name != "posix":
+    print("      (die Laeufe darunter brauchen ein Pseudoterminal - "
+          "unter Windows uebersprungen)")
+else:
+    import pty as _pty      # noqa: E402
+    import select as _sel   # noqa: E402
+    import time as _zeit    # noqa: E402
+
+    def unter_tty(befehl, antworten, umgebung=None, grenze=120):
+        """
+        Einen Aufruf mit echtem Terminal fahren und auf jede Frage nach
+        einer Passphrase die naechste Antwort tippen.
+
+        Ohne Pseudoterminal geht das nicht: die Werkzeuge brechen ohne
+        Terminal ab, und genau das sollen sie.
+        """
+        umg = dict(os.environ, **(umgebung or {}))
+        pid, fd = _pty.fork()
+        if pid == 0:
+            os.environ.clear()
+            os.environ.update(umg)
+            os.execvp(sys.executable, [sys.executable, *befehl])
+            os._exit(1)
+        aus = b""
+        offen = list(antworten)
+        gesehen = 0
+        ende = _zeit.time() + grenze
+        while _zeit.time() < ende:
+            r, _, _ = _sel.select([fd], [], [], 1.0)
+            if r:
+                try:
+                    teil = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not teil:
+                    break
+                aus += teil
+                fragen = aus.count(b"assphrase") + aus.count(b"Noch einmal")
+                while offen and fragen > gesehen:
+                    _zeit.sleep(0.2)
+                    os.write(fd, offen.pop(0).encode() + b"\n")
+                    gesehen += 1
+            else:
+                w, st = os.waitpid(pid, os.WNOHANG)
+                if w:
+                    return os.waitstatus_to_exitcode(st), aus.decode(errors="replace")
+        try:
+            _, st = os.waitpid(pid, 0)
+        except ChildProcessError:
+            st = 0
+        return os.waitstatus_to_exitcode(st), aus.decode(errors="replace")
+
+    ALT = "die alte passphrase hier"
+    NEU2 = "die neue passphrase hier"
+
+    for _werkzeug, _datei, _umg in (
+            ("sign-release.py", "release-private.pem", "CO37_RELEASE_PASSPHRASE"),
+            ("make-license.py", "license-private.pem", "CO37_LICENSE_PASSPHRASE")):
+        _pfad = TMP / _datei
+        _k = Ed25519PrivateKey.generate()
+        _oeff = _k.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        _pfad.unlink(missing_ok=True)
+        schluessel.schluessel_schreiben(_pfad, schluessel.als_pem(_k, ALT.encode()))
+
+        _code, _aus = unter_tty(
+            [str(WURZEL / "tools" / _werkzeug), "--verschluesseln"],
+            [NEU2, NEU2], {_umg: ALT, "CO37_LICENSE_HOME": str(TMP)})
+        check(f"{_werkzeug} --verschluesseln laeuft durch",
+              _code == 0, _aus.strip()[-200:])
+        check(f"{_werkzeug}: die Datei ist danach verschluesselt",
+              schluessel.ist_verschluesselt(_pfad.read_bytes()))
+
+        os.environ["CO37_TEST_PW"] = NEU2
+        try:
+            _neu = schluessel.laden(_pfad, "CO37_TEST_PW", "zum Test")
+            _passt = _neu.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw) == _oeff
+        except SystemExit as e:
+            _passt = str(e)
+        check(f"{_werkzeug}: dieselbe Schluesselzahl, neue Passphrase",
+              _passt is True, _passt)
+
+        os.environ["CO37_TEST_PW"] = ALT
+        try:
+            schluessel.laden(_pfad, "CO37_TEST_PW", "zum Test")
+            _alt_geht = True
+        except SystemExit:
+            _alt_geht = False
+        check(f"{_werkzeug}: die alte Passphrase oeffnet nicht mehr",
+              not _alt_geht)
+
+
+# ======================================================================
 # Die Baustrecke fragt einmal, nicht dreimal
 # ======================================================================
 print()

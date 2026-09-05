@@ -193,6 +193,10 @@ Lizenzschlüssel.**
 `--init` fragt dabei nach einer Passphrase — der Schlüssel entsteht von
 Anfang an verschlüsselt und liegt nie offen auf der Platte.
 
+`--sicherung` schreibt den privaten Schlüssel im Klartext auf den
+Bildschirm. Danach steht er im Rückblättern des Fensters — das Fenster
+also hinterher schließen, nicht nur weiterscrollen.
+
 `--sicherung` gibt ihn druckfreundlich aus, und zwar **entschlüsselt**:
 eine Papiersicherung, zu der man zusätzlich die Passphrase braucht, ist
 keine Sicherung, sondern eine zweite Stelle, an der etwas fehlen kann.
@@ -208,6 +212,29 @@ Seit 0.37.21 liegen beide privaten Schlüssel verschlüsselt:
 python tools\sign-release.py --verschluesseln     # Signaturschlüssel
 python tools\make-license.py  --verschluesseln     # Lizenzschlüssel
 ```
+
+### Nicht in Git Bash
+
+Alle Aufrufe, die nach einer Passphrase fragen — `--init`,
+`--verschluesseln`, `--sicherung` bei verschlüsseltem Schlüssel und
+`build_release.py` — gehören in **cmd.exe oder PowerShell**.
+
+Grund: Python unter Windows ist ein Windows-Programm, das MINGW-Terminal
+von Git Bash ist keine Windows-Konsole. `sys.stdin.isatty()` meldet dort
+`False`, und die Werkzeuge brechen folgerichtig mit „es sitzt niemand an
+der Tastatur" ab — dieselbe Sicherung, die verhindert, dass ein Bau
+stumm auf eine unsichtbare Eingabe wartet.
+
+Wer in Git Bash bleiben will, stellt `winpty` davor:
+
+```
+winpty python tools/sign-release.py --verschluesseln
+```
+
+Und noch etwas für Git Bash: dort ist `\` das Fluchtzeichen der Shell.
+`python tools\sign-release.py` wird zu `toolssign-release.py` und
+schlägt fehl. **Schrägstriche nehmen** — `tools/sign-release.py` — oder
+gleich cmd.exe.
 
 Derselbe Aufruf wechselt später die Passphrase — er fragt erst die
 bisherige ab, dann zweimal die neue, schreibt in eine Nebendatei und
