@@ -213,28 +213,32 @@ python tools\sign-release.py --verschluesseln     # Signaturschlüssel
 python tools\make-license.py  --verschluesseln     # Lizenzschlüssel
 ```
 
-### Nicht in Git Bash
+### Git Bash
 
-Alle Aufrufe, die nach einer Passphrase fragen — `--init`,
-`--verschluesseln`, `--sicherung` bei verschlüsseltem Schlüssel und
-`build_release.py` — gehören in **cmd.exe oder PowerShell**.
+Am 2026-09-05 auf KK-LENOVO nachgemessen: die Passphrase-Abfrage
+**funktioniert** in Git Bash (MINGW64) — `build_release.py 0.37.21` lief
+dort durch, mit Abfrage und Annahme. Die Vermutung, das könne nicht
+gehen, war falsch.
 
-Grund: Python unter Windows ist ein Windows-Programm, das MINGW-Terminal
-von Git Bash ist keine Windows-Konsole. `sys.stdin.isatty()` meldet dort
-`False`, und die Werkzeuge brechen folgerichtig mit „es sitzt niemand an
-der Tastatur" ab — dieselbe Sicherung, die verhindert, dass ein Bau
-stumm auf eine unsichtbare Eingabe wartet.
+Falls es auf einem anderen Rechner doch scheitert, sieht das so aus:
 
-Wer in Git Bash bleiben will, stellt `winpty` davor:
+```
+Hier wird eine Passphrase gebraucht, aber es sitzt niemand an der Tastatur
+```
+
+Dann meldet Pythons `sys.stdin.isatty()` in diesem Terminal `False` —
+Python unter Windows ist ein Windows-Programm, ein MINGW-Terminal ist
+keine Windows-Konsole, und das geht je nach Fassung von Git for Windows
+unterschiedlich aus. Zwei Auswege: **cmd.exe oder PowerShell** nehmen,
+oder `winpty` davorstellen:
 
 ```
 winpty python tools/sign-release.py --verschluesseln
 ```
 
-Und noch etwas für Git Bash: dort ist `\` das Fluchtzeichen der Shell.
-`python tools\sign-release.py` wird zu `toolssign-release.py` und
-schlägt fehl. **Schrägstriche nehmen** — `tools/sign-release.py` — oder
-gleich cmd.exe.
+Unabhängig davon gilt in Git Bash: `\` ist dort das Fluchtzeichen der
+Shell. `python tools\sign-release.py` wird zu `toolssign-release.py` und
+schlägt fehl. **Schrägstriche nehmen** — `tools/sign-release.py`.
 
 Derselbe Aufruf wechselt später die Passphrase — er fragt erst die
 bisherige ab, dann zweimal die neue, schreibt in eine Nebendatei und
