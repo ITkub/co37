@@ -62,6 +62,7 @@ Fuzzing-Lauf von Hand (Backend auf 8123, Sitzung in $S, Agent-Token in $T):
       --checks not_a_server_error --continue-on-failure
 """
 import ast
+import re
 import json
 import os
 import urllib.error
@@ -100,6 +101,46 @@ def call(path, data=None, method=None, hdr=None, roh=None):
             return e.code, {}
     except Exception as e:  # noqa: BLE001
         return 0, f"{type(e).__name__}: {e}"
+
+
+def ansage(laenge: int, gesendet: bytes,
+           pfad: str = "/api/v1/agent/enroll", kopf=None):
+    """
+    Kuendigt einen Koerper der Laenge 'laenge' an und schickt nur
+    'gesendet' davon.
+
+    Ueber einen rohen Socket, nicht ueber urllib: das Backend antwortet
+    auf die angekuendigte Laenge hin sofort mit 413 und liest den Koerper
+    gar nicht erst - genau das ist der Sinn der Sache. urllib schreibt
+    aber stur zu Ende und sieht dabei nur ein "Connection reset by peer",
+    bevor es die Antwort liest. curl und jeder Browser lesen nebenher und
+    bekommen die 413; hier wird derselbe Ablauf von Hand nachgestellt.
+    """
+    import socket
+    from urllib.parse import urlparse
+    ziel = urlparse(B)
+    s = socket.create_connection((ziel.hostname, ziel.port or 80), timeout=30)
+    zeilen = [f"POST {pfad} HTTP/1.1", f"Host: {ziel.hostname}",
+              "Content-Type: application/json", f"Content-Length: {laenge}"]
+    zeilen += [f"{a}: {b}" for a, b in (kopf or {}).items()]
+    s.sendall(("\r\n".join(zeilen) + "\r\n\r\n").encode() + gesendet)
+    antwort = b""
+    s.settimeout(5)
+    try:
+        # Ueber die Kopfzeilen hinaus weiterlesen: der Grund steht im
+        # Koerper, und die erste Fassung dieser Pruefung hoerte genau
+        # davor auf und suchte den Wortlaut in den Kopfzeilen.
+        while True:
+            teil = s.recv(8192)
+            if not teil:
+                break
+            antwort += teil
+            if b"\r\n\r\n" in antwort and antwort.split(b"\r\n\r\n", 1)[1]:
+                break
+    except OSError:
+        pass
+    s.close()
+    return antwort
 
 
 # ======================================================================
@@ -325,48 +366,9 @@ check("und wandelt es in einen CheckmkError",
 print()
 print("--- Obergrenze fuer den Anfragekoerper (F-56) ---")
 
-GRENZE = 32 * 1024 * 1024
+# Die Vorgabe seit F-62. /agent/enroll ist keine Ausnahme.
+GRENZE = 1024 * 1024
 zu_gross = b'{"hostname":"' + b"x" * (GRENZE + 4096) + b'","os_type":"linux"}'
-
-
-def ansage(laenge: int, gesendet: bytes):
-    """
-    Kuendigt einen Koerper der Laenge 'laenge' an und schickt nur
-    'gesendet' davon.
-
-    Ueber einen rohen Socket, nicht ueber urllib: das Backend antwortet
-    auf die angekuendigte Laenge hin sofort mit 413 und liest den Koerper
-    gar nicht erst - genau das ist der Sinn der Sache. urllib schreibt
-    aber stur zu Ende und sieht dabei nur ein "Connection reset by peer",
-    bevor es die Antwort liest. curl und jeder Browser lesen nebenher und
-    bekommen die 413; hier wird derselbe Ablauf von Hand nachgestellt.
-    """
-    import socket
-    from urllib.parse import urlparse
-    ziel = urlparse(B)
-    s = socket.create_connection((ziel.hostname, ziel.port or 80), timeout=30)
-    kopf = (f"POST /api/v1/agent/enroll HTTP/1.1\r\n"
-            f"Host: {ziel.hostname}\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Content-Length: {laenge}\r\n\r\n").encode()
-    s.sendall(kopf + gesendet)
-    antwort = b""
-    s.settimeout(5)
-    try:
-        # Ueber die Kopfzeilen hinaus weiterlesen: der Grund steht im
-        # Koerper, und die erste Fassung dieser Pruefung hoerte genau
-        # davor auf und suchte den Wortlaut in den Kopfzeilen.
-        while True:
-            teil = s.recv(8192)
-            if not teil:
-                break
-            antwort += teil
-            if b"\r\n\r\n" in antwort and antwort.split(b"\r\n\r\n", 1)[1]:
-                break
-    except OSError:
-        pass
-    s.close()
-    return antwort
 
 
 # Ueber die offene Route, ohne jede Anmeldung - das war der Kern des
@@ -418,10 +420,13 @@ check("auch ohne Content-Length (chunked) -> 413", _code == 413, _code)
 
 # Gegenprobe: knapp darunter muss durchgehen, sonst waere die Grenze
 # einfach "alles abweisen".
+# Deutlich unter der Vorgabe - seit F-62 liegt die bei 1 MiB, ein
+# Megabyte waere also genau der Grenzfall und sagte nichts.
 knapp = json.dumps({"hostname": "EINGABE-GRENZ-02", "os_type": "linux",
-                    "os_version": "x" * (1024 * 1024)}).encode()
+                    "os_version": "x" * (200 * 1024)}).encode()
 code, _ = call("/api/v1/agent/enroll", roh=knapp)
-check("ein Megabyte geht weiterhin durch", code == 200, code)
+check("eine gewoehnlich grosse Anmeldung geht weiterhin durch",
+      code == 200, code)
 
 check("die Grenze steht als Konstante im Quelltext", "KOERPER_MAX" in quelle)
 check("und laesst sich fuer den Betrieb setzen", "CO37_MAX_BODY" in quelle)
@@ -454,6 +459,95 @@ check("gewoehnliche Merkmale gehen weiter", code == 200, code)
 code, _ = call(f"/api/v1/areas/{aid}", {"name": "x" * 121},
                method="PATCH", hdr=ADM)
 check("ein zu langer Bereichsname wird abgewiesen", code == 422, code)
+
+# ======================================================================
+# Eine Grenze je Route (F-62)
+# ======================================================================
+print()
+print("--- Eine Koerpergrenze je Route (F-62) ---")
+
+# 32 MiB fuer alles war zu grosszuegig: der Koerper wird vollstaendig
+# gelesen und ausgewertet, BEVOR eine Route etwas prueft - vor der
+# Anmeldung, vor dem Agent-Token, sogar vor der Drosselung. Gemessen am
+# 2026-09-04: eine bereits GESPERRTE Adresse kostete mit 32 MiB Koerper
+# weiterhin 323 ms je Anfrage, mit kurzem Koerper 3 ms. Die Drosselung
+# begrenzt Versuche, nicht Arbeit - sie kann es gar nicht, weil sie erst
+# laeuft, wenn schon gelesen wurde.
+VORGABE = 1024 * 1024
+
+
+def gross(pfad, bytes_, kopf=None):
+    """Schickt einen Koerper der angegebenen Groesse und meldet den Code."""
+    return call(pfad, roh=b'{"x":"' + b"y" * bytes_ + b'"}', hdr=kopf)[0]
+
+
+# Die Vorgabe gilt fuer eine gewoehnliche Route.
+check("knapp unter der Vorgabe geht durch",
+      gross("/api/v1/login", VORGABE // 2) in (200, 401, 422),
+      gross("/api/v1/login", VORGABE // 2))
+# Die beiden Faelle ueber der Grenze ueber einen rohen Socket, nicht ueber
+# urllib. Sie standen bis zum 2026-09-04 als gross(...) == 413 hier und
+# waren damit von der Zeit abhaengig: der Server antwortet mit 413 und
+# hoert auf zu lesen, waehrend urllib den Koerper noch schreibt - dann
+# sieht urllib nur den Verbindungsabbruch und meldet 0. Bei etwa jedem
+# vierten Lauf. Genau derselbe Grund, aus dem ansage() ueberhaupt
+# entstanden ist; zwei Zeilen weiter unten war er schon beruecksichtigt.
+#
+# Eine Pruefung, die manchmal grundlos rot ist, wird nach dem dritten Mal
+# nicht mehr gelesen.
+_a = ansage(VORGABE + 8192, b'{"x":"y"}', "/api/v1/login")
+check("darueber wird mit 413 abgewiesen",
+      b"413" in _a.split(b"\r\n")[0], _a[:100])
+_a = ansage(VORGABE + 8192, b'{"x":"y"}', "/api/v1/agent/enroll")
+check("auch die offene Anmelderoute des Agents",
+      b"413" in _a.split(b"\r\n")[0], _a[:100])
+
+# Und die Ausnahmen, die eine groessere brauchen. Ohne diese Haelfte
+# waere die Reihe mit "alles abweisen" zufrieden - und ein Scan mit 5000
+# Paketen oder ein Systemupdate kaeme nie wieder durch.
+_agt = {"X-Agent-Token": "gibt-es-nicht"}
+check("ein Scan darf mehr als die Vorgabe schicken",
+      gross("/api/v1/agent/scan-result", 2 * 1024 * 1024, _agt) != 413,
+      gross("/api/v1/agent/scan-result", 2 * 1024 * 1024, _agt))
+# Ueber einen rohen Socket: bei mehreren MiB antwortet der Server, waehrend
+# der Client noch schreibt, und urllib sieht nur den Verbindungsabbruch.
+# Genau daran ist die erste Fassung dieser Zeile gescheitert.
+_a = ansage(9 * 1024 * 1024, b'{"x":"y"}', "/api/v1/agent/scan-result")
+check("aber auch dort gibt es eine Grenze",
+      b"413" in _a.split(b"\r\n")[0], _a[:100])
+_a = ansage(70 * 1024 * 1024, b'{"x":"y"}', "/api/v1/update/upload")
+check("und selbst das Systemupdate ist nicht unbegrenzt",
+      b"413" in _a.split(b"\r\n")[0], _a[:100])
+check("und das Systemupdate darf am meisten",
+      gross("/api/v1/update/upload", 8 * 1024 * 1024, ADM) != 413,
+      gross("/api/v1/update/upload", 8 * 1024 * 1024, ADM))
+
+# Die Ausnahmen muessen an PFADEN haengen, die es wirklich gibt - eine
+# Ausnahme auf einen Tippfehler waere eine Grenze, die niemand bemerkt.
+_pfade = set()
+for _knoten in ast.walk(_baum):
+    if isinstance(_knoten, ast.Call):
+        for _d in getattr(_knoten.func, "attr", "") and [_knoten] or []:
+            pass
+for _z in quelle.splitlines():
+    _tr = re.findall(r'@app\.\w+\("(/api/[^"]+)"', _z)
+    _pfade.update(_tr)
+_ausnahmen = re.findall(r'^\s*"(/api/v1/[^"]+)":\s*\d', quelle, re.M)
+check("die Ausnahmen sind auffindbar", len(_ausnahmen) >= 2, _ausnahmen)
+check("jede Ausnahme zeigt auf eine wirklich vorhandene Route",
+      all(a in _pfade for a in _ausnahmen),
+      [a for a in _ausnahmen if a not in _pfade])
+
+# Keine Laengengrenze auf dem Passwortfeld - und das ist Absicht. Die
+# Verstaerkung bei scrypt verschwindet mit der kleineren Koerpergrenze
+# von selbst (gemessen 236 ms bei 16 Zeichen, 232 ms bei 1 MiB), und eine
+# Laengengrenze koennte jemanden mit einem sehr langen Passwort
+# aussperren. Die Pruefung haelt die Entscheidung fest, damit sie nicht
+# unbemerkt in die eine oder andere Richtung kippt.
+check("das Passwortfeld traegt bewusst keine Laengengrenze",
+      "password: str" in quelle.split("class LoginIn")[1][:200],
+      quelle.split("class LoginIn")[1][:200])
+
 
 # ======================================================================
 # Laengen in den Meldungen des Agents
@@ -549,6 +643,74 @@ check("secure haengt nicht mehr allein am Schalter",
       "request_is_https(request)" in _secure, _secure)
 check("der Schalter zaehlt weiterhin mit",
       '_PROXY_CFG["https_only"]' in _secure, _secure)
+
+
+# ======================================================================
+# Das Pruefprotokoll (F-63, Pruefung vom 2026-09-04)
+# ======================================================================
+print()
+print("--- Laengengrenzen im Pruefprotokoll (F-63) ---")
+# Gefunden beim Abgleich gegen BSI APP.3.1.A5 (Protokollierung
+# sicherheitsrelevanter Ereignisse).
+#
+# /api/v1/login schreibt den vom Aufrufer gelieferten Benutzernamen als
+# 'actor' ins Protokoll, bevor feststeht, dass es ihn gibt - richtig so,
+# ein fehlgeschlagener Versuch ist der aufschlussreichere Eintrag. Nur
+# stand da keine Laengengrenze, und 'actor' hat einen Index.
+#
+# Gemessen am 2026-09-04: fuenf abgewiesene Anmeldungen mit einem Namen
+# von knapp 1 MiB haben die Datenbank von 144 KiB auf 11,6 MiB wachsen
+# lassen. Ohne Zugangsdaten. Und das Protokoll wird bewusst nur
+# angehaengt - es gibt keine Route zum Loeschen, der Muell bleibt drin.
+#
+# Hier mit 200000 Zeichen statt einem MiB: die Grenze wirkt genauso, und
+# die Reihe soll nicht sekundenlang Daten schaufeln.
+_lang = "B" * 200000
+_code, _ = call("/api/v1/login", {"username": _lang, "password": "x"})
+check("ein ueberlanger Benutzername wird weiterhin mit 401 abgewiesen",
+      _code == 401, _code)
+
+# Den Fehlerzaehler dieser Adresse wieder loeschen. Ohne das nimmt die
+# Reihe 'login-throttle' einen Versuch mit ins Rennen, den sie nicht
+# eingeplant hat - fuenf sind erlaubt, und dieser hier waere der erste.
+call("/api/v1/login", {"username": "admin", "password": _pw})
+
+_eintraege = call("/api/v1/audit?limit=200", hdr=ADM)[1]
+_meiner = [e for e in _eintraege
+           if str(e.get("actor", "")).startswith("BBBB")]
+check("der Versuch steht im Protokoll", bool(_meiner),
+      [e.get("action") for e in _eintraege[:5]])
+check("aber gekuerzt, nicht in voller Laenge",
+      all(len(e["actor"]) <= 120 for e in _meiner),
+      [len(e["actor"]) for e in _meiner])
+
+# Die Grenze sitzt in audit() und nicht am Anmeldeschema - damit gilt sie
+# fuer alle Aufrufstellen und fuer jede, die noch dazukommt. Eine
+# max_length am Benutzernamen haette nur diesen einen Weg geschlossen.
+_quelle_audit = quelle[quelle.index("def audit(session"):]
+_quelle_audit = _quelle_audit[:_quelle_audit.index("class Principal")]
+for _feld, _grenze in (("actor", "AUDIT_ACTOR_MAX"),
+                       ("action", "AUDIT_ACTION_MAX"),
+                       ("detail", "AUDIT_DETAIL_MAX")):
+    check(f"audit() kuerzt {_feld}",
+          f"kurz({_feld}, {_grenze})" in _quelle_audit
+          or f"kurz({_feld}, {_grenze})" in _quelle_audit.replace("\n", " "),
+          _quelle_audit.count("kurz("))
+
+# Steuerzeichen muessen mit raus. Ein Protokoll, in das man mit einem
+# Zeilenumbruch im Benutzernamen eine zweite Zeile schreiben kann, ist
+# keins - kurz() erledigt das, deshalb kurz() und kein reines [:n].
+check("audit() nimmt kurz() und nicht nur einen Schnitt",
+      "[:AUDIT_" not in _quelle_audit, _quelle_audit.count("[:"))
+
+_code, _ = call("/api/v1/login", {"username": "admin\nfake admin login.ok",
+                                  "password": "x"})
+call("/api/v1/login", {"username": "admin", "password": _pw})
+_zeilen = [e for e in call("/api/v1/audit?limit=50", hdr=ADM)[1]
+           if "fake" in str(e.get("actor", ""))]
+check("ein Zeilenumbruch im Namen erzeugt keine zweite Protokollzeile",
+      all("\n" not in e["actor"] for e in _zeilen),
+      [repr(e["actor"])[:60] for e in _zeilen])
 
 
 # ======================================================================

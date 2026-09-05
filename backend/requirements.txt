@@ -62,7 +62,7 @@ uvicorn[standard]==0.52.4
 sqlmodel==0.0.39
 httpx==0.28.1
 pydantic==2.13.4
-cryptography==50.0.0
+cryptography==50.0.1
 python-multipart==0.0.32
 
 # starlette kommt eigentlich ueber fastapi und stand deshalb lange nicht
@@ -78,6 +78,30 @@ python-multipart==0.0.32
 starlette==1.6.0
 
 # ----------------------------------------------------------------------
+# GLEICHSTAND MIT DEM AGENTEN (F-61, Pruefung vom 2026-09-04)
+# ----------------------------------------------------------------------
+# Fuenf Pakete stehen auch in agent/requirements.txt: certifi, cffi,
+# cryptography, idna, pycparser. Drei davon standen dort in einer anderen
+# Fassung - niemand hat das je verglichen.
+#
+# cryptography war der Fall mit Substanz. Das Backend stand auf 50.0.0,
+# der Agent auf 50.0.1. Auf KK-OPS01 nachgemessen:
+#
+#     Backend: cryptography 50.0.0, eingebautes OpenSSL 4.0.1
+#     Agent:   cryptography 50.0.1, eingebautes OpenSSL 4.0.2
+#
+# 50.0.1 bringt keine Codeaenderung - es gibt sie ausschliesslich, weil
+# die Raeder mit OpenSSL 4.0.2 gebaut wurden, und das schliesst elf
+# Schwachstellen (QUIC, CMP, DTLS, X.509/CMS, eine AEAD-Faelschung ueber
+# EVP_Cipher). KEINE davon ist von hier aus erreichbar: das eingebaute
+# OpenSSL bedient nur Fernet und die Ed25519-Pruefung, nicht die
+# TLS-Verbindungen (die laufen ueber das ssl-Modul mit der OpenSSL des
+# Systems). Kein Befund also, aber auch kein Grund, zwei Staende
+# auszuliefern.
+#
+# tests/deps-test.py vergleicht die gemeinsamen Pakete jetzt.
+
+# ----------------------------------------------------------------------
 # Mittelbar - haengen an den oberen, nicht selbst ausgesucht
 # ----------------------------------------------------------------------
 # Abgelesen am 2026-09-04 auf KK-OPS01 (Python 3.13.5), also an dem
@@ -89,13 +113,13 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
 certifi==2026.7.22
-cffi==2.1.0
+cffi==2.1.1
 click==8.4.2
 greenlet==3.5.4
 h11==0.16.0
 httpcore==1.0.9
 httptools==0.8.0
-idna==3.18
+idna==3.19
 pycparser==3.0
 pydantic_core==2.46.4
 python-dotenv==1.2.2

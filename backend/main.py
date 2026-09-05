@@ -363,24 +363,69 @@ def https_only_check(request: Request):
 # Update-Paket ueber /api/v1/update/upload - zurzeit 573 KB. Die Grenze
 # ist bewusst grosszuegig; sie soll den Missbrauch abschneiden, nicht den
 # Betrieb.
-KOERPER_MAX = int(os.getenv("CO37_MAX_BODY", str(32 * 1024 * 1024)))
+# ----------------------------------------------------------------------
+# Eine Grenze je Route, nicht eine fuer alle (F-62, Pruefung 2026-09-04)
+# ----------------------------------------------------------------------
+# 32 MiB fuer ALLES war zu grosszuegig. Der Koerper wird vollstaendig
+# gelesen und ausgewertet, BEVOR irgendeine Route etwas prueft - vor der
+# Anmeldung, vor dem Agent-Token, sogar vor der Drosselung. Nachgemessen
+# am 2026-09-04 gegen ein Testbackend:
+#
+#   POST /login, 32 MiB Passwort, unangemeldet     -> 401 nach 1588 ms
+#   POST /login, 16 Zeichen                        -> 401 nach  324 ms
+#   POST /login, 32 MiB, Adresse bereits GESPERRT  -> 429 nach  323 ms
+#   POST /login, kurz,   Adresse bereits gesperrt  -> 429 nach    3 ms
+#
+# Die dritte Zeile ist die wichtige: eine gesperrte Adresse kostet den
+# Server weiterhin 320 ms je Anfrage, beliebig oft. Die Drosselung aus
+# F-21/F-36 begrenzt Anmeldeversuche, nicht Arbeit - sie kann es gar
+# nicht, weil sie erst laeuft, wenn der Koerper schon gelesen ist.
+#
+# Die Verstaerkung bei scrypt verschwindet mit der kleineren Grenze von
+# selbst: gemessen 236 ms bei 16 Zeichen, 232 ms bei 1 MiB, 1109 ms bei
+# 32 MiB. Deshalb steht hier KEINE Laengengrenze auf dem Passwortfeld -
+# sie braechte nichts Messbares und koennte jemanden mit einem sehr
+# langen Passwort aussperren. Bei einer Haertung, die den Betriebspfad
+# treffen kann, ist das die falsche Reihenfolge (F-46 -> F-48).
+#
+# Die Vorgabe gilt fuer jede Route. Groesser ist die Ausnahme, und jede
+# Ausnahme steht hier mit ihrem Grund:
+KOERPER_MAX = int(os.getenv("CO37_MAX_BODY", str(1 * 1024 * 1024)))
+
+KOERPER_AUSNAHMEN = {
+    # Das Systemupdate als ZIP. Zurzeit rund 600 KB; die Grenze ist
+    # bewusst weit, damit sie nicht beim naechsten Wachstum im Weg steht.
+    "/api/v1/update/upload": 64 * 1024 * 1024,
+    # Ein Scan meldet bis zu SCAN_MAX_UPDATES Pakete (5000). Mit Namen,
+    # zwei Versionsangaben und der Groesse sind das ueberschlaegig 750 KB.
+    "/api/v1/agent/scan-result": 8 * 1024 * 1024,
+}
 
 
 class KoerperGrenze:
     """Reines ASGI, damit abgewiesen wird, bevor jemand puffert."""
 
-    def __init__(self, app, grenze: int):
+    def __init__(self, app, grenze: int, ausnahmen: dict):
         self.app = app
         self.grenze = grenze
+        self.ausnahmen = ausnahmen
+
+    def _grenze(self, scope) -> int:
+        # Ueber scope["path"], nicht ueber request.url.path - genau der
+        # Unterschied, den CVE-2026-48710 bestraft hat und der seit Runde 5
+        # ueberall im Backend gilt.
+        return self.ausnahmen.get(scope.get("path", ""), self.grenze)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
 
+        grenze = self._grenze(scope)
+
         for name, wert in scope.get("headers", []):
             if name == b"content-length":
                 try:
-                    if int(wert) > self.grenze:
+                    if int(wert) > grenze:
                         return await self._zu_gross(send)
                 except ValueError:
                     pass
@@ -394,7 +439,7 @@ class KoerperGrenze:
             nachricht = await receive()
             if nachricht["type"] == "http.request":
                 gelesen += len(nachricht.get("body", b""))
-                if gelesen > self.grenze:
+                if gelesen > grenze:
                     ueberschritten = True
                     # Abbrechen statt weiterlesen - sonst puffert die
                     # Anwendung genau das, was hier verhindert werden soll.
@@ -426,7 +471,8 @@ class KoerperGrenze:
         await send({"type": "http.response.body", "body": koerper})
 
 
-app.add_middleware(KoerperGrenze, grenze=KOERPER_MAX)
+app.add_middleware(KoerperGrenze, grenze=KOERPER_MAX,
+                   ausnahmen=KOERPER_AUSNAHMEN)
 
 
 @app.middleware("http")
@@ -975,6 +1021,33 @@ def pending_count(session: Session) -> int:
     ).all())
 
 
+# Obergrenzen fuer das Pruefprotokoll (F-63 der Pruefung vom 2026-09-04).
+#
+# Gemessen, nicht vermutet: fuenf fehlgeschlagene Anmeldungen mit einem
+# Benutzernamen von knapp 1 MiB - so viel laesst die Koerpergrenze durch -
+# haben die Datenbank von 144 KiB auf 11,6 MiB wachsen lassen. Der Faktor
+# ueber zwei kommt vom Index auf 'actor'.
+#
+# Das ging OHNE Zugangsdaten. /api/v1/login schreibt den vom Aufrufer
+# gelieferten Namen als 'actor' ins Protokoll, BEVOR feststeht, dass es
+# ihn gibt - genau so gehoert es sich, ein fehlgeschlagener Versuch ist
+# der aufschlussreichere Eintrag. Nur stand da keine Laengengrenze.
+#
+# Zwei Schaeden, der zweite ist der schwerere:
+#   - Platz. Die Drosselung laesst fuenf Versuche je Adresse und
+#     Viertelstunde durch, macht rund 12 MiB je Adresse und Viertelstunde.
+#   - Das Protokoll selbst. Es wird bewusst nur angehaengt, es gibt keine
+#     Route zum Loeschen (siehe AuditEntry). Was hier hineingeschrieben
+#     wurde, bleibt - unlesbar und unentfernbar.
+#
+# Deshalb die Grenze HIER und nicht am Anmeldeschema: sie gilt damit fuer
+# jede der 42 Aufrufstellen und fuer jede, die noch dazukommt. Eine
+# max_length am Benutzernamen haette nur diesen einen Weg geschlossen.
+AUDIT_ACTOR_MAX = 120
+AUDIT_ACTION_MAX = 80
+AUDIT_DETAIL_MAX = 1000
+
+
 def audit(session: Session, actor: str, action: str,
           detail: str = None, request: Request = None):
     """
@@ -983,9 +1056,17 @@ def audit(session: Session, actor: str, action: str,
     Absichtlich ohne commit: der Eintrag gehoert in dieselbe Transaktion
     wie die Aenderung, die er beschreibt. Sonst kann das eine ohne das
     andere ueberleben.
+
+    Alle drei Textfelder werden gekuerzt - siehe die Begruendung ueber den
+    Konstanten. kurz() wirft dabei auch Steuerzeichen raus; ein Protokoll,
+    das man mit einem Zeilenumbruch im Benutzernamen faelschen kann, ist
+    keins.
     """
-    session.add(AuditEntry(actor=actor, action=action, detail=detail,
-                           from_ip=client_ip(request)))
+    session.add(AuditEntry(
+        actor=kurz(actor, AUDIT_ACTOR_MAX),
+        action=kurz(action, AUDIT_ACTION_MAX),
+        detail=None if detail is None else kurz(detail, AUDIT_DETAIL_MAX),
+        from_ip=client_ip(request)))
 
 
 class Principal:

@@ -246,5 +246,38 @@ for name in sorted(pins):
 check("der Abgleich vergleicht tatsaechlich", erkannt,
       "kein installiertes Paket gefunden" if not erkannt else "")
 
+# ======================================================================
+# Gleichstand mit dem Agenten (F-61)
+# ======================================================================
+# Fuenf Pakete stehen in beiden requirements.txt. Bis 0.37.19 wichen drei
+# davon voneinander ab - cryptography sogar so, dass Backend und Agent
+# verschiedene eingebaute OpenSSL-Fassungen ausgeliefert haben (4.0.1
+# gegen 4.0.2). Niemand hat je verglichen, weil niemand hingesehen hat.
+#
+# Zwei Staende derselben Bibliothek in einem Produkt sind fuer sich kein
+# Befund. Aber es heisst, dass die Frage "was liefern wir eigentlich aus"
+# zwei verschiedene Antworten hat, je nachdem wen man fragt.
+print()
+print("--- Backend und Agent pinnen dieselben Pakete gleich ---")
+
+AGENT_REQ = WURZEL / "agent" / "requirements.txt"
+check("agent/requirements.txt ist lesbar", AGENT_REQ.is_file(), AGENT_REQ)
+
+_agent = {}
+_roh = re.sub(r"\\\s*\n\s*--hash=\S+", "", AGENT_REQ.read_text(encoding="utf-8"))
+for _z in _roh.splitlines():
+    _m = ZEILE.match(_z.split("#", 1)[0].strip())
+    if _m:
+        _agent[_m.group(1).lower().replace("_", "-")] = _m.group(3)
+
+check("die Agent-Datei liess sich einlesen", len(_agent) >= 8, len(_agent))
+_gemeinsam = sorted(set(_agent) & set(pins))
+check("es gibt ueberhaupt gemeinsame Pakete", len(_gemeinsam) >= 4, _gemeinsam)
+
+_ungleich = [f"{n}: Backend {pins[n]}, Agent {_agent[n]}"
+             for n in _gemeinsam if pins[n] != _agent[n]]
+check("gemeinsame Pakete stehen in derselben Fassung", not _ungleich,
+      "; ".join(_ungleich))
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
