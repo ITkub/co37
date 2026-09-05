@@ -72,3 +72,4 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+OPS_*_Edition_*.pdf
