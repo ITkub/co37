@@ -112,6 +112,7 @@ REIHEN=(
   "release-sig    $PY tests/release-sig-test.py"
   "watcher-sig    $PY tests/watcher-sig-test.py"
   "keyguard       $PY tests/keyguard-test.py"
+  "schluessel     $PY tests/schluessel-test.py"
   "patchdue        $PY tests/patchdue-test.py"
   "area-migrate    $PY tests/area-migrate-test.py"
   "area-schedule   $PY tests/area-schedule-test.py"

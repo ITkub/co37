@@ -46,8 +46,14 @@ except ImportError:
 # Innerhalb waere er nur eine Unachtsamkeit von einem 'git add -A'
 # entfernt - und ein einmal eingecheckter Schluessel ist praktisch nicht
 # mehr aus der Historie zu entfernen.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import schluessel  # noqa: E402
+
 HOME = Path(os.environ.get("CO37_LICENSE_HOME", Path.home() / ".co37"))
 PRIVAT = HOME / "license-private.pem"
+
+UMGEBUNG = "CO37_LICENSE_PASSPHRASE"
+ZWECK = "fuer den Lizenzschluessel"
 REGISTER = HOME / "lizenzen.csv"
 
 # Der oeffentliche Teil wird ausgeliefert und gehoert ins Repository.
@@ -63,29 +69,6 @@ VORSATZ = "CO37-"
 # base64url ohne Auffuellzeichen: der Schluessel wandert per Mail und
 # wird von Hand eingefuegt. '+' und '/' werden dabei oft zerstoert, '='
 # am Ende laesst manches Formular weg.
-
-def schluessel_schreiben(ziel: Path, pem: bytes):
-    """
-    Privaten Schluessel mit 0600 anlegen - von Anfang an (F-35 der
-    Pruefung vom 2026-08-31).
-
-    Bis 0.37.9 stand hier write_bytes() und danach chmod(0600). Zwischen
-    beiden lag die Datei mit der Umask-Vorgabe auf der Platte, ueblich
-    0644, in einem Verzeichnis mit 0755. Wer in diesem Fenster liest, hat
-    den Lizenzschluessel.
-
-    Genau derselbe Fall wird in setup.sh fuenfzig Zeilen nach der
-    secret.key-Stelle mit 'umask 177' richtig geloest; hier fehlte er.
-    """
-    ziel.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(ziel.parent, 0o700)
-    except OSError:
-        # Unter Windows wirkungslos, siehe den Hinweis beim Anlegen.
-        pass
-    fd = os.open(ziel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(pem)
 
 def _b64(roh: bytes) -> str:
     return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
@@ -114,7 +97,7 @@ def lade_privat() -> Ed25519PrivateKey:
     if not PRIVAT.is_file():
         sys.exit(f"Kein privater Schluessel unter {PRIVAT}.\n"
                  f"Erst erzeugen:  python make-license.py --init")
-    return serialization.load_pem_private_key(PRIVAT.read_bytes(), password=None)
+    return schluessel.laden(PRIVAT, UMGEBUNG, ZWECK)
 
 
 def init():
@@ -142,12 +125,11 @@ def init():
     HOME.mkdir(parents=True, exist_ok=True)
     privat = Ed25519PrivateKey.generate()
 
-    pem = privat.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    )
-    schluessel_schreiben(PRIVAT, pem)
+    print("Dieser Schluessel wird mit einer Passphrase geschuetzt.")
+    print("Mehrere zufaellige Woerter, mindestens "
+          f"{schluessel.MIN_LEN} Zeichen.")
+    pw = schluessel.passphrase_fragen(ZWECK, bestaetigen=True)
+    schluessel.schluessel_schreiben(PRIVAT, schluessel.als_pem(privat, pw))
 
     roh = privat.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
@@ -383,11 +365,10 @@ def zeigen(schluessel: str):
 
 def sicherung():
     """Private Datei in druckfreundlicher Form, mit Pruefsumme."""
-    roh = lade_privat().private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode("ascii")
+    # Entschluesselt: eine Papiersicherung, zu der man zusaetzlich die
+    # Passphrase braucht, ist keine Sicherung. Der Zettel gehoert dafuer
+    # in den Safe.
+    roh = schluessel.als_pem(lade_privat()).decode("ascii")
 
     pruefsumme = sha256(roh.encode("ascii")).hexdigest()[:16]
     print("=" * 68)
@@ -469,6 +450,8 @@ def main():
     p.add_argument("--verlaengert-nr", type=int, metavar="NR",
                    dest="verlaengert_nr",
                    help="dasselbe, aber ueber die Nummer aus dem Register")
+    p.add_argument("--verschluesseln", action="store_true",
+                   help="Schluesseldatei verschluesseln oder Passphrase wechseln")
     p.add_argument("--sicherung", action="store_true",
                    help="privaten Schluessel druckfreundlich ausgeben")
     p.add_argument("--pruefen", metavar="DATEI",
@@ -479,6 +462,9 @@ def main():
 
     if a.init:
         return init()
+    if a.verschluesseln:
+        return schluessel.verschluesseln(
+            PRIVAT, UMGEBUNG, ZWECK, "Der Lizenzschluessel")
     if a.sicherung:
         return sicherung()
     if a.pruefen:

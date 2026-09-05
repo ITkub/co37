@@ -190,7 +190,62 @@ Legt `release-private.pem` unter `%USERPROFILE%\.co37\` an und
 `backend\release_key.pub` im Projekt. **Genauso sichern wie den
 Lizenzschlüssel.**
 
-`--sicherung` gibt ihn druckfreundlich aus.
+`--init` fragt dabei nach einer Passphrase — der Schlüssel entsteht von
+Anfang an verschlüsselt und liegt nie offen auf der Platte.
+
+`--sicherung` gibt ihn druckfreundlich aus, und zwar **entschlüsselt**:
+eine Papiersicherung, zu der man zusätzlich die Passphrase braucht, ist
+keine Sicherung, sondern eine zweite Stelle, an der etwas fehlen kann.
+Der Zettel gehört dafür in den Safe.
+
+---
+
+# Passphrase für die privaten Schlüssel
+
+Seit 0.37.21 liegen beide privaten Schlüssel verschlüsselt:
+
+```
+python tools\sign-release.py --verschluesseln     # Signaturschlüssel
+python tools\make-license.py  --verschluesseln     # Lizenzschlüssel
+```
+
+Derselbe Aufruf wechselt später die Passphrase — er fragt erst die
+bisherige ab, dann zweimal die neue, schreibt in eine Nebendatei und
+benennt erst **nach** einer erfolgreichen Gegenprobe um. Ein halb
+geschriebener Schlüssel wäre der Totalverlust.
+
+**Vorher sichern.** Ist die Passphrase weg, ist der Schlüssel weg. Der
+öffentliche Teil ist bei jedem Kunden ausgeliefert und lässt sich nicht
+ersetzen, ohne alle bestehenden Installationen zu brechen.
+
+Mindestens zwölf Zeichen, besser mehrere zufällige Wörter. Keine
+Sonderzeichenregeln — Länge wirkt stärker, und erzwungene Sonderzeichen
+treiben Menschen zu `Passwort1!`.
+
+## Wie die Datei aussieht
+
+```
+# CO-37 scrypt n=16384 r=8 p=5 salt=<hex>
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+```
+
+Standard-PKCS8, AES-256-CBC. Die Passphrase des Behälters ist aber
+**nicht** die eingegebene, sondern mit scrypt aus ihr abgeleitet.
+
+Der Grund steht im Kopf von `tools/schluessel.py` und ist nachgemessen:
+`BestAvailableEncryption` erzeugt PBKDF2 mit **2048 Durchläufen** — der
+PKCS#8-Vorgabe von OpenSSL. Empfohlen werden heute sechshunderttausend.
+Eine menschlich gewählte Passphrase fiele damit auf einer Grafikkarte in
+Minuten. Anheben lässt sich der Wert in `cryptography` nicht
+(`encryption_builder` gibt es nur für OpenSSH und PKCS12), also steht
+scrypt davor: 196 ms und 128 MiB je Versuch, speicherhart.
+
+Die Kommentarzeile nennt alle Parameter, damit der Schlüssel auch dann
+noch zu retten ist, wenn es dieses Werkzeug nicht mehr gibt.
+
+**Was das nicht leistet:** nichts gegen Schadsoftware, die mitläuft,
+während gebaut wird. Der Schutz gilt der ruhenden Datei — gestohlenes
+Notebook, abgeflossene Sicherung, falsch geteiltes Verzeichnis.
 
 ## Beim Bauen
 
@@ -199,6 +254,19 @@ Lizenzschlüssel.**
 ```
 python build_release.py 0.33.0
 ```
+
+Ist der Schlüssel mit einer Passphrase geschützt (siehe unten), fragt
+`build_release.py` **einmal** danach — ganz am Anfang, bevor irgendetwas
+geschrieben wird. Die Passphrase wird sofort geprüft: ein Vertipper fällt
+auf, bevor die Versionsnummern in den Dateien stehen.
+
+Danach wird sie an die drei internen Aufrufe von `sign-release.py`
+weitergereicht, über die Umgebung **nur dieser Kindprozesse**. Sie steht
+zu keinem Zeitpunkt in einer Datei oder in der Shell-Historie.
+
+Ohne Terminal — etwa in einem Skript — bricht der Bau mit einer klaren
+Meldung ab, statt auf eine Eingabe zu warten, die niemand sieht. Wer ohne
+Signatur bauen will, nimmt `--no-sign`.
 
 Erzeugt neben dem Paket zwei Dateien:
 

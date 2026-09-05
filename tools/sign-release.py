@@ -43,41 +43,22 @@ except ImportError:
     sys.exit("Es fehlt die Bibliothek 'cryptography'.\n"
              "    pip install cryptography")
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import schluessel  # noqa: E402
+
 HOME = Path(os.environ.get("CO37_LICENSE_HOME", Path.home() / ".co37"))
 PRIVAT = HOME / "release-private.pem"
+
+# Ueber diese Variable reicht build_release.py die EINMAL erfragte
+# Passphrase an seine Kindprozesse weiter. Nicht dafuer gedacht, dass ein
+# Mensch sie setzt - dann stuende sie in der Shell-Historie.
+UMGEBUNG = "CO37_RELEASE_PASSPHRASE"
+ZWECK = "fuer den Signaturschluessel"
 
 PROJEKT = Path(__file__).resolve().parent.parent
 OEFFENTLICH = PROJEKT / "backend" / "release_key.pub"
 
 
-
-def schluessel_schreiben(ziel: Path, pem: bytes):
-    """
-    Privaten Schluessel mit 0600 anlegen - von Anfang an (F-35 der
-    Pruefung vom 2026-08-31).
-
-    Bis 0.37.9 stand hier write_bytes() und danach chmod(0600). Zwischen
-    beiden lag die Datei mit der Umask-Vorgabe auf der Platte, ueblich
-    0644, in einem Verzeichnis mit 0755. Wer in diesem Fenster liest, hat
-    den Schluessel - und mit dem Release-Schluessel Code als root auf
-    jedem Kundensystem.
-
-    Genau derselbe Fall wird in setup.sh fuenfzig Zeilen nach der
-    secret.key-Stelle mit 'umask 177' richtig geloest; hier fehlte er.
-
-    O_EXCL: eine vorhandene Datei wird nicht ueberschrieben. Die Aufrufer
-    pruefen das ohnehin vorher, aber ein Schluessel ist nichts, was man
-    versehentlich ersetzt.
-    """
-    ziel.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(ziel.parent, 0o700)
-    except OSError:
-        # Unter Windows wirkungslos, siehe den Hinweis beim Anlegen.
-        pass
-    fd = os.open(ziel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(pem)
 
 def _b64(roh: bytes) -> str:
     return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
@@ -113,10 +94,14 @@ def init():
 
     HOME.mkdir(parents=True, exist_ok=True)
     privat = Ed25519PrivateKey.generate()
-    schluessel_schreiben(PRIVAT, privat.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption()))
+    # Von Anfang an verschluesselt. Nachtraeglich geht es auch
+    # (--verschluesseln), aber dann lag der Schluessel einmal offen auf
+    # der Platte, und geloeschte Bloecke sind nicht weg.
+    print("Dieser Schluessel wird mit einer Passphrase geschuetzt.")
+    print("Mehrere zufaellige Woerter, mindestens "
+          f"{schluessel.MIN_LEN} Zeichen.")
+    pw = schluessel.passphrase_fragen(ZWECK, bestaetigen=True)
+    schluessel.schluessel_schreiben(PRIVAT, schluessel.als_pem(privat, pw))
 
     roh = privat.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
@@ -153,8 +138,7 @@ def signieren(pfad: Path):
         sys.exit(f"Kein privater Signaturschluessel unter {PRIVAT}.\n"
                  f"Erst erzeugen:  python tools/sign-release.py --init")
 
-    privat = serialization.load_pem_private_key(PRIVAT.read_bytes(),
-                                                password=None)
+    privat = schluessel.laden(PRIVAT, UMGEBUNG, ZWECK)
     summe = pruefsumme(pfad)
     # Signiert wird die Pruefsumme als Hexzeichenkette, nicht das Paket
     # selbst: so muss nichts Grosses im Speicher gehalten werden, und die
@@ -203,9 +187,17 @@ def pruefen(pfad: Path):
 
 
 def sicherung():
+    """
+    Druckfreundlich, und zwar ENTSCHLUESSELT.
+
+    Eine Papiersicherung, zu der man zusaetzlich die Passphrase braucht,
+    ist keine Sicherung, sondern eine zweite Stelle, an der etwas fehlen
+    kann. Der Zettel gehoert dafuer in den Safe und nicht in die Schublade.
+    """
     if not PRIVAT.is_file():
         sys.exit(f"Kein privater Signaturschluessel unter {PRIVAT}.")
-    roh = PRIVAT.read_text(encoding="ascii")
+    roh = schluessel.als_pem(
+        schluessel.laden(PRIVAT, UMGEBUNG, ZWECK)).decode("ascii")
     print("=" * 68)
     print("CO-37 - PRIVATER SIGNATURSCHLUESSEL")
     print("Erstellt am", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
@@ -233,10 +225,21 @@ def main():
                    help="vorhandene Signatur gegenpruefen")
     p.add_argument("--sicherung", action="store_true",
                    help="privaten Schluessel druckfreundlich ausgeben")
+    p.add_argument("--verschluesseln", action="store_true",
+                   help="Schluesseldatei verschluesseln oder Passphrase wechseln")
+    p.add_argument("--schluessel-pruefen", action="store_true",
+                   help="nur pruefen, ob sich der Schluessel oeffnen laesst")
     a = p.parse_args()
 
     if a.init:
         return init()
+    if a.verschluesseln:
+        return schluessel.verschluesseln(
+            PRIVAT, UMGEBUNG, ZWECK, "Der Signaturschluessel")
+    if a.schluessel_pruefen:
+        schluessel.laden(PRIVAT, UMGEBUNG, ZWECK)
+        print("Der Signaturschluessel laesst sich oeffnen.")
+        return
     if a.sicherung:
         return sicherung()
     if a.pruefen:

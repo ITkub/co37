@@ -1088,20 +1088,41 @@ import importlib.util as _iu  # noqa: E402
 # Befund. Geprueft wird deshalb, dass der Modus am os.open() haengt und
 # dass in der Funktion ueberhaupt kein chmod auf die Zieldatei mehr
 # vorkommt.
+# Seit 0.37.21 steht die Funktion EINMAL in tools/schluessel.py statt
+# zweimal wortgleich in den beiden Werkzeugen. Geprueft wird deshalb
+# beides: dass sie dort richtig ist, und dass sich die Werkzeuge keine
+# eigene, womoeglich schwaechere Zweitfassung zurueckholen.
 for werkzeug in ("sign-release.py", "make-license.py"):
+    _q = (WURZEL / "tools" / werkzeug).read_text(encoding="utf-8")
+    check(f"{werkzeug} hat KEINE eigene Fassung mehr",
+          not [k for k in ast.walk(ast.parse(_q))
+               if isinstance(k, ast.FunctionDef)
+               and k.name == "schluessel_schreiben"])
+    check(f"{werkzeug} nimmt die gemeinsame",
+          "import schluessel" in _q)
+    check(f"{werkzeug} setzt die Rechte nicht erst hinterher",
+          "PRIVAT.chmod(0o600)" not in _q)
+
+for werkzeug in ("schluessel.py",):
     _q = (WURZEL / "tools" / werkzeug).read_text(encoding="utf-8")
     _fn = next((k for k in ast.walk(ast.parse(_q))
                 if isinstance(k, ast.FunctionDef)
                 and k.name == "schluessel_schreiben"), None)
     check(f"{werkzeug} hat schluessel_schreiben()", _fn is not None)
     if _fn:
+        # Zwei Wege seit 0.37.21: neu anlegen (O_EXCL) und ersetzen
+        # (Nebendatei, dann umbenennen). BEIDE muessen 0600 am os.open
+        # mitgeben - der zweite ist der, ueber den eine bestehende offene
+        # Datei verschluesselt wird.
         _open = [k for k in ast.walk(_fn) if isinstance(k, ast.Call)
                  and isinstance(k.func, ast.Attribute) and k.func.attr == "open"]
-        check(f"{werkzeug} legt die Datei mit os.open an", len(_open) == 1)
-        check(f"{werkzeug} gibt den Modus 0600 beim Anlegen mit",
-              bool(_open) and len(_open[0].args) >= 3
-              and getattr(_open[0].args[2], "value", None) == 0o600,
-              ast.dump(_open[0]) if _open else "")
+        check(f"{werkzeug} legt Dateien mit os.open an", len(_open) == 2,
+              len(_open))
+        check(f"{werkzeug} gibt bei JEDEM Anlegen den Modus 0600 mit",
+              bool(_open) and all(len(o.args) >= 3
+                                  and getattr(o.args[2], "value", None) == 0o600
+                                  for o in _open),
+              [ast.dump(o)[:60] for o in _open])
         check(f"{werkzeug} setzt die Rechte der Datei nicht erst hinterher",
               not [k for k in ast.walk(_fn) if isinstance(k, ast.Call)
                    and isinstance(k.func, ast.Attribute)
@@ -1111,12 +1132,10 @@ for werkzeug in ("sign-release.py", "make-license.py"):
               not [k for k in ast.walk(_fn) if isinstance(k, ast.Call)
                    and isinstance(k.func, ast.Attribute)
                    and k.func.attr == "write_bytes"])
-    check(f"{werkzeug} setzt die Rechte nicht erst hinterher",
-          "PRIVAT.chmod(0o600)" not in _q)
 
 # Und die Wirkung, unter einer Umask, die den Fehler sichtbar machen
 # wuerde.
-_spec = _iu.spec_from_file_location("sr_haertung", WURZEL / "tools" / "sign-release.py")
+_spec = _iu.spec_from_file_location("sr_haertung", WURZEL / "tools" / "schluessel.py")
 _m = _iu.module_from_spec(_spec)
 try:
     _spec.loader.exec_module(_m)

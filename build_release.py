@@ -13,7 +13,9 @@ gleich.
 """
 
 import argparse
+import getpass
 import hashlib
+import os
 import re
 import stat
 import subprocess
@@ -217,6 +219,70 @@ def pruefe_paket(ziel: Path):
         sys.exit(1)
 
 
+# ======================================================================
+# Passphrase des Signaturschluessels (0.37.21)
+# ======================================================================
+# Der private Signaturschluessel liegt seit 0.37.21 verschluesselt. Ohne
+# den folgenden Umweg wuerde er DREIMAL je Bau nach der Passphrase
+# fragen - einmal fuer agent.py, einmal fuer die Gegenprobe darueber,
+# einmal fuer das Paket.
+#
+# Schlimmer: signiere() und signiere_agent() rufen das Werkzeug mit
+# capture_output=True auf. Die Eingabeaufforderung von getpass ginge
+# damit in den abgefangenen Strom und waere unsichtbar - der Bau saehe
+# aus, als haenge er, und stuende in Wahrheit auf einer Eingabe, die
+# niemand sieht.
+#
+# Also: hier einmal fragen, im Speicher halten, und ueber die Umgebung
+# NUR DER KINDPROZESSE weiterreichen. Nicht ueber os.environ des eigenen
+# Prozesses - das wuerde an alles vererbt, was sonst noch gestartet wird.
+PRIVATER_SCHLUESSEL = Path.home() / ".co37" / "release-private.pem"
+if os.environ.get("CO37_LICENSE_HOME"):
+    PRIVATER_SCHLUESSEL = (Path(os.environ["CO37_LICENSE_HOME"])
+                           / "release-private.pem")
+
+_UMGEBUNG = {}
+
+
+def passphrase_vorbereiten():
+    """
+    Wenn der Schluessel verschluesselt ist: einmal fragen und pruefen.
+
+    Geprueft wird SOFORT, nicht erst beim ersten Signieren. Ein Vertipper
+    soll vor dem Bau auffallen und nicht mittendrin - zu dem Zeitpunkt
+    sind die Versionsnummern schon in die Dateien geschrieben.
+    """
+    if not PRIVATER_SCHLUESSEL.is_file():
+        return
+    # Am PEM-Kopf ablesbar, ohne zu entschluesseln und ohne cryptography.
+    if b"ENCRYPTED PRIVATE KEY" not in PRIVATER_SCHLUESSEL.read_bytes():
+        return
+
+    werkzeug = HIER / "tools" / "sign-release.py"
+    if not werkzeug.is_file():
+        return
+
+    if not sys.stdin.isatty():
+        fehler("Der Signaturschluessel ist mit einer Passphrase geschuetzt,\n"
+               "aber hier sitzt niemand an der Tastatur. Ohne Terminal\n"
+               "laesst sich nicht signieren - mit --no-sign bauen oder von\n"
+               "Hand aufrufen.")
+
+    pw = getpass.getpass("Passphrase fuer den Signaturschluessel: ")
+    umgebung = dict(os.environ, CO37_RELEASE_PASSPHRASE=pw)
+    r = subprocess.run([sys.executable, str(werkzeug), "--schluessel-pruefen"],
+                       capture_output=True, text=True, env=umgebung)
+    if r.returncode != 0:
+        fehler((r.stdout + r.stderr).strip() or "Die Passphrase passt nicht.")
+    _UMGEBUNG["CO37_RELEASE_PASSPHRASE"] = pw
+    print("Passphrase angenommen.")
+
+
+def _kindumgebung():
+    """Die Umgebung fuer sign-release.py - nur dort steht die Passphrase."""
+    return dict(os.environ, **_UMGEBUNG) if _UMGEBUNG else None
+
+
 def signiere(ziel: Path) -> bool:
     """
     Signiert das Paket, wenn ein privater Signaturschluessel vorliegt.
@@ -228,7 +294,7 @@ def signiere(ziel: Path) -> bool:
     if not werkzeug.is_file():
         return False
     r = subprocess.run([sys.executable, str(werkzeug), str(ziel)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=_kindumgebung())
     if r.returncode != 0:
         # Kein Abbruch: ohne Schluessel ist das der Normalfall.
         print(f"    (nicht signiert: {r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr.strip()})")
@@ -267,7 +333,7 @@ def signiere_agent() -> bool:
     if not werkzeug.is_file():
         return False
     r = subprocess.run([sys.executable, str(werkzeug), str(quelle)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=_kindumgebung())
     summe.unlink(missing_ok=True)
     if r.returncode != 0 or not sig.is_file():
         print("    (agent.py nicht signiert - Agents mit ausgeliefertem "
@@ -280,7 +346,7 @@ def signiere_agent() -> bool:
     # schiefgeht: eine Signatur ueber einen Stand, den es nach dem
     # naechsten Schreibvorgang so nicht mehr gibt.
     p = subprocess.run([sys.executable, str(werkzeug), "--pruefen", str(quelle)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=_kindumgebung())
     if p.returncode != 0:
         sig.unlink(missing_ok=True)
         fehler(f"Die Signatur von agent.py passt nicht zur Datei: "
@@ -300,6 +366,14 @@ def main():
     p.add_argument("--behalten", type=int, default=2,
                    help="wie viele Pakete im Ordner bleiben (Vorgabe 2)")
     a = p.parse_args()
+
+    # Passphrase GANZ am Anfang, vor der ersten Schreiboperation. Steht
+    # sie weiter unten, hat setze_versionen() die Versionsnummern schon in
+    # agent.py, update_watcher.py und index.html geschrieben - und ein
+    # Vertipper hinterlaesst einen halb angehobenen Arbeitsstand, den
+    # niemand als solchen erkennt.
+    if not a.no_sign:
+        passphrase_vorbereiten()
 
     vfile = HIER / "backend" / "VERSION"
     if a.version:
