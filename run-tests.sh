@@ -119,6 +119,7 @@ REIHEN=(
   "login-throttle  $PY tests/login-throttle-test.py"
   "protokoll       $PY tests/protokoll-test.py"
   "syslog          $PY tests/syslog-test.py"
+  "totp            $PY tests/totp-test.py"
   "agent-selfheal  $PY tests/agent-selfheal-test.py"
   "reboot-report   $PY tests/reboot-report-test.py"
   "harness         $PY tests/harness-test.py"

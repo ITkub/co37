@@ -37,6 +37,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import joblog
 import syslogfwd
+import totp
 import license
 import migrate
 import update_manager
@@ -47,8 +48,8 @@ from utctime import (
 )
 from models import (
     Area, ApprovalState, AuditEntry, Host, HostStatus, InstallToken, Job,
-    JobState, JobType, LoginSession, OSType, Role, Setting, UpdatePackage,
-    User,
+    JobState, JobType, LoginSession, OSType, PendingLogin, Role, Setting,
+    UpdatePackage, User,
 )
 
 DB_URL = os.getenv("CO37_DB", "sqlite:///./co37.db")
@@ -670,6 +671,25 @@ SET_SYSLOG_PORT = "syslog_port"
 SET_SYSLOG_TRANSPORT = "syslog_transport"
 SET_SYSLOG_FACILITY = "syslog_facility"
 SET_SYSLOG_VERIFY = "syslog_verify"
+
+# Anmeldung in zwei Schritten. Ab Werk freiwillig je Konto; dieser
+# Schalter macht sie fuer Administratoren zur Pflicht.
+#
+# Aus, und das ist eine bewusste Entscheidung des Betreibers, keine
+# Empfehlung: BSI OPS.1.2.5.A17 und OPS.1.1.7.A6 verlangen ein
+# Mehr-Faktor-Verfahren, und eine Moeglichkeit, die niemand einschaltet,
+# erfuellt das nicht. Der Schalter ist da, damit aus "nicht vorhanden"
+# ein "vorhanden und abgeschaltet" wird - das laesst sich begruenden.
+SET_MFA_ADMIN = "mfa_required_admin"
+
+# Wie lange der Zwischenschritt gilt. Fuenf Minuten sind reichlich, um
+# ein Telefon aus der Tasche zu holen, und kurz genug, dass ein
+# abgefangener Zwischentoken wenig wert ist.
+MFA_PENDING_MINUTES = 5
+
+# Fehlversuche je Zwischenschritt. Danach ist er verbraucht und die
+# Anmeldung faengt beim Passwort an.
+MFA_MAX_TRIES = 5
 SPRACHEN = ("en", "de")
 
 
@@ -5006,6 +5026,164 @@ def login(payload: LoginIn, request: Request,
         session.commit()
         load_proxy_config(session)
 
+    # ------------------------------------------------------------------
+    # Zweiter Schritt, wenn das Konto ihn eingerichtet hat
+    # ------------------------------------------------------------------
+    # Abgefragt wird totp_confirmed_at, NICHT totp_secret. Wer die
+    # Einrichtung anfaengt und abbricht, hat ein Geheimnis in der
+    # Datenbank, aber keine App, die Codes liefert - der wuerde sich mit
+    # der falschen Bedingung selbst aussperren.
+    if user.totp_confirmed_at:
+        zwischen = secrets.token_urlsafe(32)
+        session.add(PendingLogin(
+            user_id=user.id,
+            token_hash=hash_token(zwischen),
+            expires_at=utcnow() + timedelta(minutes=MFA_PENDING_MINUTES),
+            from_ip=ip))
+        audit(session, user.username, "login.mfa-pending", None, request)
+        session.commit()
+        # KEIN Cookie, KEINE Sitzung. Nur die Auskunft, dass es
+        # weitergeht, und woran.
+        return JSONResponse(content={
+            "mfa_required": True,
+            "mfa_token": zwischen,
+            "expires_in": MFA_PENDING_MINUTES * 60,
+        })
+
+    return sitzung_anlegen(session, user, request)
+
+
+class TotpLoginIn(BaseModel):
+    mfa_token: Text
+    code: Text
+
+
+@app.post("/api/v1/login/totp")
+def login_totp(payload: TotpLoginIn, request: Request,
+               session: Session = Depends(get_session)):
+    """
+    Zweiter Schritt: Code oder Wiederherstellungscode.
+
+    Die Drosselung je Adresse gilt hier genauso wie beim Passwort -
+    sonst waere der zweite Faktor der ungeschuetzte von beiden.
+    """
+    # ------------------------------------------------------------------
+    # KEINE Drosselung je Adresse in diesem Schritt - mit Absicht
+    # ------------------------------------------------------------------
+    # Der naheliegende Weg waere, falsche Codes wie falsche Passwoerter
+    # zu zaehlen. Beim Bauen hat die Pruefreihe gezeigt, warum das falsch
+    # ist: die Drosselung gilt fuer die ganze ABSENDER-ADRESSE, und
+    # hinter einem Reverse Proxy haben alle Benutzer dieselbe. Wer ein
+    # einziges Passwort kennt, koennte damit fuenfmal einen falschen Code
+    # eintippen und die Anmeldung fuer die gesamte Anlage eine
+    # Viertelstunde lahmlegen. Der zweite Faktor waere dann ein Hebel
+    # gegen die Verfuegbarkeit statt ein Schutz.
+    #
+    # Gebremst wird stattdessen je Vorgang (MFA_MAX_TRIES) - und der
+    # Vorgang selbst entsteht nur nach einer erfolgreichen
+    # Passwortpruefung, die ihrerseits gedrosselt ist. Rechnung: fuenf
+    # Passwortversuche je Viertelstunde, je Vorgang fuenf Codes, macht
+    # 25 Rateversuche je Viertelstunde auf eine Million Moeglichkeiten.
+    ip = client_ip(request)
+
+    offen = session.exec(
+        select(PendingLogin).where(
+            PendingLogin.token_hash == hash_token(payload.mfa_token))
+    ).first()
+    # Abgelaufene Zwischenschritte gleich mit aufraeumen - sie haeufen
+    # sich sonst bei jedem abgebrochenen Anmeldeversuch an.
+    for tot in session.exec(
+            select(PendingLogin).where(PendingLogin.expires_at < utcnow())).all():
+        session.delete(tot)
+
+    if not offen or offen.expires_at < utcnow():
+        session.commit()
+        raise HTTPException(401, "Der Anmeldevorgang ist abgelaufen. "
+                                 "Bitte von vorn anmelden.")
+
+    user = session.get(User, offen.user_id)
+    if not user or user.disabled or not user.totp_confirmed_at:
+        session.delete(offen)
+        session.commit()
+        raise HTTPException(401, "Anmeldung nicht moeglich.")
+
+    offen.tries += 1
+    if offen.tries > MFA_MAX_TRIES:
+        session.delete(offen)
+        audit(session, user.username, "login.mfa-failed",
+              f"{MFA_MAX_TRIES} Fehlversuche - Vorgang verworfen", request)
+        session.commit()
+        raise HTTPException(401, "Zu viele falsche Codes. "
+                                 "Bitte von vorn anmelden.")
+    session.add(offen)
+
+    geheim = decrypt(user.totp_secret) if user.totp_secret else None
+    schritt = totp.passt(geheim, payload.code) if geheim else None
+
+    # Wiederverwendung ausschliessen. Ohne diese Pruefung laesst sich ein
+    # mitgelesener Code innerhalb seiner Gueltigkeit erneut einsetzen -
+    # bei 30 Sekunden Schritt und einem Schritt Toleranz bis zu 90
+    # Sekunden lang.
+    if schritt is not None and user.totp_last_step is not None \
+            and schritt <= user.totp_last_step:
+        schritt = None
+        verbraucht = True
+    else:
+        verbraucht = False
+
+    rettung = None
+    if schritt is None and not verbraucht:
+        hashes = [z for z in (user.totp_recovery or "").splitlines() if z]
+        rettung = totp.rettung_passt(payload.code, hashes)
+
+    if schritt is None and rettung is None:
+        audit(session, user.username, "login.mfa-failed",
+              "Code bereits verwendet" if verbraucht else "Code falsch",
+              request)
+        session.commit()
+        # Der Unterschied gehoert dem Benutzer gesagt: "bereits
+        # verwendet" heisst, dass er den richtigen Code hatte und nur zu
+        # frueh dran war - typisch direkt nach der Einrichtung oder bei
+        # einer zweiten Anmeldung innerhalb derselben halben Minute. Ohne
+        # den Hinweis tippt er denselben Code immer wieder ein.
+        #
+        # Verraten wird damit nichts: wer einen Code wiederholt, weiss
+        # selbst, dass er ihn wiederholt.
+        if verbraucht:
+            raise HTTPException(
+                401, "Dieser Code wurde bereits verwendet. Warte auf den "
+                     "naechsten in der App.")
+        raise HTTPException(401, "Code falsch.")
+
+    if rettung is not None:
+        # Ein Wiederherstellungscode gilt genau einmal.
+        rest = [z for z in (user.totp_recovery or "").splitlines()
+                if z and z != rettung]
+        user.totp_recovery = "\n".join(rest)
+        audit(session, user.username, "login.mfa-recovery",
+              f"Wiederherstellungscode eingeloest, {len(rest)} uebrig", request)
+        wie = "Wiederherstellungscode"
+    else:
+        user.totp_last_step = schritt
+        wie = None
+
+    session.add(user)
+    session.delete(offen)
+    note_login_success(ip)
+    return sitzung_anlegen(session, user, request, wie)
+
+
+def sitzung_anlegen(session: Session, user: User, request: Request,
+                    wie: str = None) -> JSONResponse:
+    """
+    Sitzung erzeugen und als Cookie ausliefern.
+
+    Eigene Funktion seit 0.37.23, weil es jetzt ZWEI Wege hierher gibt:
+    die einstufige Anmeldung und den zweiten Schritt mit dem Code. Die
+    Cookie-Merkmale (httponly, samesite, secure) muessen auf beiden Wegen
+    dieselben sein - stuende der Block zweimal da, waere es eine Frage
+    der Zeit, bis einer der beiden nachgezogen wird und der andere nicht.
+    """
     token = secrets.token_urlsafe(32)
     session.add(LoginSession(
         user_id=user.id,
@@ -5015,7 +5193,7 @@ def login(payload: LoginIn, request: Request,
     ))
     user.last_login = utcnow()
     session.add(user)
-    audit(session, user.username, "login.ok", None, request)
+    audit(session, user.username, "login.ok", wie, request)
     session.commit()
 
     body = {
@@ -5487,6 +5665,183 @@ def set_proxy_settings(payload: ProxySettings, request: Request,
     session.commit()
     load_proxy_config(session)
     return get_proxy_settings(request, session)
+
+
+# ======================================================================
+# Anmeldung in zwei Schritten - Einrichtung am eigenen Konto
+# ======================================================================
+class TotpConfirmIn(BaseModel):
+    code: Text
+
+
+class TotpOffIn(BaseModel):
+    password: Text
+    code: Text
+
+
+def _konto(session: Session, who: Principal) -> User:
+    """
+    Das Benutzerkonto hinter der Anmeldung.
+
+    Ein API-Schluessel hat keins. Fuer den zweiten Faktor ist das kein
+    Mangel, sondern der Normalfall: ein Schluessel fuer Maschinen kann
+    kein Telefon in der Hand halten. Er bekommt hier eine klare Absage
+    statt eines Absturzes.
+    """
+    if not who.user:
+        raise HTTPException(
+            400, "Dieser Zugang ist kein Benutzerkonto - fuer einen "
+                 "API-Schluessel gibt es keinen zweiten Faktor.")
+    return session.get(User, who.user.id)
+
+
+def _anlagenname(session: Session) -> str:
+    """Was in der Authenticator-App als Aussteller steht."""
+    url = _setting(session, SET_PUBLIC_URL, "") or ""
+    if url:
+        return f"CO-37 {url.split('//')[-1].split('/')[0]}"
+    return "CO-37"
+
+
+@app.post("/api/v1/me/totp/start")
+def totp_start(who: Principal = Depends(require_login),
+               session: Session = Depends(get_session)):
+    """
+    Geheimnis erzeugen und die Einrichtungsadresse zurueckgeben.
+
+    Noch NICHT scharf: totp_confirmed_at bleibt leer, bis ein Code
+    bestaetigt wurde. Wer hier abbricht, meldet sich weiter mit dem
+    Passwort allein an.
+    """
+    user = _konto(session, who)
+    if user.totp_confirmed_at:
+        raise HTTPException(
+            400, "Die Anmeldung in zwei Schritten ist bereits eingerichtet. "
+                 "Erst abschalten, dann neu einrichten.")
+    geheim = totp.geheimnis_erzeugen()
+    user.totp_secret = encrypt(geheim)
+    user.totp_last_step = None
+    session.add(user)
+    session.commit()
+    return {
+        "secret": geheim,
+        "otpauth": totp.einrichtungs_adresse(
+            geheim, user.username, _anlagenname(session)),
+        "digits": totp.STELLEN,
+        "period": totp.SCHRITT,
+    }
+
+
+@app.post("/api/v1/me/totp/confirm")
+def totp_confirm(payload: TotpConfirmIn, request: Request,
+                 who: Principal = Depends(require_login),
+                 session: Session = Depends(get_session)):
+    """
+    Einen Code bestaetigen und die Wiederherstellungscodes ausgeben.
+
+    Die Codes werden GENAU HIER einmal im Klartext zurueckgegeben und
+    danach nie wieder - gespeichert ist nur ihr SHA-256. Wer sie nicht
+    aufschreibt, hat sie verloren; das ist gewollt und steht so in der
+    Oberflaeche.
+    """
+    user = _konto(session, who)
+    if not user.totp_secret:
+        raise HTTPException(400, "Erst die Einrichtung starten.")
+    if user.totp_confirmed_at:
+        raise HTTPException(400, "Bereits eingerichtet.")
+
+    schritt = totp.passt(decrypt(user.totp_secret), payload.code)
+    if schritt is None:
+        audit(session, user.username, "totp.confirm-failed", None, request)
+        session.commit()
+        raise HTTPException(400, "Code falsch. Stimmt die Uhrzeit des "
+                                 "Geraets?")
+
+    codes = totp.rettungscodes()
+    user.totp_recovery = "\n".join(totp.rettung_hash(c) for c in codes)
+    user.totp_confirmed_at = utcnow()
+    user.totp_last_step = schritt
+    session.add(user)
+    audit(session, user.username, "totp.enabled", None, request)
+    session.commit()
+    return {"ok": True, "recovery_codes": codes}
+
+
+@app.post("/api/v1/me/totp/off")
+def totp_off(payload: TotpOffIn, request: Request,
+             who: Principal = Depends(require_login),
+             session: Session = Depends(get_session)):
+    """
+    Abschalten - verlangt Passwort UND einen gueltigen Code.
+
+    Beides, weil sonst eine uebernommene Sitzung genuegte, um den zweiten
+    Faktor loszuwerden. Genau davor soll er schuetzen.
+    """
+    user = _konto(session, who)
+    if not user.totp_confirmed_at:
+        raise HTTPException(400, "Nicht eingerichtet.")
+    if not verify_password(payload.password, user.password_hash):
+        audit(session, user.username, "totp.disable-failed",
+              "Passwort falsch", request)
+        session.commit()
+        raise HTTPException(401, "Passwort falsch.")
+    geheim = decrypt(user.totp_secret) if user.totp_secret else None
+    if geheim is None or totp.passt(geheim, payload.code) is None:
+        audit(session, user.username, "totp.disable-failed",
+              "Code falsch", request)
+        session.commit()
+        raise HTTPException(401, "Code falsch.")
+
+    if user.role is Role.admin and \
+            _setting(session, SET_MFA_ADMIN, "false") == "true":
+        raise HTTPException(
+            400, "Fuer Administratoren ist die Anmeldung in zwei Schritten "
+                 "in dieser Anlage verpflichtend.")
+
+    user.totp_secret = None
+    user.totp_confirmed_at = None
+    user.totp_last_step = None
+    user.totp_recovery = None
+    session.add(user)
+    audit(session, user.username, "totp.disabled", None, request)
+    session.commit()
+    return {"ok": True}
+
+
+class MfaPolicyIn(BaseModel):
+    required_for_admins: bool
+
+
+@app.get("/api/v1/mfa-policy", dependencies=[Depends(require_admin)])
+def get_mfa_policy(session: Session = Depends(get_session)):
+    return {"required_for_admins":
+            _setting(session, SET_MFA_ADMIN, "false") == "true"}
+
+
+@app.post("/api/v1/mfa-policy", dependencies=[Depends(require_admin)])
+def set_mfa_policy(payload: MfaPolicyIn, request: Request,
+                   who: Principal = Depends(require_admin),
+                   session: Session = Depends(get_session)):
+    """
+    Pflicht fuer Administratoren ein- oder ausschalten.
+
+    Beim Einschalten wird geprueft, dass das eigene Konto sie bereits
+    hat. Sonst schaltet sich jemand scharf, meldet sich ab und kommt
+    nicht mehr hinein - und der Weg zurueck ginge nur ueber root.
+    """
+    if payload.required_for_admins:
+        ich = _konto(session, who)
+        if not ich.totp_confirmed_at:
+            raise HTTPException(
+                400, "Erst am eigenen Konto einrichten, dann zur Pflicht "
+                     "machen - sonst sperrst du dich aus.")
+    set_setting(session, SET_MFA_ADMIN,
+                "true" if payload.required_for_admins else "false")
+    audit(session, who.name,
+          "mfa.required-on" if payload.required_for_admins else "mfa.required-off",
+          None, request)
+    session.commit()
+    return get_mfa_policy(session)
 
 
 class SyslogSettings(BaseModel):

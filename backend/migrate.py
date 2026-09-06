@@ -65,7 +65,14 @@ logger = logging.getLogger(__name__)
 #    faellt er bei verify() nicht auf - die Zahl steht hier trotzdem, weil
 #    ein Rueckschritt auf 18 den Index nicht kennt und ein Doppeleintrag
 #    dann wieder entstehen kann. Siehe _hostname_index().
-SCHEMA_VERSION = 19
+# 20: vier Spalten an 'user' fuer die Anmeldung in zwei Schritten. Alle
+#    ohne DEFAULT - NULL heisst "nicht eingerichtet". Ein Rueckschritt
+#    auf 19 ist unkritisch: die aeltere Fassung kennt die Spalten nicht
+#    und fragt nie nach einem Code. Wer die Anmeldung eingerichtet hat,
+#    kommt danach also wieder mit dem Passwort allein hinein - das ist
+#    kein Fehler, sondern die Kehrseite davon, dass ein Rueckschritt
+#    ueberhaupt moeglich bleiben soll.
+SCHEMA_VERSION = 20
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -111,6 +118,15 @@ EXPECTED_COLUMNS = {
         # bestehende Konten das Recht erst bekommen, wenn es jemand
         # ausdruecklich vergibt.
         "may_reboot": "BOOLEAN DEFAULT 0",
+        # Anmeldung in zwei Schritten, ab Schema 20. Alle vier bewusst
+        # ohne DEFAULT: NULL heisst "nicht eingerichtet", und genau das
+        # trifft auf jedes bestehende Konto zu. Ein bestehender Benutzer
+        # meldet sich nach dem Update also unveraendert an - er kann die
+        # zweite Stufe einschalten, er muss nicht.
+        "totp_secret": "VARCHAR",
+        "totp_confirmed_at": "DATETIME",
+        "totp_last_step": "INTEGER",
+        "totp_recovery": "TEXT",
     },
 }
 

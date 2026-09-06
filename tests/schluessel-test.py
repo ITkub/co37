@@ -407,7 +407,7 @@ else:
     import select as _sel   # noqa: E402
     import time as _zeit    # noqa: E402
 
-    def unter_tty(befehl, antworten, umgebung=None, grenze=120):
+    def unter_tty(befehl, antworten, umgebung=None, grenze=25):
         """
         Einen Aufruf mit echtem Terminal fahren und auf jede Frage nach
         einer Passphrase die naechste Antwort tippen.
@@ -436,11 +436,19 @@ else:
                 if not teil:
                     break
                 aus += teil
-                fragen = aus.count(b"assphrase") + aus.count(b"Noch einmal")
-                while offen and fragen > gesehen:
-                    _zeit.sleep(0.2)
+                # An der Eingabeaufforderung erkennen, nicht am Wort
+                # "Passphrase": das steht auch im Warnhinweis darueber.
+                # getpass endet immer mit ": " und ohne Zeilenumbruch -
+                # genau darauf wird gewartet.
+                #
+                # Die erste Fassung zaehlte Wortvorkommen und tippte
+                # deshalb zu frueh; wenn dabei eine Antwort verlorenging,
+                # lief der Aufruf in die Zeitgrenze von zwei Minuten.
+                # Zweimal das in einer Reihe, und der Testlauf stand.
+                while offen and aus.rstrip(b" ").endswith(b":"):
                     os.write(fd, offen.pop(0).encode() + b"\n")
                     gesehen += 1
+                    aus += b"\n"
             else:
                 w, st = os.waitpid(pid, os.WNOHANG)
                 if w:

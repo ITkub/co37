@@ -108,6 +108,10 @@ VERBOTEN = [
     # aussieht: wer sie abschalten kann, nimmt die Aufsicht weg, und wer
     # die Zieladresse setzt, lenkt jeden Protokolleintrag - inklusive
     # Benutzernamen und Adressen - auf einen Rechner seiner Wahl.
+    # Der Pflichtschalter fuer die Anmeldung in zwei Schritten. Wer ihn
+    # abschalten kann, nimmt allen Administratoren den zweiten Faktor.
+    ("GET",    "/api/v1/mfa-policy", None),
+    ("POST",   "/api/v1/mfa-policy", {"required_for_admins": False}),
     ("GET",    "/api/v1/syslog-settings", None),
     ("POST",   "/api/v1/syslog-settings", {"host": "127.0.0.1"}),
     ("POST",   "/api/v1/syslog-settings/test", {}),

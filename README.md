@@ -859,9 +859,141 @@ einem überlangen Benutzernamen an der Anmeldung vollschreiben.
 
 ---
 
+# Anmeldung in zwei Schritten
+
+Freiwillig je Konto. Verfahren ist **TOTP** — die sechsstelligen Codes
+aus einer Authenticator-App.
+
+> **Stand 0.37.23: noch ohne Oberfläche.** Eingerichtet wird über die
+> Schnittstelle, die Bedienung kommt nach.
+
+## Warum TOTP und nichts anderes
+
+Die Begründung gehört dazu — BSI OPS.1.1.7.A6 verlangt nicht nur eine
+Methode, sondern eine dokumentierte Auswahl.
+
+CO-37 soll **in abgeschotteten Netzen** laufen. Damit scheiden aus:
+E-Mail-Codes (kein Mailserver), SMS (kein Mobilfunk, und ohnehin das
+schwächste Verfahren), ein externer Anmeldedienst (kein Internet).
+**WebAuthn/Passkeys** wäre kryptografisch das beste Verfahren, setzt aber
+eine HTTPS-Herkunft voraus — und CO-37 ist im Auslieferungszustand über
+HTTP erreichbar. Ein Verfahren, das bei der Ersteinrichtung nicht
+funktioniert, wird nicht eingerichtet. Bleibt als späterer Zusatz
+sinnvoll.
+
+TOTP braucht nichts außer einer synchronen Uhr, und die verlangt
+OPS.1.1.7.A3 ohnehin.
+
+## Einrichten
+
+```
+curl -X POST http://localhost:8080/api/v1/me/totp/start -H "X-Session: $S"
+```
+
+Liefert `secret` und eine `otpauth://`-Adresse. Beides in die App
+eintragen, dann bestätigen:
+
+```
+curl -X POST http://localhost:8080/api/v1/me/totp/confirm \
+  -H "X-Session: $S" -H "Content-Type: application/json" \
+  -d '{"code":"123456"}'
+```
+
+Die Antwort enthält **zehn Wiederherstellungscodes — genau einmal.**
+Gespeichert wird nur ihr SHA-256. Wer sie nicht aufschreibt, hat sie
+verloren.
+
+**Zwischen `start` und `confirm` passiert nichts.** Wer die Einrichtung
+abbricht, meldet sich weiter mit dem Passwort allein an. Das ist Absicht:
+sonst sperrt sich aus, wer die App nicht fertig einrichtet.
+
+## Anmelden
+
+Die Anmeldung liefert dann keine Sitzung mehr, sondern:
+
+```json
+{"mfa_required": true, "mfa_token": "...", "expires_in": 300}
+```
+
+Der Zwischentoken ist **keine Sitzung** — er öffnet keine einzige Route.
+Damit und mit dem Code geht es weiter:
+
+```
+curl -X POST http://localhost:8080/api/v1/login/totp \
+  -H "Content-Type: application/json" \
+  -d '{"mfa_token":"...","code":"123456"}'
+```
+
+Ein Wiederherstellungscode steht an derselben Stelle wie der Code aus der
+App und gilt genau einmal.
+
+**Ein Code gilt genau einmal.** Der zuletzt benutzte Zeitschritt wird
+gespeichert. Ohne das ließe sich ein mitgelesener Code bis zu 90 Sekunden
+lang erneut einsetzen. Praktische Folge: direkt nach dem Bestätigen ist
+der eben eingegebene Code verbraucht — eine sofortige Anmeldung damit
+meldet „bereits verwendet", nicht „falsch".
+
+**Fünf Fehlversuche je Anmeldevorgang**, dann ist der Vorgang verworfen
+und es geht beim Passwort von vorn los. Die Drosselung je Absender-Adresse
+gilt hier bewusst **nicht**: sie trifft die ganze Adresse, und hinter
+einem Reverse Proxy haben alle Benutzer dieselbe. Wer ein einziges
+Passwort kennt, könnte damit sonst die Anmeldung für die gesamte Anlage
+eine Viertelstunde lahmlegen.
+
+## Pflicht für Administratoren
+
+```
+curl -X POST http://localhost:8080/api/v1/mfa-policy \
+  -H "X-Session: $S" -H "Content-Type: application/json" \
+  -d '{"required_for_admins":true}'
+```
+
+**Ab Werk aus.** Einschalten geht nur, wenn das eigene Konto die
+Anmeldung in zwei Schritten schon hat — sonst sperrt man sich aus.
+
+Solange der Schalter aus ist, ist die BSI-Anforderung (OPS.1.2.5.A17,
+OPS.1.1.7.A6) **nicht erfüllt**. Eine Möglichkeit, die niemand
+einschaltet, ist keine Maßnahme. Der Schalter macht daraus eine
+nachvollziehbare Entscheidung statt einer Lücke.
+
+## Wenn das Gerät weg ist
+
+Erst die Wiederherstellungscodes. Sind die auch weg, hilft **root auf dem
+Server** — derselbe Weg wie im Abschnitt „Wenn du dich aussperrst":
+
+```
+systemctl stop co37-backend
+sqlite3 /opt/co37/data/co37.db \
+  "UPDATE user SET totp_secret=NULL, totp_confirmed_at=NULL,
+   totp_last_step=NULL, totp_recovery=NULL WHERE username='admin';"
+systemctl start co37-backend
+```
+
+Das ist der bewusst offene Notausgang: wer physischen oder root-Zugang
+zum Server hat, kommt hinein. Ein zweiter Faktor schützt gegen ein
+gestohlenes Passwort, nicht gegen root.
+
+---
+
 # Weiterleitung an eine zentrale Protokollierung
 
-**Einstellungen → Protokollierung.** Ab Werk **aus**.
+Ab Werk **aus**.
+
+> **Stand 0.37.23: noch ohne Oberflaeche.** Eingestellt wird ueber die
+> Schnittstelle; die Bedienung kommt nach. Beispiel mit einer
+> Administrator-Sitzung:
+>
+> ```
+> curl -X POST http://localhost:8080/api/v1/syslog-settings \
+>   -H "X-Session: $SITZUNG" -H "Content-Type: application/json" \
+>   -d '{"host":"192.168.2.20","port":6514,"transport":"tls","facility":"local0"}'
+> curl -X POST http://localhost:8080/api/v1/syslog-settings/test -H "X-Session: $SITZUNG"
+> curl -X POST http://localhost:8080/api/v1/syslog-settings \
+>   -H "X-Session: $SITZUNG" -H "Content-Type: application/json" -d '{"enabled":true}'
+> ```
+>
+> Erst testen, dann einschalten — die Testmeldung stellt synchron zu und
+> sagt, ob sie durchging.
 
 CO-37 schrieb bis 0.37.22 ausschließlich in die eigene Datenbank. Für ein
 einzelnes kleines Netz reicht das; in einem Betrieb mit Logserver oder
@@ -895,8 +1027,9 @@ abgeschlossene Auftragsereignis (erledigt, fehlgeschlagen, abgebrochen).
 tausende Zeilen je Host, das flutet jedes SIEM und kostet dort Geld nach
 Datenvolumen. Die stehen weiterhin als Datei bereit.
 
-**Der Knopf „Testen"** stellt eine Meldung sofort zu und sagt, ob sie
-durchging. Das ist die einzige Stelle, an der synchron gesendet wird.
+**`POST /api/v1/syslog-settings/test`** stellt eine Meldung sofort zu
+und sagt, ob sie durchging. Das ist die einzige Stelle, an der synchron
+gesendet wird — überall sonst wäre Warten ein Fehler.
 
 ## Was passiert, wenn der Logserver weg ist
 
@@ -917,7 +1050,7 @@ Protokollierung stirbt, ist ein Ausfall.
 
 Wie viele verloren gingen, wird gezählt und beim nächsten erfolgreichen
 Kontakt **selbst gemeldet** (`queue.dropped`). Eine stille Lücke wäre das
-Schlechteste von beidem. Der Zähler steht auch in der Oberfläche.
+Schlechteste von beidem. Der Zähler steht in der Antwort von `GET /api/v1/syslog-settings`.
 
 **Das Prüfprotokoll in der Datenbank bleibt die Wahrheit**, die
 Weiterleitung ist die Kopie. Geht die Kopie schief, ändert das am

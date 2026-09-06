@@ -271,6 +271,29 @@ class Role(str, Enum):
     user = "user"
 
 
+class PendingLogin(SQLModel, table=True):
+    """
+    Zwischenschritt der Anmeldung: Passwort stimmt, Code fehlt noch.
+
+    Eigene Tabelle und NICHT ein Eintrag in LoginSession mit einem
+    Merkmal. Der Unterschied ist der ganze Sinn der Sache: eine Zeile in
+    LoginSession waere eine gueltige Sitzung, sobald irgendein Codeweg
+    vergisst, das Merkmal abzufragen. Hier kann das nicht passieren -
+    diese Tabelle sieht die Sitzungspruefung gar nicht.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    token_hash: str = Field(index=True, unique=True)
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime))
+    from_ip: Optional[str] = None
+
+    # Fehlversuche fuer GENAU diesen Zwischenschritt. Sechs Stellen sind
+    # eine Million Moeglichkeiten - ohne Zaehler waere der zweite Faktor
+    # in Minuten durchprobiert, ohne dass die Drosselung je Adresse
+    # anschlaegt (die zaehlt Passwoerter, nicht Codes).
+    tries: int = Field(default=0)
+
+
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True)
@@ -285,6 +308,34 @@ class User(SQLModel, table=True):
     must_change_password: bool = Field(default=False)
 
     disabled: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
+    # Anmeldung in zwei Schritten (TOTP), ab 0.37.23
+    # ------------------------------------------------------------------
+    # Das Geheimnis liegt Fernet-verschluesselt, mit demselben Schluessel
+    # wie das Checkmk-Secret. Wer die Datenbankdatei hat, hat damit noch
+    # nicht den zweiten Faktor - er braeuchte zusaetzlich
+    # CO37_SECRET_KEY aus /etc/co37/backend.env, und das gehoert root.
+    totp_secret: Optional[str] = None
+
+    # Erst gesetzt, wenn ein Code bestaetigt wurde. Solange NULL, ist die
+    # Einrichtung angefangen, aber nicht abgeschlossen - und die
+    # Anmeldung fragt NICHT nach einem Code.
+    #
+    # Der Unterschied ist wichtig: ohne ihn sperrt sich jeder aus, der
+    # die Einrichtung abbricht, nachdem das Geheimnis erzeugt wurde.
+    totp_confirmed_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(UTCDateTime))
+
+    # Der zuletzt eingeloeste Zeitschritt. Ohne dieses Feld laesst sich
+    # ein mitgelesener Code innerhalb seiner Gueltigkeit erneut
+    # verwenden - bei 30 Sekunden Schritt und einem Schritt Toleranz sind
+    # das bis zu 90 Sekunden.
+    totp_last_step: Optional[int] = None
+
+    # SHA-256 der Wiederherstellungscodes, einer je Zeile. Ein
+    # eingeloester Code wird entfernt - er gilt genau einmal.
+    totp_recovery: Optional[str] = None
 
     # Darf dieses Konto Neustarts anlegen und einplanen?
     #
