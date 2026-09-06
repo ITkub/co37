@@ -482,6 +482,43 @@ global.setTimeout = origSetTimeout;
           skripte.join(", "));
   }
 
+  console.log("\n=== Reiter Syslog ===");
+  {
+    // Der Reiter ist nur fuer Administratoren. Ohne admin-only saehe ihn
+    // jeder Benutzer, klickte darauf und bekaeme 403 - genau das Muster,
+    // das die Rollenpruefung im Backend abfaengt und die Oberflaeche
+    // trotzdem anbieten wuerde.
+    const knopf = html.match(/<button[^>]*data-tab="tabSyslog"[^>]*>/);
+    check("der Reiter Syslog steht in der Leiste", !!knopf, knopf && knopf[0]);
+    check("und ist nur fuer Administratoren",
+          !!knopf && /admin-only/.test(knopf[0]), knopf && knopf[0]);
+    check("der zugehoerige Bereich existiert",
+          /<div class="pane" id="tabSyslog">/.test(html));
+
+    // Jeder Bezeichner, den app.js anfasst, muss es im Markup auch
+    // geben. Genau daran ist der Sprachreiter schon einmal gescheitert:
+    // Knopf da, Bereich da, nur die Liste kannte ihn nicht.
+    const felder = ["slHost", "slPort", "slTransport", "slFacility",
+                    "slVerify", "slVerifyRow", "slVerifyHint", "slOn",
+                    "slSave", "slTest", "slTestResult", "slStats"];
+    const fehlend = felder.filter(id => !html.includes(`id="${id}"`));
+    check("alle Felder, die app.js anfasst, stehen im Markup",
+          fehlend.length === 0, fehlend.join(", "));
+
+    check("beim Oeffnen der Einstellungen wird der Reiter geladen",
+          /loadSyslog\(\)/.test(appjs));
+    check("die Zertifikatspruefung wird nur bei TLS gezeigt",
+          /syslogTlsFelder/.test(appjs));
+
+    // Der Haken darf nicht stehenbleiben, wenn der Server ablehnt -
+    // sonst zeigt die Oberflaeche einen Zustand, den es nicht gibt.
+    // Genau das passiert beim Einschalten ohne Zieladresse.
+    const anBlock = appjs.slice(appjs.indexOf('getElementById("slOn").onchange'),
+                                appjs.indexOf('getElementById("slOn").onchange') + 700);
+    check("ein abgelehntes Einschalten setzt den Haken zurueck",
+          /ev\.target\.checked = !an/.test(anBlock), anBlock.slice(0, 80));
+  }
+
   console.log("\n=== Sprachfelder zeigen den echten Stand ===");
   {
     // Ein Auswahlfeld, das nie gefuellt wird, zeigt immer den ersten

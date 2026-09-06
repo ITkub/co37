@@ -656,6 +656,7 @@ dialog#dlgSettings .hint{max-width:78ch}
     <button data-tab="tabAccount" data-i18n="settings.tab.account">Account</button>
     <button data-tab="tabUsers" class="admin-only" data-i18n="settings.tab.users">Users</button>
     <button data-tab="tabAudit" class="admin-only" data-i18n="settings.tab.audit">Log</button>
+    <button data-tab="tabSyslog" class="admin-only" data-i18n="settings.tab.syslog">Syslog</button>
     <button data-tab="tabSprache" data-i18n="settings.tab.language">Language</button>
   </div>
   <div class="dlg-body">
@@ -837,6 +838,45 @@ dialog#dlgSettings .hint{max-width:78ch}
          folgt ihm auf jeden Rechner. Die Vorgabe der Installation gilt fuer
          alle, die selbst nichts gewaehlt haben, und fuer die Anmeldeseite -
          dort ist noch kein Benutzer bekannt. Nur Administratoren. -->
+    <div class="pane" id="tabSyslog">
+      <div class="section">
+        <div class="section-title" data-i18n="settings.syslog.title">Central logging</div>
+        <div class="hint" data-i18n-html="settings.syslog.hint">Forwards every entry of the audit log and every finished job to a syslog server or SIEM. <b>Off by default.</b><br><br>CO-37 otherwise writes only into its own database. For a single small network that is enough; in an operation with a log server it is the difference between usable and not.<br><br>The audit log in the database stays the truth — this is the copy. If the copy fails, nothing about the entry changes.</div>
+        <div class="row">
+          <label style="max-width:260px" data-i18n="settings.syslog.host">Target<input id="slHost" placeholder="e.g. 192.168.2.20" data-i18n-placeholder="settings.syslog.host_example"></label>
+          <label style="max-width:110px" data-i18n="settings.syslog.port">Port<input id="slPort" type="number" min="1" max="65535" value="514"></label>
+        </div>
+        <div class="row">
+          <label style="max-width:200px" data-i18n="settings.syslog.transport">Transport<select id="slTransport">
+            <option value="udp">UDP</option>
+            <option value="tcp">TCP</option>
+            <option value="tls">TCP + TLS</option>
+          </select></label>
+          <label style="max-width:200px" data-i18n="settings.syslog.facility">Facility<select id="slFacility">
+            <option>local0</option><option>local1</option><option>local2</option>
+            <option>local3</option><option>local4</option><option>local5</option>
+            <option>local6</option><option>local7</option>
+            <option>auth</option><option>authpriv</option>
+            <option>daemon</option><option>user</option>
+          </select></label>
+        </div>
+        <label class="check" id="slVerifyRow" data-i18n="settings.syslog.verify"><input type="checkbox" id="slVerify" checked> Check the server certificate</label>
+        <div class="hint" id="slVerifyHint" data-i18n="settings.syslog.verify_hint">Only applies to TLS. Leave on unless the log server uses a certificate of its own.</div>
+        <div class="row">
+          <button id="slSave" style="align-self:flex-start" data-i18n="settings.syslog.save">Save</button>
+          <button id="slTest" style="align-self:flex-start" data-i18n="settings.syslog.test">Send test message</button>
+        </div>
+        <div id="slTestResult" class="hint"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title" data-i18n="settings.syslog.state_title">State</div>
+        <label class="check" data-i18n="settings.syslog.enabled"><input type="checkbox" id="slOn"> Forwarding on</label>
+        <div class="hint" data-i18n="settings.syslog.enable_hint">Test first, then switch on. Without a target address it cannot be switched on.</div>
+        <div id="slStats" class="hint"></div>
+      </div>
+    </div>
+
     <div class="pane" id="tabSprache">
       <div class="hint" data-i18n="language.hint">The language applies to this interface only. Messages from older agents keep the wording they were recorded with.</div>
       <div class="section" style="border-top:none;padding-top:0">

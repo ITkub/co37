@@ -977,23 +977,12 @@ gestohlenes Passwort, nicht gegen root.
 
 # Weiterleitung an eine zentrale Protokollierung
 
-Ab Werk **aus**.
+**Einstellungen → Syslog.** Ab Werk **aus**.
 
-> **Stand 0.37.23: noch ohne Oberflaeche.** Eingestellt wird ueber die
-> Schnittstelle; die Bedienung kommt nach. Beispiel mit einer
-> Administrator-Sitzung:
->
-> ```
-> curl -X POST http://localhost:8080/api/v1/syslog-settings \
->   -H "X-Session: $SITZUNG" -H "Content-Type: application/json" \
->   -d '{"host":"192.168.2.20","port":6514,"transport":"tls","facility":"local0"}'
-> curl -X POST http://localhost:8080/api/v1/syslog-settings/test -H "X-Session: $SITZUNG"
-> curl -X POST http://localhost:8080/api/v1/syslog-settings \
->   -H "X-Session: $SITZUNG" -H "Content-Type: application/json" -d '{"enabled":true}'
-> ```
->
-> Erst testen, dann einschalten — die Testmeldung stellt synchron zu und
-> sagt, ob sie durchging.
+Reihenfolge: Ziel und Übertragung eintragen, **speichern**, **Testmeldung
+senden**, und erst wenn die durchgeht, den Haken bei *Weiterleitung
+eingeschaltet* setzen. Ohne Zieladresse lässt sie sich gar nicht
+einschalten.
 
 CO-37 schrieb bis 0.37.22 ausschließlich in die eigene Datenbank. Für ein
 einzelnes kleines Netz reicht das; in einem Betrieb mit Logserver oder
@@ -1027,9 +1016,9 @@ abgeschlossene Auftragsereignis (erledigt, fehlgeschlagen, abgebrochen).
 tausende Zeilen je Host, das flutet jedes SIEM und kostet dort Geld nach
 Datenvolumen. Die stehen weiterhin als Datei bereit.
 
-**`POST /api/v1/syslog-settings/test`** stellt eine Meldung sofort zu
-und sagt, ob sie durchging. Das ist die einzige Stelle, an der synchron
-gesendet wird — überall sonst wäre Warten ein Fehler.
+**Der Knopf „Testmeldung senden"** stellt sofort zu und sagt, ob es
+klappte. Das ist die einzige Stelle, an der synchron gesendet wird —
+überall sonst wäre Warten ein Fehler.
 
 ## Was passiert, wenn der Logserver weg ist
 
@@ -1050,7 +1039,7 @@ Protokollierung stirbt, ist ein Ausfall.
 
 Wie viele verloren gingen, wird gezählt und beim nächsten erfolgreichen
 Kontakt **selbst gemeldet** (`queue.dropped`). Eine stille Lücke wäre das
-Schlechteste von beidem. Der Zähler steht in der Antwort von `GET /api/v1/syslog-settings`.
+Schlechteste von beidem. Der Zähler steht im Reiter unter *Zustand*.
 
 **Das Prüfprotokoll in der Datenbank bleibt die Wahrheit**, die
 Weiterleitung ist die Kopie. Geht die Kopie schief, ändert das am

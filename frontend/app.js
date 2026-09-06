@@ -1546,7 +1546,7 @@ document.getElementById("btnSettings").onclick = () => {
   // aufrufen wuerde nur 403 erzeugen und den Dialog mit Fehlern fuellen.
   if (isAdmin){
     loadAgentsTab(); loadUpdate(); loadCmkForm(); loadRollout(); loadBuildStatus();
-    loadUsers(); loadAudit(); loadProxy(); loadAreasTab();
+    loadUsers(); loadAudit(); loadProxy(); loadAreasTab(); loadSyslog();
   }
 };
 document.getElementById("dlgSettings").addEventListener("close", () => {
@@ -2024,6 +2024,80 @@ document.getElementById("lizClear").onclick = async () => {
 
 /* ---------- Zugang: Proxy und HTTPS-Zwang ---------- */
 let PROXY_TIMER = null;
+
+// ======================================================================
+// Weiterleitung an eine zentrale Protokollierung
+// ======================================================================
+async function loadSyslog(){
+  let d;
+  try { d = await api("GET", "/api/v1/syslog-settings"); }
+  catch(e){ return; }
+
+  document.getElementById("slHost").value = d.host || "";
+  document.getElementById("slPort").value = d.port || 514;
+  document.getElementById("slTransport").value = d.transport || "udp";
+  document.getElementById("slFacility").value = d.facility || "local0";
+  document.getElementById("slVerify").checked = d.verify_tls !== false;
+  document.getElementById("slOn").checked = !!d.enabled;
+  syslogTlsFelder();
+
+  // Verworfene Meldungen sind ein Betriebszustand, kein Fehler - aber
+  // einer, den man sehen muss. Eine stille Luecke im Protokoll waere das
+  // Schlechteste von beidem.
+  document.getElementById("slStats").innerHTML = d.dropped
+    ? t("settings.syslog.dropped", { n: d.dropped, q: d.queue || 0 })
+    : t("settings.syslog.queue_ok", { q: d.queue || 0 });
+}
+
+// Die Zertifikatspruefung gilt nur fuer TLS. Sie bei UDP anzubieten
+// waere eine Frage, auf die es keine Antwort gibt.
+function syslogTlsFelder(){
+  const tls = document.getElementById("slTransport").value === "tls";
+  document.getElementById("slVerifyRow").style.display = tls ? "" : "none";
+  document.getElementById("slVerifyHint").style.display = tls ? "" : "none";
+}
+document.getElementById("slTransport").onchange = syslogTlsFelder;
+
+document.getElementById("slSave").onclick = async () => {
+  await api("POST", "/api/v1/syslog-settings", {
+    host: document.getElementById("slHost").value.trim(),
+    port: parseInt(document.getElementById("slPort").value, 10) || 514,
+    transport: document.getElementById("slTransport").value,
+    facility: document.getElementById("slFacility").value,
+    verify_tls: document.getElementById("slVerify").checked,
+  });
+  toast(t("settings.syslog.saved"));
+  loadSyslog();
+};
+
+document.getElementById("slTest").onclick = async () => {
+  const ziel = document.getElementById("slTestResult");
+  // Erst speichern, sonst testet man gegen den alten Stand und wundert
+  // sich, warum die gerade eingetippte Adresse nicht gilt.
+  document.getElementById("slSave").click();
+  ziel.textContent = t("settings.syslog.testing");
+  try {
+    const r = await api("POST", "/api/v1/syslog-settings/test", {});
+    ziel.innerHTML = t("settings.syslog.test_ok", { ziel: esc(r.sent || "") });
+  } catch(e){
+    ziel.innerHTML = t("settings.syslog.test_failed", { grund: esc(String(e.message || e)) });
+  }
+};
+
+document.getElementById("slOn").onchange = async (ev) => {
+  const an = ev.target.checked;
+  try {
+    await api("POST", "/api/v1/syslog-settings", { enabled: an });
+    toast(an ? t("settings.syslog.on") : t("settings.syslog.off"));
+  } catch(e){
+    // Zuruecksetzen, sonst zeigt der Haken einen Zustand, den der Server
+    // nicht hat - etwa weil keine Zieladresse eingetragen ist.
+    ev.target.checked = !an;
+    toast(String(e.message || e));
+  }
+  loadSyslog();
+};
+
 
 async function loadProxy(){
   let d;
