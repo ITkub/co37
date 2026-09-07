@@ -823,5 +823,58 @@ if _lj:
           isinstance(letzte, list)
           and len({e["host_id"] for e in letzte}) == len(letzte), letzte)
 
+# ======================================================================
+# 401 heisst "nicht angemeldet" - und sonst nichts
+# ======================================================================
+#
+# Die Oberflaeche wertet 401 GLOBAL aus: Sitzung weg, zurueck zur
+# Anmeldemaske. Diese Regel ist richtig, solange das Backend 401 nur
+# dort benutzt, wo die Anmeldung selbst fehlt.
+#
+# Am 2026-09-07 im Handtest fiel auf, dass sie an drei Stellen anders
+# benutzt wurde: ein falsches Passwort im Abschaltformular fuer den
+# zweiten Faktor, ein falscher Code ebendort und ein falsches altes
+# Passwort beim Wechsel. Alle drei kamen von einem ANGEMELDETEN Konto -
+# und alle drei warfen den Benutzer hinaus, mit der Begruendung
+# "Sitzung abgelaufen". Die stimmte nicht.
+#
+# Geprueft wird ueber den Syntaxbaum, in welcher Funktion ein 401 steht.
+# Eine Textsuche traefe die Begruendungen in den Kommentaren.
+print()
+print("--- 401 nur dort, wo die Anmeldung selbst fehlt ---")
+_401_ERLAUBT = {
+    "authenticate",      # keine oder ungueltige Sitzung
+    "host_by_token",     # unbekanntes Agent-Token
+    "login",             # Benutzername oder Passwort falsch
+    "login_totp",        # zweiter Schritt, es gibt noch keine Sitzung
+}
+_mit_401 = set()
+for _fn in ast.walk(baum):
+    if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        continue
+    for _k in ast.walk(_fn):
+        if (isinstance(_k, ast.Call)
+                and getattr(_k.func, "id", "") == "HTTPException"
+                and _k.args
+                and getattr(_k.args[0], "value", None) == 401):
+            _mit_401.add(_fn.name)
+_unerlaubt = sorted(_mit_401 - _401_ERLAUBT)
+check("401 steht nur in den Funktionen, die die Anmeldung pruefen",
+      not _unerlaubt,
+      (f"auch in: {_unerlaubt} - dort gehoert 403 hin, sonst meldet die "
+       f"Oberflaeche faelschlich eine abgelaufene Sitzung")
+      if _unerlaubt else "")
+check("und es wurde ueberhaupt etwas gefunden",
+      len(_mit_401) >= 3, sorted(_mit_401))
+
+# Die Wirkung dazu, gemessen statt gelesen: ein falsches altes Passwort
+# darf die Sitzung nicht kosten.
+code, _ = call("/api/v1/me/password",
+               {"old_password": "ganz-sicher-falsch",
+                "new_password": "auch-egal-hauptsache-lang"}, hdr=adm)
+check("falsches altes Passwort ergibt 403, nicht 401", code == 403, code)
+code, _ = call("/api/v1/me", hdr=adm)
+check("und die Sitzung gilt danach weiter", code == 200, code)
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

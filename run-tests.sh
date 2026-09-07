@@ -14,6 +14,24 @@ set -u
 
 PORT="${CO37_TEST_PORT:-8099}"
 TMP=$(mktemp -d)
+
+# Derselbe Ordner, wie ihn ein NATIVES Windows-Python sieht.
+#
+# Unter Git Bash liefert mktemp einen MSYS-Pfad wie /tmp/tmp.ab12cd. Die
+# Shell weiss, wo das liegt; ein Python aus C:\ nicht - es liest
+# /tmp/... als laufwerksrelativ, landet bei C:\tmp\... und meldet
+# "unable to open database file". Die Umwandlung greift nur, wo es
+# cygpath ueberhaupt gibt; unter Linux bleibt der Wert unveraendert.
+#
+# Gebraucht wird das ausschliesslich fuer die Werte, die an Python
+# gehen (CO37_DB, CO37_DATA). Alles, was die Shell selbst anfasst -
+# Umleitung des Protokolls, tail, rm - bleibt beim MSYS-Pfad, sonst
+# faende die Shell ihre eigene Datei nicht mehr.
+if command -v cygpath >/dev/null 2>&1; then
+  TMP_NATIV=$(cygpath -m "$TMP")
+else
+  TMP_NATIV="$TMP"
+fi
 AUSFUEHRLICH=0
 NUR=""
 
@@ -62,6 +80,28 @@ if [ -z "$PY" ]; then
   echo "Microsoft Store. Eigener Pfad: CO37_PYTHON=/pfad/zu/python $0"
   werkzeug_fehlt
 fi
+
+# Einen Pfad hier absolut machen, solange wir noch im Projektverzeichnis
+# stehen.
+#
+# Der Backendstart weiter unten laeuft nach einem 'cd backend'. Ein
+# relativer CO37_PYTHON (etwa '.venv/Scripts/python.exe', der naechstliegende
+# Wert unter Windows) besteht deshalb die Pruefung oben und scheitert
+# zwanzig Zeilen spaeter mit "No such file or directory" - gemeldet als
+# "Backend nicht erreichbar", also mit dem falschen Grund. Genau die Sorte
+# Meldung, die der Kommentar zum Portcheck schon einmal beschreibt.
+#
+# Nur was einen Schraegstrich enthaelt, ist ein Pfad; 'python3' bleibt ein
+# Name, den PATH aufloest, und darf nicht angefasst werden.
+case "$PY" in
+  */*)
+    PY_VERZ=$(cd "$(dirname "$PY")" 2>/dev/null && pwd) || {
+      echo "CO37_PYTHON zeigt auf ein Verzeichnis, das es nicht gibt: $PY"
+      werkzeug_fehlt
+    }
+    PY="$PY_VERZ/$(basename "$PY")"
+    ;;
+esac
 
 # node braucht nur die Frontend-Reihe. Ohne diese Pruefung faellt sie
 # spaeter mit null Pruefungen durch, und der Grund steht klein am Ende
@@ -120,6 +160,7 @@ REIHEN=(
   "protokoll       $PY tests/protokoll-test.py"
   "syslog          $PY tests/syslog-test.py"
   "totp            $PY tests/totp-test.py"
+  "qr              $PY tests/qr-test.py"
   "agent-selfheal  $PY tests/agent-selfheal-test.py"
   "reboot-report   $PY tests/reboot-report-test.py"
   "harness         $PY tests/harness-test.py"
@@ -139,7 +180,42 @@ REIHEN=(
 aufraeumen() {
   [ -n "${BACKEND_PID:-}" ] && kill "$BACKEND_PID" 2>/dev/null
   wait "${BACKEND_PID:-}" 2>/dev/null
-  rm -rf "$TMP"
+
+  # Nachsehen, ob der Port wirklich frei geworden ist.
+  #
+  # Unter Git Bash war er es lange nicht: der Backendstart lief in einer
+  # Subshell, die ihrerseits python startete. 'kill' traf die Subshell,
+  # das native python.exe lief weiter - und der naechste Lauf brach mit
+  # "Port belegt" ab, was wie ein fremder Dienst aussieht und keiner
+  # war. Behoben ist das mit 'exec' beim Start: es gibt nur noch einen
+  # Prozess, und der bekommt das Signal.
+  #
+  # Diese Schleife ist die Gegenprobe dazu. Bleibt der Port belegt, muss
+  # das DASTEHEN - eine stille Leiche haelt den naechsten Lauf auf und
+  # verraet nicht, warum.
+  if [ -n "${BACKEND_PID:-}" ] && [ -n "${PY:-}" ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      "$PY" tests/port-frei.py "$PORT" >/dev/null 2>&1 && break
+      sleep 0.3
+    done
+    if ! "$PY" tests/port-frei.py "$PORT" >/dev/null 2>&1; then
+      echo "Hinweis: Port $PORT ist noch belegt - da laeuft ein Backend"
+      echo "         weiter. Unter Windows aufraeumen mit:"
+      echo "           netstat -ano | grep -a $PORT"
+      echo "           taskkill //F //PID <die letzte Zahl der Zeile>"
+    fi
+  fi
+  # Unter Windows haelt der beendete Prozess die Datenbankdatei noch
+  # einen Moment; 'rm' meldet dann "Device or resource busy" und laesst
+  # den Ordner stehen. Ein paar Anlaeufe kosten nichts, unter Linux
+  # gelingt der erste.
+  for _ in 1 2 3 4 5; do
+    rm -rf "$TMP" 2>/dev/null && break
+    sleep 0.4
+  done
+  [ -d "$TMP" ] && rm -rf "$TMP" 2>/dev/null
+  [ -d "$TMP" ] && echo "Hinweis: $TMP liess sich nicht raeumen (noch belegt)."
+  return 0
 }
 trap aufraeumen EXIT INT TERM
 
@@ -166,9 +242,9 @@ echo "Backend auf Port $PORT, Daten in $TMP"
 (
   cd backend || exit 1
   CO37_SECRET_KEY="testsecret" \
-  CO37_DB="sqlite:///$TMP/co37.db" \
-  CO37_DATA="$TMP" \
-  "$PY" -m uvicorn main:app --port "$PORT" --no-proxy-headers \
+  CO37_DB="sqlite:///$TMP_NATIV/co37.db" \
+  CO37_DATA="$TMP_NATIV" \
+  exec "$PY" -m uvicorn main:app --port "$PORT" --no-proxy-headers \
       > "$TMP/backend.log" 2>&1
 ) &
 BACKEND_PID=$!
@@ -276,8 +352,15 @@ for eintrag in "${REIHEN[@]}"; do
     printf '%s\n' "$ausgabe" | grep -E '^FEHLER' | sed 's/^/      /'
     # Bricht eine Reihe ab, statt Fehler zu melden, steht der Grund nur am
     # Ende der Ausgabe.
-    if [ "$n" -eq 0 ]; then
-      printf '%s\n' "$ausgabe" | tail -5 | sed 's/^/      /'
+    #
+    # Massgeblich ist, ob eine FEHLER-Zeile kam - NICHT, ob ueberhaupt
+    # Pruefungen liefen. Vorher haeng das an "$n" -eq 0, und eine Reihe,
+    # die nach 48 gruenen Pruefungen mit einem Rueckverfolg abstuerzte,
+    # zeigte deshalb gar nichts: kein FEHLER, kein Ende der Ausgabe, nur
+    # ein rotes Kreuz ohne Grund. Genau so ist watcher-sig unter Windows
+    # zwei Runden lang unerklaerlich geblieben.
+    if ! printf '%s\n' "$ausgabe" | grep -qE '^FEHLER'; then
+      printf '%s\n' "$ausgabe" | tail -8 | sed 's/^/      /'
     fi
   fi
 

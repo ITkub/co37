@@ -36,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import joblog
+import qrsvg
 import syslogfwd
 import totp
 import license
@@ -1418,6 +1419,25 @@ PW_FREI = {
     "/api/health",
 }
 
+# Dasselbe fuer die Anmeldung in zwei Schritten, wenn sie fuer
+# Administratoren Pflicht ist: genau die Routen, die man braucht, um sie
+# einzurichten.
+#
+# Ohne diese Durchsetzung waere der Pflichtschalter fast nur Zierde
+# gewesen. Er haette bewirkt, dass niemand seinen zweiten Faktor mehr
+# abschalten kann - und ein Administrator, der ihn nie eingerichtet hat,
+# waere davon gar nicht betroffen gewesen. Die Pflicht muss den treffen,
+# der sie noch nicht erfuellt, sonst heisst sie nur so.
+MFA_FREI = {
+    "/api/v1/me",
+    "/api/v1/me/totp/start",
+    "/api/v1/me/totp/confirm",
+    "/api/v1/me/language",
+    "/api/v1/me/password",
+    "/api/v1/logout",
+    "/api/health",
+}
+
 
 def require_login(
     request: Request,
@@ -1443,7 +1463,47 @@ def require_login(
     """
     who = authenticate(x_session, session, request)
     pw_zwang_pruefen(who, request)
+    mfa_zwang_pruefen(who, request, session)
     return who
+
+
+def mfa_pflicht_offen(who: "Principal", session: Session) -> bool:
+    """
+    Ist fuer dieses Konto die Anmeldung in zwei Schritten Pflicht und
+    noch nicht eingerichtet?
+
+    Der Setting-Zugriff kostet nur etwas, wenn ueberhaupt ein
+    Administrator ohne zweiten Faktor anfragt - fuer alle anderen ist
+    die Frage vorher entschieden. Ein API-Schluessel hat kein Konto und
+    faellt hier heraus: fuer ihn gibt es keinen zweiten Faktor, und ihn
+    auszusperren wuerde nur die Agents anhalten.
+    """
+    if not who.user or who.user.role is not Role.admin:
+        return False
+    if who.user.totp_confirmed_at:
+        return False
+    return _setting(session, SET_MFA_ADMIN, "false") == "true"
+
+
+def mfa_zwang_pruefen(who: "Principal", request: Request, session: Session):
+    """
+    Setzt die Pflicht durch - genauso wie pw_zwang_pruefen() den
+    Passwortwechsel.
+
+    Der Weg hinaus fuehrt ueber MFA_FREI und nur dort hindurch. Wer die
+    Oberflaeche weglaesst und die Schnittstelle direkt anspricht, kommt
+    nicht weiter als ein Browser.
+    """
+    if request.scope.get("path", request.url.path) in MFA_FREI:
+        return
+    if mfa_pflicht_offen(who, session):
+        raise HTTPException(
+            403,
+            "In dieser Anlage ist die Anmeldung in zwei Schritten fuer "
+            "Administratoren verpflichtend. Sie muss zuerst am eigenen "
+            "Konto eingerichtet werden.",
+            headers={"X-CO37-MFA-Setup": "required"},
+        )
 
 
 def pw_zwang_pruefen(who: "Principal", request: Request):
@@ -4697,6 +4757,7 @@ def download_package(name: str, request: Request,
         # sie war deshalb die einzige, die daran vorbeilief.
         wer = authenticate(x_session, session, request)
         pw_zwang_pruefen(wer, request)
+        mfa_zwang_pruefen(wer, request, session)
         require_admin(wer)
 
     if "/" in name or "\\" in name or name.startswith("."):
@@ -5096,16 +5157,23 @@ def login_totp(payload: TotpLoginIn, request: Request,
             select(PendingLogin).where(PendingLogin.expires_at < utcnow())).all():
         session.delete(tot)
 
+    # Die Kopfzeile X-CO37-MFA: restart sagt der Oberflaeche, dass dieser
+    # Vorgang endgueltig weg ist und die Maske zurueck auf Benutzer und
+    # Passwort muss. Frueher stand hier nichts, und die Oberflaeche haette
+    # den Meldungstext auswerten muessen - der ist uebersetzt und aendert
+    # sich, die Kopfzeile nicht.
+    NEU = {"X-CO37-MFA": "restart"}
+
     if not offen or offen.expires_at < utcnow():
         session.commit()
         raise HTTPException(401, "Der Anmeldevorgang ist abgelaufen. "
-                                 "Bitte von vorn anmelden.")
+                                 "Bitte von vorn anmelden.", headers=NEU)
 
     user = session.get(User, offen.user_id)
     if not user or user.disabled or not user.totp_confirmed_at:
         session.delete(offen)
         session.commit()
-        raise HTTPException(401, "Anmeldung nicht moeglich.")
+        raise HTTPException(401, "Anmeldung nicht moeglich.", headers=NEU)
 
     offen.tries += 1
     if offen.tries > MFA_MAX_TRIES:
@@ -5114,7 +5182,7 @@ def login_totp(payload: TotpLoginIn, request: Request,
               f"{MFA_MAX_TRIES} Fehlversuche - Vorgang verworfen", request)
         session.commit()
         raise HTTPException(401, "Zu viele falsche Codes. "
-                                 "Bitte von vorn anmelden.")
+                                 "Bitte von vorn anmelden.", headers=NEU)
     session.add(offen)
 
     geheim = decrypt(user.totp_secret) if user.totp_secret else None
@@ -5258,7 +5326,8 @@ def logout(request: Request, x_session: str = Header(default=""),
 
 
 @app.get("/api/v1/me")
-def whoami(who: Principal = Depends(require_login)):
+def whoami(who: Principal = Depends(require_login),
+           session: Session = Depends(get_session)):
     return {
         "username": who.name,
         "role": who.role.value,
@@ -5270,6 +5339,16 @@ def whoami(who: Principal = Depends(require_login)):
         "may_reboot": who.may_reboot,
         "must_change_password": bool(
             who.user.must_change_password if who.user else False),
+        # Damit die Oberflaeche im Reiter Konto den richtigen Block zeigt:
+        # einrichten oder abschalten. Massgeblich ist auch hier das
+        # Backend - hier geht es nur um die Anzeige. Ein API-Schluessel
+        # hat kein Konto und damit keinen zweiten Faktor.
+        "mfa_enabled": bool(
+            who.user.totp_confirmed_at if who.user else False),
+        # Steht die Pflicht und ist sie noch nicht erfuellt, kommt dieses
+        # Konto ausser an MFA_FREI an keine Route. Die Oberflaeche muss
+        # das wissen, sonst zeigt sie ein Dashboard voller 403.
+        "mfa_setup_required": mfa_pflicht_offen(who, session),
         # None heisst "nicht gewaehlt". Die Oberflaeche faellt dann auf die
         # Vorgabe der Installation zurueck, nicht auf einen Wert von hier -
         # sonst waere die Vorgabe fuer bestehende Konten wirkungslos.
@@ -5329,7 +5408,11 @@ def change_own_password(payload: PasswordChange, request: Request,
         audit(session, user.username, "password.change.failed",
               "altes Passwort falsch", request)
         session.commit()
-        raise HTTPException(401, "Altes Passwort falsch")
+        # 403, nicht 401 - siehe die Begruendung in totp_off(). Diese
+        # Stelle hatte denselben Fehler und wesentlich laenger: ein
+        # vertipptes altes Passwort meldete "Sitzung abgelaufen" und
+        # warf den Benutzer hinaus, mitten im erzwungenen Wechsel.
+        raise HTTPException(403, "Altes Passwort falsch")
 
     _check_password(payload.new_password)
     user.password_hash = hash_password(payload.new_password)
@@ -5723,10 +5806,24 @@ def totp_start(who: Principal = Depends(require_login),
     user.totp_last_step = None
     session.add(user)
     session.commit()
+    adresse = totp.einrichtungs_adresse(
+        geheim, user.username, _anlagenname(session))
     return {
         "secret": geheim,
-        "otpauth": totp.einrichtungs_adresse(
-            geheim, user.username, _anlagenname(session)),
+        "otpauth": adresse,
+        # Das Bild kommt fertig aus dem Backend und steht IM ANTWORTKOERPER,
+        # nicht hinter einer eigenen Adresse. Eine Route /totp/qr?secret=...
+        # waere bequemer gewesen und haette das Geheimnis in jede
+        # Zugriffsliste geschrieben, die zwischen Browser und Server liegt -
+        # Proxy, Verlauf, Fehlerseite. Der Antwortkoerper landet nirgends
+        # davon.
+        #
+        # Erzeugt wird es von backend/qrsvg.py, selbst geschrieben, damit
+        # keine weitere Abhaengigkeit dazukommt (F-14). Ein falscher
+        # QR-Code faellt im Betrieb nicht auf - er wird nur nicht gelesen -,
+        # deshalb prueft tests/qr-test.py ihn gegen zwei fremde
+        # Umsetzungen.
+        "qr_svg": qrsvg.svg(adresse, modul=5, rand=4),
         "digits": totp.STELLEN,
         "period": totp.SCHRITT,
     }
@@ -5780,17 +5877,28 @@ def totp_off(payload: TotpOffIn, request: Request,
     user = _konto(session, who)
     if not user.totp_confirmed_at:
         raise HTTPException(400, "Nicht eingerichtet.")
+    # 403 und NICHT 401, und das ist keine Formsache.
+    #
+    # 401 heisst "du bist nicht angemeldet". Hier IST der Aufrufer
+    # angemeldet - falsch war ein Feld in einem Formular. Die Oberflaeche
+    # wertet 401 global als "Sitzung abgelaufen", wirft die Sitzung weg
+    # und zeigt die Anmeldemaske. Am 2026-09-07 auf KK-LENOVO im
+    # Handtest gesehen: wer hier etwas vertippt, wird abgemeldet und
+    # bekommt als Begruendung eine Unwahrheit zu lesen.
+    #
+    # 403 sagt, was zutrifft: verstanden, aber nicht erlaubt. Die
+    # Meldung landet dann dort, wo sie hingehoert - am Formular.
     if not verify_password(payload.password, user.password_hash):
         audit(session, user.username, "totp.disable-failed",
               "Passwort falsch", request)
         session.commit()
-        raise HTTPException(401, "Passwort falsch.")
+        raise HTTPException(403, "Passwort falsch.")
     geheim = decrypt(user.totp_secret) if user.totp_secret else None
     if geheim is None or totp.passt(geheim, payload.code) is None:
         audit(session, user.username, "totp.disable-failed",
               "Code falsch", request)
         session.commit()
-        raise HTTPException(401, "Code falsch.")
+        raise HTTPException(403, "Code falsch.")
 
     if user.role is Role.admin and \
             _setting(session, SET_MFA_ADMIN, "false") == "true":

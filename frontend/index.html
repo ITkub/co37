@@ -375,8 +375,18 @@ dialog#dlgSettings .hint{max-width:78ch}
       <div class="login-name">CO-37</div>
       <div class="login-sub" data-i18n="login.subtitle">Core Operations Manager</div>
     </div>
-    <label data-i18n="login.user">Username<input id="loginUser" autocomplete="username"></label>
-    <label data-i18n="login.password">Password<input id="loginPass" type="password" autocomplete="current-password"></label>
+    <div id="loginSchritt1">
+      <label data-i18n="login.user">Username<input id="loginUser" autocomplete="username"></label>
+      <label data-i18n="login.password">Password<input id="loginPass" type="password" autocomplete="current-password"></label>
+    </div>
+    <!-- Zweiter Schritt. Steht im selben Dialog statt in einem eigenen:
+         wer hier landet, hat das Passwort schon abgegeben - ein neues
+         Fenster wuerde nur so aussehen, als finge etwas anderes an. -->
+    <div id="loginSchritt2" style="display:none">
+      <div class="hint" data-i18n="login.mfa_hint">Enter the six-digit code from your authenticator app. A recovery code works too — each of them once.</div>
+      <label data-i18n="login.mfa_code">Code<input id="loginCode" inputmode="text"
+             autocomplete="one-time-code" autocapitalize="off" spellcheck="false"></label>
+    </div>
     <div id="loginError" style="color:var(--led-reboot);font-size:11px;min-height:15px"></div>
   </div>
   <div class="dlg-foot"><button class="primary" id="loginGo" data-i18n="login.submit">Sign in</button></div>
@@ -395,6 +405,42 @@ dialog#dlgSettings .hint{max-width:78ch}
     <div id="pwzError" style="color:var(--led-reboot);font-size:11px;min-height:15px"></div>
   </div>
   <div class="dlg-foot"><button class="primary" id="pwzGo" data-i18n="pwforce.submit">Set password</button></div>
+</dialog>
+
+<!-- Einrichtung der Anmeldung in zwei Schritten. EIN Dialog fuer beide
+     Wege: der Knopf im Reiter Konto oeffnet ihn freiwillig, und wenn die
+     Pflicht fuer Administratoren steht, oeffnet ihn die Oberflaeche von
+     selbst und laesst ihn nicht mehr zu. Zweimal dasselbe zu bauen hiesse,
+     eine der beiden Fassungen beim naechsten Mal zu vergessen. -->
+<dialog id="dlgMfaSetup">
+  <div class="dlg-head" data-i18n="settings.mfa.title">Two-step sign-in</div>
+  <div class="dlg-body">
+    <div class="hint" id="mfaZwangHint" style="display:none" data-i18n="settings.mfa.forced">This installation requires two-step sign-in for administrators. Until it is set up, this account cannot do anything else.</div>
+
+    <div id="mfaEinrichtung">
+      <div class="hint" data-i18n="settings.mfa.scan">Scan this code with the app:</div>
+      <div id="mfaQr" style="background:#fff;padding:10px;display:inline-block;border-radius:6px;margin-bottom:10px"></div>
+      <div class="hint" data-i18n="settings.mfa.manual">Cannot scan? Enter this key in the app by hand:</div>
+      <div class="token" id="mfaSecret"></div>
+      <label style="max-width:200px" data-i18n="settings.mfa.confirm_code">Code from the app<input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" spellcheck="false"></label>
+      <div class="hint" data-i18n="settings.mfa.confirm_hint">Not switched on until a code has been confirmed. If you stop here, nothing changes.</div>
+      <div id="mfaError" style="color:var(--led-reboot);font-size:11px;min-height:15px"></div>
+    </div>
+
+    <!-- Die Wiederherstellungscodes gibt es GENAU EINMAL. Deshalb ein
+         eigener Schritt, der stehen bleibt, bis er bestaetigt wird - kein
+         Toast, der nach drei Sekunden verschwindet. -->
+    <div id="mfaRettung" style="display:none">
+      <div class="hint" data-i18n-html="settings.mfa.recovery_hint"><b>Write these down now.</b> They are shown this once and never again — stored is only their hash. Each one works once, in place of the code from the app, for instance if the phone is gone.</div>
+      <div class="token" id="mfaCodes"></div>
+      <button id="mfaCopy" style="align-self:flex-start" data-i18n="settings.mfa.copy">Copy codes</button>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <button id="mfaCancel" data-i18n="settings.mfa.cancel">Cancel</button>
+    <button class="primary" id="mfaConfirm" data-i18n="settings.mfa.confirm">Confirm and switch on</button>
+    <button class="primary" id="mfaDone" style="display:none" data-i18n="settings.mfa.saved">I have written them down</button>
+  </div>
 </dialog>
 
 <div id="appShell" style="display:none">
@@ -790,6 +836,15 @@ dialog#dlgSettings .hint{max-width:78ch}
         <label class="check" data-i18n="settings.proxy.https_only"><input type="checkbox" id="pxHttps"> Restrict access to HTTPS</label>
         <div id="pxState" class="hint"></div>
       </div>
+
+      <!-- Die Pflicht steht hier und nicht im Reiter Konto: sie gilt fuer
+           die Anlage, nicht fuer den, der sie einschaltet. -->
+      <div class="section">
+        <div class="section-title" data-i18n="settings.mfa.policy_title">Two-step sign-in for administrators</div>
+        <div class="hint" data-i18n-html="settings.mfa.policy_hint">Requires every administrator account to use two-step sign-in. Set it up on your own account first under <b>Account</b> — otherwise the switch refuses, and rightly so: you would be locking yourself out.<br><br>Administrators who have not set it up yet can still sign in with the password and are asked to set it up. It cannot be switched off again from an account that has it on.</div>
+        <label class="check" data-i18n="settings.mfa.policy"><input type="checkbox" id="mfaPolicy"> Required for administrators</label>
+        <div id="mfaPolicyState" class="hint"></div>
+      </div>
     </div>
 
     <div class="pane" id="tabAreas">
@@ -831,6 +886,29 @@ dialog#dlgSettings .hint{max-width:78ch}
         <label data-i18n="settings.account.new_pw">New password<input id="acNew" type="password" autocomplete="new-password"></label>
         <label data-i18n="settings.account.new_pw2">Repeat new password<input id="acNew2" type="password" autocomplete="new-password"></label>
         <div style="margin-top:10px"><button class="primary" id="acSave" data-i18n="settings.account.change">Change password</button></div>
+      </div>
+
+      <!-- Anmeldung in zwei Schritten. Bewusst hier und nicht bei den
+           Benutzern: einrichten kann sie nur, wem das Konto gehoert -
+           ein Administrator kann sie fuer andere weder setzen noch
+           entfernen, und das ist der Sinn der Sache. -->
+      <div class="section">
+        <div class="section-title" data-i18n="settings.mfa.title">Two-step sign-in</div>
+
+        <div id="mfaAus">
+          <div class="hint" data-i18n-html="settings.mfa.hint">In addition to the password, a six-digit code from an app on your phone. <b>Google Authenticator, Microsoft Authenticator, Aegis, 2FAS, Bitwarden, 1Password and KeePassXC</b> all work — this is the standard procedure (TOTP, RFC 6238), not a product of ours.<br><br>The app needs no network connection. It computes the code from a shared secret and the current time, which is why the clock on the phone has to be roughly right.</div>
+          <button class="primary" id="mfaGo" style="align-self:flex-start" data-i18n="settings.mfa.setup">Set up</button>
+        </div>
+
+        <div id="mfaAn" style="display:none">
+          <div class="vrow"><span data-i18n="settings.mfa.state">State</span><b data-i18n="settings.mfa.on">On</b></div>
+          <div class="hint" data-i18n="settings.mfa.off_hint">Switching off needs the password and a current code — otherwise a stolen session would be enough to get rid of exactly the thing it is meant to protect.</div>
+          <div class="row">
+            <label style="max-width:220px" data-i18n="settings.account.current_pw">Current password<input id="mfaOffPw" type="password" autocomplete="current-password"></label>
+            <label style="max-width:140px" data-i18n="settings.mfa.confirm_code">Code from the app<input id="mfaOffCode" inputmode="numeric" spellcheck="false"></label>
+          </div>
+          <button class="danger" id="mfaOff" style="align-self:flex-start" data-i18n="settings.mfa.turn_off">Switch off</button>
+        </div>
       </div>
     </div>
 

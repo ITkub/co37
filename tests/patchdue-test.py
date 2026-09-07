@@ -158,12 +158,41 @@ print("--- Termine ueber die Zeitumstellung (F-40) ---")
 import utctime  # noqa: E402
 
 _zone = utctime._system_zone()
-check("die Zeitzone des Servers ist benannt, nicht nur ein Versatz",
-      _zone is not None, _zone)
 
-if _zone is not None:
-    # Der Fall selbst, unabhaengig von der eingestellten Systemzone:
-    # ein Termin auf der anderen Seite einer Umstellung.
+# Die Zone ueber TZ: das ist der erste Weg in _system_zone() und der
+# einzige, der auf JEDEM Betriebssystem geht. Damit ist die Funktion
+# ueberall gemessen und nicht nur dort, wo /etc/localtime existiert.
+_tz_alt = os.environ.get("TZ")
+os.environ["TZ"] = "Europe/Berlin"
+try:
+    _ueber_tz = utctime._system_zone()
+finally:
+    if _tz_alt is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = _tz_alt
+check("mit gesetztem TZ wird die Zone benannt",
+      _ueber_tz is not None and str(_ueber_tz) == "Europe/Berlin", _ueber_tz)
+
+# Die Zone des Rechners selbst. Unter Windows gibt es weder
+# /etc/localtime noch /etc/timezone, und ohne TZ bleibt nur None - das
+# ist kein Fehler, sondern die dokumentierte Rueckfallebene. Der Server
+# laeuft auf Linux, und dort MUSS die Zone benannt sein, sonst rechnet
+# die Terminlogik ueber eine Zeitumstellung hinweg falsch (F-40).
+if os.name == "nt":
+    print("      (Zone des Rechners: unter Windows gibt es keine "
+          "benannte Systemzone ohne TZ - der Server laeuft auf Linux, "
+          "dort wird sie geprueft)")
+else:
+    check("die Zeitzone des Servers ist benannt, nicht nur ein Versatz",
+          _zone is not None, _zone)
+
+# Die Rechnung darunter haengt NICHT an der Zone des Rechners - sie
+# benutzt Europe/Berlin ausdruecklich. Frueher stand sie hinter
+# "if _zone is not None" und wurde unter Windows mit uebersprungen:
+# vier Pruefungen zum eigentlichen Befund F-40, die stillschweigend
+# ausfielen, waehrend die Reihe nur eine einzelne Zeile rot meldete.
+if True:
     from zoneinfo import ZoneInfo  # noqa: E402
     berlin = ZoneInfo("Europe/Berlin")
 
@@ -194,10 +223,13 @@ if _zone is not None:
     check("nach der Rueckstellung gilt wieder +01:00",
           h_termin.utcoffset() == timedelta(hours=1), h_termin)
 
-check("localnow() liefert eine Zeitzone mit Regel, keinen festen Versatz",
-      not isinstance(main.localnow().tzinfo, timezone)
-      if _zone is not None else True,
-      type(main.localnow().tzinfo).__name__)
+if _zone is not None:
+    check("localnow() liefert eine Zeitzone mit Regel, keinen festen Versatz",
+          not isinstance(main.localnow().tzinfo, timezone),
+          type(main.localnow().tzinfo).__name__)
+else:
+    print("      (localnow(): ohne benannte Systemzone bleibt es beim "
+          "festen Versatz - so ist der Rueckfall gebaut)")
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

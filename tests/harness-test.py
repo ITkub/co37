@@ -123,8 +123,13 @@ with tempfile.TemporaryDirectory(prefix="co37-harness-") as tmp:
 # Der richtige Grund muss weiterhin kommen
 # ----------------------------------------------------------------------
 # Sonst waere nur ein irrefuehrender Abbruch durch einen anderen ersetzt.
+# Kein SO_REUSEADDR unter Windows. Dort heisst die Option "ein anderer
+# darf mir den Port wegnehmen", und genau das tat der Portcheck dann
+# auch - er band den belegten Port erfolgreich und meldete ihn als frei.
+# Die Begruendung steht ausfuehrlich in tests/port-frei.py.
 s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+if not hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", 0))
 s.listen(1)
 belegt = s.getsockname()[1]

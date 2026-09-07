@@ -188,6 +188,48 @@ def behaelter_passwort(roh: bytes, passphrase: bytes, pfad=None) -> bytes:
     return _ableiten(passphrase, salt, n, r, p)
 
 
+def _tastatur_da() -> bool:
+    """
+    Sitzt jemand an einer Tastatur?
+
+    Unter POSIX beantwortet das isatty(). **Unter Windows nicht.** Dort
+    ist NUL ein Zeichengeraet, und isatty() meldet fuer jedes
+    Zeichengeraet wahr - auch fuer NUL. Ein Aufruf mit
+    stdin=subprocess.DEVNULL, genau der Fall, in dem build_release.py
+    diese Werkzeuge startet, sah damit aus wie ein Mensch vor der
+    Tastatur.
+
+    Nachgemessen am 2026-09-07 auf KK-LENOVO, Python 3.14:
+
+        Kind mit Konsole   isatty() -> True    GetConsoleMode -> True
+        Kind mit DEVNULL   isatty() -> True    GetConsoleMode -> False
+
+    Die Folge war kein falscher Abbruch, sondern ein Warten ohne Ende:
+    getpass schreibt und liest unter Windows an stdin vorbei ueber die
+    Konsole. Der Aufruf haengt dann an einer Eingabeaufforderung, die im
+    abgefangenen Strom gar nicht vorkommt - genau das, was der Kommentar
+    in build_release.py zu verhindern verspricht.
+
+    GetConsoleMode gelingt nur an einer echten Konsole und trennt beides
+    sauber.
+    """
+    if os.name != "nt":
+        return sys.stdin.isatty()
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        griff = k32.GetStdHandle(-10)            # STD_INPUT_HANDLE
+        modus = wintypes.DWORD()
+        return bool(k32.GetConsoleMode(griff, ctypes.byref(modus)))
+    except Exception:
+        # Kommt praktisch nicht vor - ctypes und kernel32 gibt es auf
+        # jedem Windows. Wenn doch, lieber fragen als grundlos
+        # abbrechen: ein haengender Aufruf ist erkennbar, ein falscher
+        # Abbruch mitten im Bau kostet mehr.
+        return sys.stdin.isatty()
+
+
 def _eingabe(text: str) -> str:
     """
     Eine Zeile verdeckt einlesen.
@@ -202,7 +244,7 @@ def _eingabe(text: str) -> str:
     Umgebung des Kindprozesses weitergereicht, damit nicht dreimal je Bau
     gefragt wird.
     """
-    if not sys.stdin.isatty():
+    if not _tastatur_da():
         sys.exit("Hier wird eine Passphrase gebraucht, aber es sitzt "
                  "niemand an der Tastatur (kein Terminal).")
     return getpass.getpass(text)

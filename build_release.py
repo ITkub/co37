@@ -262,7 +262,14 @@ def passphrase_vorbereiten():
     if not werkzeug.is_file():
         return
 
-    if not sys.stdin.isatty():
+    # Dieselbe Frage wie in tools/schluessel.py, und deshalb dieselbe
+    # Antwort: sys.stdin.isatty() taugt unter Windows nicht, dort meldet
+    # auch NUL ein Zeichengeraet. Die Funktion wird von dort geholt statt
+    # hier ein zweites Mal geschrieben - eine Zweitfassung waere genau
+    # der Fehler, der in dieser Baustrecke schon einmal steckte.
+    sys.path.insert(0, str(HIER / "tools"))
+    from schluessel import _tastatur_da  # noqa: E402
+    if not _tastatur_da():
         fehler("Der Signaturschluessel ist mit einer Passphrase geschuetzt,\n"
                "aber hier sitzt niemand an der Tastatur. Ohne Terminal\n"
                "laesst sich nicht signieren - mit --no-sign bauen oder von\n"

@@ -105,6 +105,23 @@ GEHEIM = res.get("secret", "")
 check("und eine otpauth-Adresse fuer die App",
       res.get("otpauth", "").startswith("otpauth://totp/"), res.get("otpauth"))
 
+# Das Bild kommt fertig aus dem Backend und steht im Antwortkoerper, nicht
+# hinter einer eigenen Adresse: eine Route /totp/qr?secret=... haette das
+# Geheimnis in jede Zugriffsliste zwischen Browser und Server geschrieben.
+#
+# Geprueft wird, dass darin auch WIRKLICH die ausgelieferte Adresse steckt.
+# Verglichen wird gegen den Encoder selbst - ob der stimmt, entscheidet
+# tests/qr-test.py gegen zwei fremde Umsetzungen. Hier geht es nur um die
+# Frage, ob die Route das Richtige hineingesteckt hat: ein Bild vom
+# falschen Text saehe genauso aus.
+import qrsvg  # noqa: E402
+check("ein QR-Bild liegt bei", (res.get("qr_svg") or "").startswith("<svg "),
+      (res.get("qr_svg") or "")[:40])
+check("und es zeigt genau die ausgelieferte Adresse",
+      res.get("qr_svg") == qrsvg.svg(res.get("otpauth", ""), modul=5, rand=4))
+check("das Geheimnis steht in keiner Adresse, nur im Antwortkoerper",
+      "secret=" not in str(res.get("qr_svg", "")))
+
 # Der wichtigste Zwischenzustand: angefangen, aber nicht bestaetigt.
 # Wer hier abbricht, darf sich NICHT ausgesperrt haben.
 code, res = call("/api/v1/login", {"username": NAME, "password": PW})
@@ -248,6 +265,21 @@ code, res = call("/api/v1/login/totp",
 check("DERSELBE Wiederherstellungscode ein zweites Mal nicht",
       code == 401, (code, res))
 
+# Und die Meldung ist hier ABSICHTLICH eine andere als beim App-Code.
+#
+# Beim App-Code kann der Server "bereits verwendet" sagen: er merkt sich
+# den zuletzt benutzten Zeitschritt. Ein Wiederherstellungscode dagegen
+# wird beim Einloesen aus der Liste geloescht, und gespeichert sind
+# ohnehin nur Hashes - danach ist er nicht von einem erfundenen Code zu
+# unterscheiden.
+#
+# Das liesse sich "glattziehen", indem man die Hashes verbrauchter Codes
+# aufhebt. Genau das soll nicht passieren: es wuerde jemandem, der einen
+# alten Code in die Finger bekommen hat, bestaetigen, dass er echt war.
+# "Code falsch" ist die karge, aber richtige Auskunft.
+check("und die Meldung verraet nicht, dass es mal ein echter war",
+      "bereits verwendet" not in str(res), res)
+
 code, res = call("/api/v1/login/totp",
                  {"mfa_token": FUENFTER, "code": RETTUNG[1]})
 check("ein anderer aus derselben Liste dagegen schon",
@@ -276,13 +308,27 @@ check("ein falscher Code am gueltigen Token wird abgewiesen", code == 401, code)
 # ======================================================================
 print()
 print("--- Abschalten ---")
+# 403, nicht 401. Der Unterschied ist im Betrieb der zwischen "die
+# Meldung steht am Formular" und "der Benutzer ist abgemeldet": die
+# Oberflaeche wertet 401 global als abgelaufene Sitzung. Gefunden am
+# 2026-09-07 im Handtest - Passwort und Code waren richtig eingetippt,
+# ein Feld hatte einen Tippfehler, und CO-37 warf den Benutzer hinaus
+# mit der Begruendung "Sitzung abgelaufen". Die stimmte nicht.
 code, res = call("/api/v1/me/totp/off",
                  {"password": "falsches-passwort", "code": totp.code(GEHEIM)},
                  hdr=SITZUNG)
-check("ohne richtiges Passwort kein Abschalten", code == 401, code)
+check("ohne richtiges Passwort kein Abschalten", code == 403, code)
+check("und zwar mit 403 - 401 wuerde die Sitzung wegwerfen",
+      code != 401, code)
 code, res = call("/api/v1/me/totp/off",
                  {"password": PW, "code": "000000"}, hdr=SITZUNG)
-check("ohne richtigen Code ebenfalls nicht", code == 401, code)
+check("ohne richtigen Code ebenfalls nicht", code == 403, code)
+
+# Und die Sitzung muss das ueberlebt haben - sonst waere der Statuscode
+# zwar richtig und der Schaden derselbe.
+_c, _r = call("/api/v1/me", hdr=SITZUNG)
+check("die Sitzung gilt nach den Fehlversuchen weiter",
+      _c == 200 and _r.get("username") == NAME, (_c, _r))
 
 # Warten, bis ein neuer Zeitschritt beginnt - der letzte Code ist
 # verbraucht, und das ist ja gerade der Sinn.
@@ -307,6 +353,82 @@ check("und laesst sich nicht einschalten, solange das eigene Konto sie "
       "nicht hat", code == 400, (code, res))
 check("die Meldung sagt auch warum",
       "sperrst du dich aus" in str(res), res)
+
+# ----------------------------------------------------------------------
+# Und jetzt der Teil, an dem der Schalter haette Zierde bleiben koennen
+# ----------------------------------------------------------------------
+# Die erste Fassung hat die Pflicht nur an einer Stelle geprueft: beim
+# ABSCHALTEN des eigenen zweiten Faktors. Wirkung war damit, dass niemand
+# seinen loswerden konnte, der einen hatte - und ein Administrator, der
+# nie einen eingerichtet hatte, war von der "Pflicht" ueberhaupt nicht
+# betroffen. Genau der aber ist gemeint.
+#
+# Gemessen wird deshalb an einem ZWEITEN Administrator ohne zweiten
+# Faktor: er muss an allem scheitern, ausser an dem, was er zum
+# Einrichten braucht.
+print()
+print("--- Die Pflicht trifft, wer sie noch nicht erfuellt ---")
+ANAME, APW = "totpadm", "totpadm-passwort-lang"
+call("/api/v1/users", {"username": ANAME, "password": APW, "role": "admin"},
+     hdr=adm)
+_c, _r = call("/api/v1/login", {"username": ANAME, "password": APW})
+a_ses = {"X-Session": _r.get("session", "")}
+_c, _r = call("/api/v1/me/totp/start", {}, hdr=a_ses)
+A_GEHEIM = _r.get("secret", "")
+check("der zweite Administrator richtet sie ein",
+      call("/api/v1/me/totp/confirm", {"code": totp.code(A_GEHEIM)},
+           hdr=a_ses)[0] == 200)
+
+code, res = call("/api/v1/mfa-policy", {"required_for_admins": True},
+                 hdr=a_ses)
+check("und kann sie damit zur Pflicht machen",
+      code == 200 and res.get("required_for_admins") is True, (code, res))
+
+try:
+    # Das Konto des Geruests ist Administrator OHNE zweiten Faktor - genau
+    # der Fall, um den es geht.
+    code, res = call("/api/v1/hosts", hdr=adm)
+    check("ein Administrator ohne zweiten Faktor kommt an keine Route mehr",
+          code == 403, (code, res))
+    code, res = call("/api/v1/users", hdr=adm)
+    check("auch nicht an die Benutzerverwaltung", code == 403, code)
+    code, res = call("/api/v1/packages/co37-agent.msi", hdr=adm)
+    check("und nicht an die Paketroute, die die Anmeldung selbst feststellt",
+          code == 403, code)
+
+    code, res = call("/api/v1/me", hdr=adm)
+    check("aber /me bleibt erreichbar - sonst wuesste die Oberflaeche "
+          "nichts", code == 200, code)
+    check("und sagt, dass die Einrichtung ansteht",
+          res.get("mfa_setup_required") is True, res)
+    check("das Konto mit zweitem Faktor merkt nichts davon",
+          call("/api/v1/hosts", hdr=a_ses)[0] == 200)
+    code, res = call("/api/v1/me", hdr=a_ses)
+    check("und meldet ihn als eingerichtet",
+          res.get("mfa_enabled") is True and
+          res.get("mfa_setup_required") is False, res)
+
+    check("die Einrichtung selbst bleibt offen - sonst kaeme er nie heraus",
+          call("/api/v1/me/totp/start", {}, hdr=adm)[0] == 200)
+
+    # Abschalten waere der Weg an der Pflicht vorbei.
+    code, res = call("/api/v1/me/totp/off",
+                     {"password": APW, "code": totp.code(A_GEHEIM,
+                                                         time.time() + totp.SCHRITT)},
+                     hdr=a_ses)
+    check("solange die Pflicht steht, laesst sie sich nicht abschalten",
+          code == 400, (code, res))
+finally:
+    # Zurueckdrehen, komme was wolle: die Reihen danach laufen gegen
+    # dasselbe Backend und mit demselben Administratorkonto. Bliebe die
+    # Pflicht stehen, faellt alles Nachfolgende mit 403 um - und der
+    # Grund staende dann hier, nicht dort.
+    code, res = call("/api/v1/mfa-policy", {"required_for_admins": False},
+                     hdr=a_ses)
+    check("und laesst sich wieder abschalten",
+          code == 200 and res.get("required_for_admins") is False, (code, res))
+    check("danach arbeitet das Konto ohne zweiten Faktor wieder normal",
+          call("/api/v1/hosts", hdr=adm)[0] == 200)
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

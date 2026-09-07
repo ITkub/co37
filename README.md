@@ -861,11 +861,14 @@ einem überlangen Benutzernamen an der Anmeldung vollschreiben.
 
 # Anmeldung in zwei Schritten
 
-Freiwillig je Konto. Verfahren ist **TOTP** — die sechsstelligen Codes
-aus einer Authenticator-App.
+**Einstellungen → Konto.** Freiwillig je Konto. Verfahren ist **TOTP** —
+die sechsstelligen Codes aus einer Authenticator-App.
 
-> **Stand 0.37.23: noch ohne Oberfläche.** Eingerichtet wird über die
-> Schnittstelle, die Bedienung kommt nach.
+Getestet mit **Google Authenticator**, **Microsoft Authenticator**,
+**Aegis**, **2FAS**, **Bitwarden**, **1Password** und **KeePassXC**. Es
+ist das übliche Verfahren nach RFC 6238 und kein eigenes — eine App, die
+QR-Codes für zwei Schritte liest, kann es. Die App braucht keine
+Netzverbindung; sie rechnet den Code aus dem Geheimnis und der Uhrzeit.
 
 ## Warum TOTP und nichts anderes
 
@@ -885,6 +888,18 @@ TOTP braucht nichts außer einer synchronen Uhr, und die verlangt
 OPS.1.1.7.A3 ohnehin.
 
 ## Einrichten
+
+**Einstellungen → Konto → Anmeldung in zwei Schritten → Einrichten.** Der
+QR-Code wird mit der App abgescannt, ein Code aus der App bestätigt die
+Einrichtung, danach erscheinen die zehn Wiederherstellungscodes — **ein
+einziges Mal.**
+
+Der QR-Code wird vom Server selbst erzeugt und steht im Antwortkörper,
+nicht hinter einer eigenen Adresse: eine Route `…/totp/qr?secret=…` hätte
+das Geheimnis in jede Zugriffsliste zwischen Browser und Server
+geschrieben — Proxy, Verlauf, Fehlerseite.
+
+Über die Schnittstelle geht dasselbe:
 
 ```
 curl -X POST http://localhost:8080/api/v1/me/totp/start -H "X-Session: $S"
@@ -948,8 +963,24 @@ curl -X POST http://localhost:8080/api/v1/mfa-policy \
   -d '{"required_for_admins":true}'
 ```
 
+Oder in der Oberfläche: **Einstellungen → Zugang → Anmeldung in zwei
+Schritten für Administratoren.**
+
 **Ab Werk aus.** Einschalten geht nur, wenn das eigene Konto die
 Anmeldung in zwei Schritten schon hat — sonst sperrt man sich aus.
+
+**Was die Pflicht bewirkt, wenn sie steht:** ein Administrator ohne
+zweiten Faktor kommt an **keine** Route mehr außer denen, die er zum
+Einrichten braucht (`/api/v1/me`, `/api/v1/me/totp/start`,
+`/api/v1/me/totp/confirm`, Sprache, Passwort, Abmelden). Die Oberfläche
+zeigt ihm bei der nächsten Anmeldung die Einrichtung und sonst nichts.
+Abschalten kann seinen zweiten Faktor, solange die Pflicht steht,
+niemand.
+
+Das ist ausdrücklich mehr, als der Schalter in der ersten Fassung tat:
+dort verhinderte er nur das Abschalten. Wer nie einen zweiten Faktor
+eingerichtet hatte, war von der „Pflicht" gar nicht betroffen — genau der
+aber ist gemeint.
 
 Solange der Schalter aus ist, ist die BSI-Anforderung (OPS.1.2.5.A17,
 OPS.1.1.7.A6) **nicht erfüllt**. Eine Möglichkeit, die niemand

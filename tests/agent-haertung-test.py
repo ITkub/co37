@@ -213,8 +213,22 @@ def hole_code():
 # Arbeitsstand oft gar nicht vor.
 gefaelschte_quelle = TMP / "serviert" / "agent.py"
 gefaelschte_quelle.parent.mkdir(parents=True, exist_ok=True)
-gefaelschte_quelle.write_text('AGENT_VERSION = "9.9.9"\nprint("hallo")\n',
-                              encoding="utf-8")
+# newline="\n" ist hier nicht Kosmetik.
+#
+# write_text() uebersetzt unter Windows jedes \n in \r\n. Die Datei auf
+# der Platte trug damit CRLF, read_text() gab sie als LF zurueck,
+# signiert wurde die LF-Fassung - und das Backend liefert die BYTES aus.
+# Die Signatur passte dann nicht, und die Reihe meldete am 2026-09-07 auf
+# KK-LENOVO "Der Agent nimmt sie nicht an".
+#
+# Am Produkt liegt das nicht: die ganze Kette arbeitet auf Bytes
+# (sign-release.py liest binaer, agent_code() liefert read_bytes(), der
+# Agent hasht dieselben Bytes wieder), und .gitattributes legt *.py mit
+# LF ab. Es war der Test, der eine Datei herstellte, die es so gar nicht
+# gibt. Genau deshalb steht die Gegenprobe unten: dass die ECHTE
+# agent.py kein CRLF traegt.
+with open(gefaelschte_quelle, "w", encoding="utf-8", newline="\n") as _fh:
+    _fh.write('AGENT_VERSION = "9.9.9"\nprint("hallo")\n')
 merke_src = main.AGENT_SRC
 try:
     main.AGENT_SRC = gefaelschte_quelle
@@ -244,6 +258,20 @@ try:
     ok, grund = mit.pruefe_code_signatur(antwort.get("code", ""),
                                          antwort.get("signature", ""))
     check("und der Agent nimmt sie an", ok, grund)
+
+    # Die Gegenprobe an der echten Datei: sie muss LF haben.
+    #
+    # Die Signaturkette ist byteweise - wer auf einem Windows-Rechner
+    # baut und dabei CRLF in agent.py bekommt, signiert und liefert
+    # zwar in sich stimmig, aber jede Pruefsumme und jeder Vergleich
+    # gegen den Server unterscheidet sich dann. .gitattributes legt
+    # *.py mit LF ab; diese Zeile misst nach, dass das auch angekommen
+    # ist, statt es zu glauben.
+    _echt = (WURZEL / "agent" / "agent.py").read_bytes()
+    check("die echte agent.py hat LF, kein CRLF",
+          b"\r\n" not in _echt,
+          f"{_echt.count(bytes([13, 10]))} Zeilenenden sind CRLF"
+          if b"\r\n" in _echt else "")
 finally:
     main.AGENT_SRC = merke_src
 
@@ -1146,12 +1174,25 @@ try:
     _d = Path(tempfile.mkdtemp()) / "co37"
     _z = _d / "release-private.pem"
     _m.schluessel_schreiben(_z, b"-----BEGIN PRIVATE KEY-----\n")
-    check("der Schluessel liegt mit 0600 auf der Platte",
-          oct(_z.stat().st_mode & 0o777) == "0o600",
-          oct(_z.stat().st_mode & 0o777))
-    check("das Verzeichnis darueber ist 0700",
-          oct(_d.stat().st_mode & 0o777) == "0o700",
-          oct(_d.stat().st_mode & 0o777))
+    # Unix-Rechtebits gibt es unter Windows nicht: os.chmod schaltet dort
+    # nur das Schreibschutz-Flag, und stat() meldet 0o666 beziehungsweise
+    # 0o777, was immer man setzt. Die Pruefung waere dort nicht streng,
+    # sondern schlicht ohne Gegenstand - der Schutz heisst dort ACL, und
+    # den prueft der Windows-Teil dieser Reihe.
+    #
+    # Ausdruecklich benannt statt still uebersprungen: eine Pruefung, die
+    # wortlos verschwindet, faellt niemandem auf, wenn sie eines Tages
+    # auch auf der Zielplattform verschwindet.
+    if os.name == "nt":
+        print("      (Rechtebits: unter Windows ohne Gegenstand - der "
+              "Server laeuft auf Linux, dort wird das geprueft)")
+    else:
+        check("der Schluessel liegt mit 0600 auf der Platte",
+              oct(_z.stat().st_mode & 0o777) == "0o600",
+              oct(_z.stat().st_mode & 0o777))
+        check("das Verzeichnis darueber ist 0700",
+              oct(_d.stat().st_mode & 0o777) == "0o700",
+              oct(_d.stat().st_mode & 0o777))
     try:
         _m.schluessel_schreiben(_z, b"neu")
         _ueberschrieben = True

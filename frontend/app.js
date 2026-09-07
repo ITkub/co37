@@ -20,11 +20,23 @@ function setSession(aktiv){
   SESSION = !!aktiv;
 }
 
+/*
+ * Zwischenstand der Anmeldung in zwei Schritten. Das ist NICHT das
+ * Sitzungstoken - es gibt noch keine Sitzung. Es ist die kurzlebige
+ * Kennung des angefangenen Vorgangs, die das Backend nach fuenf Minuten
+ * oder fuenf Fehlversuchen verwirft.
+ */
+let MFA_TOKEN = null;
+
 function showLogin(msg){
   ME = null;
+  MFA_TOKEN = null;
   document.getElementById("loginError").textContent = msg || "";
   document.getElementById("loginUser").value = "";
   document.getElementById("loginPass").value = "";
+  document.getElementById("loginCode").value = "";
+  document.getElementById("loginSchritt1").style.display = "";
+  document.getElementById("loginSchritt2").style.display = "none";
   document.getElementById("appShell").style.display = "none";
   const dlg = document.getElementById("dlgLogin");
   if (!dlg.open) dlg.showModal();
@@ -32,6 +44,8 @@ function showLogin(msg){
 }
 
 async function doLogin(){
+  // Steht der Vorgang schon im zweiten Schritt, geht der Klick dorthin.
+  if (MFA_TOKEN) return doLoginCode();
   const username = document.getElementById("loginUser").value.trim();
   const password = document.getElementById("loginPass").value;
   if (!username || !password){
@@ -56,9 +70,63 @@ async function doLogin(){
     document.getElementById("loginError").textContent = msg;
     return;
   }
-  await res.json();   // Inhalt wird nicht mehr gebraucht - das Cookie zaehlt
+  const d = await res.json();
+
+  // Zweiter Schritt verlangt. Es gibt jetzt KEIN Sitzungscookie - das
+  // Backend setzt es erst, wenn der Code stimmt. Wer hier abbricht, ist
+  // nicht angemeldet.
+  if (d && d.mfa_required){
+    MFA_TOKEN = d.mfa_token;
+    PW_ALT = password;
+    document.getElementById("loginSchritt1").style.display = "none";
+    document.getElementById("loginSchritt2").style.display = "";
+    document.getElementById("loginError").textContent = "";
+    document.getElementById("loginCode").focus();
+    return;
+  }
+
   // Fuer einen etwaigen erzwungenen Wechsel gleich danach aufheben.
   PW_ALT = password;
+  setSession(true);
+  document.getElementById("dlgLogin").close();
+  document.getElementById("appShell").style.display = "";
+  await startApp();
+}
+
+async function doLoginCode(){
+  const code = document.getElementById("loginCode").value.trim();
+  const feld = document.getElementById("loginError");
+  if (!code){ feld.textContent = t("login.mfa_missing"); return; }
+  let res;
+  try {
+    res = await fetch(API + "/api/v1/login/totp", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      credentials: "same-origin",
+      body: JSON.stringify({mfa_token: MFA_TOKEN, code})
+    });
+  } catch(e){ feld.textContent = t("login.unreachable"); return; }
+
+  if (!res.ok){
+    // Nach zu vielen Fehlversuchen oder nach Ablauf verwirft das Backend
+    // den Vorgang und sagt das in einer Kopfzeile. Dann hilft nur von
+    // vorn - und die Maske muss das zeigen, sonst tippt jemand weiter
+    // Codes gegen ein Token, das es nicht mehr gibt.
+    const neu = res.headers.get("X-CO37-MFA") === "restart";
+    let msg = t("login.failed");
+    try { msg = (await res.json()).detail || msg; } catch(e){}
+    feld.textContent = msg;
+    document.getElementById("loginCode").value = "";
+    if (neu){
+      MFA_TOKEN = null;
+      document.getElementById("loginPass").value = "";
+      document.getElementById("loginSchritt1").style.display = "";
+      document.getElementById("loginSchritt2").style.display = "none";
+      document.getElementById("loginUser").focus();
+    }
+    return;
+  }
+  await res.json();
+  MFA_TOKEN = null;
   setSession(true);
   document.getElementById("dlgLogin").close();
   document.getElementById("appShell").style.display = "";
@@ -1547,6 +1615,7 @@ document.getElementById("btnSettings").onclick = () => {
   if (isAdmin){
     loadAgentsTab(); loadUpdate(); loadCmkForm(); loadRollout(); loadBuildStatus();
     loadUsers(); loadAudit(); loadProxy(); loadAreasTab(); loadSyslog();
+    loadMfaPolicy();
   }
 };
 document.getElementById("dlgSettings").addEventListener("close", () => {
@@ -2289,7 +2358,141 @@ function loadAccount(){
   document.getElementById("acName").textContent = ME ? ME.username : "—";
   document.getElementById("acRole").textContent =
     ME ? (ME.is_admin ? t("settings.users.role_admin") : t("settings.users.role_user")) : "—";
+  const an = !!(ME && ME.mfa_enabled);
+  document.getElementById("mfaAn").style.display = an ? "" : "none";
+  document.getElementById("mfaAus").style.display = an ? "none" : "";
 }
+
+
+/* ---------- Anmeldung in zwei Schritten ---------- */
+/*
+ * Ein Dialog, zwei Wege hinein: der Knopf im Reiter Konto und der Zwang
+ * aus startApp(), wenn die Anlage sie fuer Administratoren verlangt. Der
+ * Unterschied ist genau einer - ob abgebrochen werden darf.
+ */
+let MFA_ZWANG = false;
+
+async function mfaEinrichtenOeffnen(zwang){
+  MFA_ZWANG = !!zwang;
+  let d;
+  try { d = await api("POST", "/api/v1/me/totp/start"); } catch(e){ return; }
+
+  // Das Bild kommt fertig aus dem Backend. innerHTML ist hier vertretbar
+  // und sonst nirgends: der Inhalt ist ein SVG, das der Server selbst
+  // erzeugt hat, kein Text aus einem Eingabefeld.
+  document.getElementById("mfaQr").innerHTML = d.qr_svg || "";
+  // In Vierergruppen, sonst vertippt sich beim Abtippen jeder.
+  document.getElementById("mfaSecret").textContent =
+    (d.secret || "").replace(/(.{4})/g, "$1 ").trim();
+  document.getElementById("mfaCode").value = "";
+  document.getElementById("mfaError").textContent = "";
+  document.getElementById("mfaEinrichtung").style.display = "";
+  document.getElementById("mfaRettung").style.display = "none";
+  document.getElementById("mfaConfirm").style.display = "";
+  document.getElementById("mfaDone").style.display = "none";
+  document.getElementById("mfaCancel").style.display = zwang ? "none" : "";
+  document.getElementById("mfaZwangHint").style.display = zwang ? "" : "none";
+
+  const dlg = document.getElementById("dlgMfaSetup");
+  if (!dlg.open) dlg.showModal();
+  document.getElementById("mfaCode").focus();
+}
+
+document.getElementById("mfaGo").onclick = () => mfaEinrichtenOeffnen(false);
+
+document.getElementById("mfaCancel").onclick = () => {
+  // Abgebrochen heisst abgebrochen: das angefangene Geheimnis steht zwar
+  // noch am Konto, scharf ist es aber nicht - totp_confirmed_at bleibt
+  // leer, und ein neuer Anlauf erzeugt ein neues. Anmelden laesst sich
+  // weiterhin mit dem Passwort allein.
+  document.getElementById("dlgMfaSetup").close();
+};
+
+document.getElementById("mfaConfirm").onclick = async () => {
+  const code = document.getElementById("mfaCode").value.trim();
+  const feld = document.getElementById("mfaError");
+  if (!code){ feld.textContent = t("settings.mfa.need_code"); return; }
+  let d;
+  try {
+    d = await api("POST", "/api/v1/me/totp/confirm", { code });
+  } catch(e){
+    feld.textContent = String(e.message || e);
+    return;
+  }
+  // Ab hier gibt es die Codes genau einmal zu sehen. Deshalb wechselt der
+  // Dialog in einen zweiten Schritt statt sich zu schliessen.
+  document.getElementById("mfaCodes").textContent =
+    (d.recovery_codes || []).join("\n");
+  document.getElementById("mfaEinrichtung").style.display = "none";
+  document.getElementById("mfaRettung").style.display = "";
+  document.getElementById("mfaConfirm").style.display = "none";
+  document.getElementById("mfaCancel").style.display = "none";
+  document.getElementById("mfaDone").style.display = "";
+};
+
+document.getElementById("mfaCopy").onclick = async () => {
+  const text = document.getElementById("mfaCodes").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(t("settings.mfa.copied"));
+  } catch(e){
+    // Ohne sicheren Kontext gibt es die Zwischenablage nicht. Dann bleibt
+    // das Markieren von Hand - die Codes stehen ja da.
+    toast(t("settings.mfa.copy_failed"), true);
+  }
+};
+
+document.getElementById("mfaDone").onclick = async () => {
+  document.getElementById("dlgMfaSetup").close();
+  const zwang = MFA_ZWANG;
+  MFA_ZWANG = false;
+  try { ME = await api("GET", "/api/v1/me"); } catch(e){}
+  loadAccount();
+  // Kam der Dialog aus dem Zwang, war die Oberflaeche bis eben gesperrt.
+  // Jetzt darf sie starten.
+  if (zwang){
+    document.getElementById("appShell").style.display = "";
+    await startApp();
+  }
+};
+
+document.getElementById("mfaOff").onclick = async () => {
+  const password = document.getElementById("mfaOffPw").value;
+  const code = document.getElementById("mfaOffCode").value.trim();
+  if (!password || !code){ toast(t("settings.mfa.need_both"), true); return; }
+  try { await api("POST", "/api/v1/me/totp/off", { password, code }); }
+  catch(e){ return; }
+  document.getElementById("mfaOffPw").value = "";
+  document.getElementById("mfaOffCode").value = "";
+  try { ME = await api("GET", "/api/v1/me"); } catch(e){}
+  loadAccount();
+  toast(t("settings.mfa.turned_off"));
+};
+
+
+async function loadMfaPolicy(){
+  let d;
+  try { d = await api("GET", "/api/v1/mfa-policy"); } catch(e){ return; }
+  document.getElementById("mfaPolicy").checked = !!d.required_for_admins;
+  document.getElementById("mfaPolicyState").textContent =
+    d.required_for_admins ? t("settings.mfa.policy_on")
+                          : t("settings.mfa.policy_off");
+}
+
+document.getElementById("mfaPolicy").onchange = async (ev) => {
+  const an = ev.target.checked;
+  try {
+    await api("POST", "/api/v1/mfa-policy", { required_for_admins: an });
+  } catch(e){
+    // Das Backend weist das Einschalten ab, solange das eigene Konto den
+    // zweiten Faktor nicht hat. Der Haken muss dann zurueck, sonst zeigt
+    // er einen Zustand, den der Server nicht hat.
+    ev.target.checked = !an;
+    toast(String(e.message || e), true);
+    return;
+  }
+  loadMfaPolicy();
+};
 
 document.getElementById("acSave").onclick = async () => {
   const oldPw = document.getElementById("acOld").value;
@@ -2634,11 +2837,28 @@ document.getElementById("loginGo").onclick = doLogin;
 document.getElementById("loginPass").addEventListener("keydown", e => {
   if (e.key === "Enter") doLogin();
 });
+document.getElementById("loginCode").addEventListener("keydown", e => {
+  if (e.key === "Enter") doLogin();
+});
 document.getElementById("pwzGo").onclick = passwortZwangSpeichern;
 document.getElementById("pwzNeu2").addEventListener("keydown", e => {
   if (e.key === "Enter") passwortZwangSpeichern();
 });
+document.getElementById("mfaCode").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("mfaConfirm").click();
+});
 document.getElementById("btnLogout").onclick = doLogout;
+
+// Escape darf diese drei Dialoge nicht schliessen. Hinter jedem steht
+// ein ausgeblendetes appShell - wer sie wegdrueckt, sieht eine leere
+// Seite und haelt sie fuer kaputt. Beim Einrichtungsdialog kommt hinzu,
+// dass er im Zwangsfall gar nicht verlassen werden darf; freiwillig
+// geoeffnet gibt es dafuer den Knopf Abbrechen.
+["dlgLogin", "dlgPwZwang", "dlgMfaSetup"].forEach(id => {
+  document.getElementById(id).addEventListener("cancel", e => {
+    e.preventDefault();
+  });
+});
 
 async function startApp(){
   try { ME = await api("GET", "/api/v1/me"); } catch(e){ return; }
@@ -2648,6 +2868,16 @@ async function startApp(){
   // nicht darum, etwas zu verhindern, sondern darum, dem Benutzer zu
   // sagen, was er tun soll, statt ihn gegen lauter 403 laufen zu lassen.
   if (ME.must_change_password){ zeigePasswortZwang(); return; }
+
+  // Dasselbe fuer die Pflicht zur Anmeldung in zwei Schritten: das
+  // Backend laesst dieses Konto dann nur noch an MFA_FREI. Ohne diesen
+  // Zweig saehe der Administrator ein Dashboard, das an jeder Ecke 403
+  // liefert, und wuesste nicht warum.
+  if (ME.mfa_setup_required){
+    document.getElementById("appShell").style.display = "none";
+    await mfaEinrichtenOeffnen(true);
+    return;
+  }
   document.getElementById("whoami").textContent =
     ME.username + (ME.is_admin ? " · " + t("settings.users.role_admin") : "");
   // Reiter, die nur Administratoren sehen sollen

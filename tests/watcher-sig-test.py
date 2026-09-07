@@ -470,15 +470,59 @@ check("incoming.zip wird nicht mehr direkt ausgepackt",
 _q = TMP / "f19"
 _q.mkdir(exist_ok=True)
 (_q / "echt.zip").write_bytes(b"inhalt")
-(_q / "verknuepft.zip").symlink_to(_q / "echt.zip")
-try:
-    w_roh.ins_sichere_holen(_q / "verknuepft.zip", _q / "ziel.zip")
-    check("eine Verknuepfung als Paket wird abgewiesen", False)
-except w_roh.PaketAbgewiesen:
-    check("eine Verknuepfung als Paket wird abgewiesen", True)
-w_roh.ins_sichere_holen(_q / "echt.zip", _q / "ziel.zip")
-check("eine echte Datei wird kopiert",
-      (_q / "ziel.zip").read_bytes() == b"inhalt")
+
+# ins_sichere_holen() laesst sich nur dort AUSFUEHREN, wo es O_NOFOLLOW
+# gibt - also unter POSIX. Unter Windows kennt das os-Modul die Konstante
+# nicht, und der Aufruf endet mit AttributeError.
+#
+# Der naheliegende "Fix" waere getattr(os, "O_NOFOLLOW", 0) im Watcher.
+# Das waere der schlechteste Ausgang dieser Runde: die Absicherung fiele
+# damit auf einer Plattform stillschweigend weg, und genau davon handelt
+# der Befund F-19. Der Watcher laeuft ausschliesslich als root auf Linux;
+# nicht das Produkt wird fuer den Test verbogen, sondern der Test sagt,
+# was er hier nicht messen kann.
+_ausfuehrbar = hasattr(os, "O_NOFOLLOW")
+
+# Eine Verknuepfung anzulegen braucht unter Windows zusaetzlich ein
+# eigenes Recht (SeCreateSymbolicLinkPrivilege), sonst WinError 1314.
+_verknuepfung_geht = False
+if _ausfuehrbar:
+    try:
+        (_q / "verknuepft.zip").symlink_to(_q / "echt.zip")
+        _verknuepfung_geht = True
+    except OSError as _exc:
+        print(f"      (Verknuepfungspruefung uebersprungen: "
+              f"{type(_exc).__name__} - dieses Betriebssystem laesst keine "
+              f"Verknuepfung anlegen. Der Watcher laeuft auf Linux.)")
+
+if _verknuepfung_geht:
+    try:
+        w_roh.ins_sichere_holen(_q / "verknuepft.zip", _q / "ziel.zip")
+        check("eine Verknuepfung als Paket wird abgewiesen", False)
+    except w_roh.PaketAbgewiesen:
+        check("eine Verknuepfung als Paket wird abgewiesen", True)
+    w_roh.ins_sichere_holen(_q / "echt.zip", _q / "ziel.zip")
+    check("eine echte Datei wird kopiert",
+          (_q / "ziel.zip").read_bytes() == b"inhalt")
+else:
+    if not _ausfuehrbar:
+        print("      (ins_sichere_holen() ist hier nicht ausfuehrbar: "
+              "dieses Betriebssystem kennt O_NOFOLLOW nicht. Gemessen "
+              "wird das auf Linux, wo der Watcher laeuft.)")
+    # Ersatzweise nachsehen, dass die Absicherung im Quelltext ueberhaupt
+    # noch dasteht. Das ersetzt die Messung nicht und behauptet es auch
+    # nicht - es faengt nur den Fall ab, dass jemand sie entfernt und es
+    # auf einem Windows-Rechner niemandem auffaellt.
+    check("O_NOFOLLOW steht weiterhin in ins_sichere_holen()",
+          "O_NOFOLLOW" in ohne_kommentar, "nur statisch geprueft")
+
+# Und in beiden Faellen: die Konstante darf nicht wegoptimiert werden.
+# Ein getattr-Rueckfall wuerde die Pruefung oben gruen lassen und den
+# Schutz trotzdem abschalten.
+check("O_NOFOLLOW steht ohne Rueckfall da",
+      "getattr(os," not in ohne_kommentar
+      or "O_NOFOLLOW" not in ohne_kommentar.split("getattr(os,")[1][:80],
+      "ein getattr-Rueckfall waere ein stiller Verzicht")
 
 
 # ======================================================================
@@ -724,23 +768,54 @@ _pkg = TMP / "pkgziel"
 _pkg.mkdir()
 _opfer = TMP / "opfer.txt"
 _opfer.write_text("ORIGINAL", encoding="utf-8")
-os.symlink(_opfer, _pkg / "co37-agent_0.0.1_all.deb")
-try:
-    _bd.sicher_schreiben(_pkg / "co37-agent_0.0.1_all.deb", b"BOESE")
-    _durch = True
-except OSError:
-    _durch = False
-check("Schreiben durch eine Verknuepfung wird abgewiesen", not _durch)
-check("die Zieldatei ist unveraendert",
-      _opfer.read_text(encoding="utf-8") == "ORIGINAL")
-# Gegenprobe: eine echte Datei muss geschrieben werden, sonst prueft das
-# hier nur, dass gar nichts mehr geht.
-_bd.sicher_schreiben(_pkg / "echt.deb", b"!<arch>\n")
-check("eine echte Datei wird geschrieben",
-      (_pkg / "echt.deb").read_bytes() == b"!<arch>\n")
-_bd.sicher_schreiben(_pkg / "echt.deb", b"zweiter Bau")
-check("ein zweiter Bau darf ueberschreiben",
-      (_pkg / "echt.deb").read_bytes() == b"zweiter Bau")
+# Dieselbe Ordnung wie oben bei F-19, und aus demselben Grund: auch
+# sicher_schreiben() benutzt O_NOFOLLOW und ist damit nur unter POSIX
+# ausfuehrbar. Der Paketbau laeuft als root auf Linux.
+#
+# Beim ersten Anlauf war hier nur der Verknuepfungsteil abgesichert und
+# die beiden Gegenproben darunter standen frei - die riefen die Funktion
+# trotzdem auf und brachten dieselbe AttributeError. Wer eine Ausnahme
+# einbaut, muss ALLE Aufrufe dahinter zaehlen, nicht nur den einen, um
+# den es gerade ging.
+_bd_ausfuehrbar = hasattr(os, "O_NOFOLLOW")
+_link_geht = False
+if _bd_ausfuehrbar:
+    try:
+        os.symlink(_opfer, _pkg / "co37-agent_0.0.1_all.deb")
+        _link_geht = True
+    except OSError as _exc:
+        print(f"      (F-29-Verknuepfungspruefung uebersprungen: "
+              f"{type(_exc).__name__} - dieses Betriebssystem laesst keine "
+              f"Verknuepfung anlegen. Gebaut wird auf Linux.)")
+else:
+    print("      (F-29: sicher_schreiben() ist hier nicht ausfuehrbar - "
+          "dieses Betriebssystem kennt O_NOFOLLOW nicht. Gebaut wird "
+          "auf Linux.)")
+
+if _link_geht:
+    try:
+        _bd.sicher_schreiben(_pkg / "co37-agent_0.0.1_all.deb", b"BOESE")
+        _durch = True
+    except OSError:
+        _durch = False
+    check("Schreiben durch eine Verknuepfung wird abgewiesen", not _durch)
+    check("die Zieldatei ist unveraendert",
+          _opfer.read_text(encoding="utf-8") == "ORIGINAL")
+
+if _bd_ausfuehrbar:
+    # Gegenprobe: eine echte Datei muss geschrieben werden, sonst prueft
+    # das hier nur, dass gar nichts mehr geht.
+    _bd.sicher_schreiben(_pkg / "echt.deb", b"!<arch>\n")
+    check("eine echte Datei wird geschrieben",
+          (_pkg / "echt.deb").read_bytes() == b"!<arch>\n")
+    _bd.sicher_schreiben(_pkg / "echt.deb", b"zweiter Bau")
+    check("ein zweiter Bau darf ueberschreiben",
+          (_pkg / "echt.deb").read_bytes() == b"zweiter Bau")
+else:
+    check("O_NOFOLLOW steht weiterhin in build_deb.sicher_schreiben()",
+          "O_NOFOLLOW" in deb, "nur statisch geprueft")
+    check("und ohne getattr-Rueckfall",
+          "getattr(os," not in deb, "ein Rueckfall waere ein stiller Verzicht")
 
 # ======================================================================
 print()

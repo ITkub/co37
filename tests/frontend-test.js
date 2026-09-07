@@ -20,18 +20,44 @@ const SESSION = process.argv[3] || process.env.CO37_TEST_SESSION || "";
 // auf "admin" gilt fuer den Einzellauf gegen ein frisches Backend.
 const ADMIN_PW = process.env.CO37_TEST_ADMIN_PW || "admin";
 let SESSION_TOKEN = "";
+let ANMELDE_GRUND = "";
 try {
+  // Der Koerper geht ueber die EINGABE, nicht als Argument.
+  //
+  // Vorher stand er als -d '{"username":...}' in der Befehlszeile. Unter
+  // Linux ist das richtig, unter Windows nicht: execSync ruft dort
+  // cmd.exe auf, und cmd kennt einfache Anfuehrungszeichen nicht als
+  // Klammerung. curl bekam die Zeichen woertlich und in Stuecke
+  // zerlegt, die Anmeldung scheiterte, SESSION_TOKEN blieb leer - und
+  // das process.exit(1) darunter ging OHNE eine einzige Zeile Ausgabe
+  // hinaus. Die Reihe meldete "0 Pruefungen" und keinen Grund.
+  //
+  // Doppelte Anfuehrungszeichen versteht jede der beiden Shells, und
+  // was ueber stdin kommt, muss ueberhaupt nicht geklammert werden.
   const out = execSync(
     `curl -s -X POST http://127.0.0.1:${PORT}/api/v1/login `
-    + `-H "Content-Type: application/json" `
-    + `-d '{"username":"admin","password":"${ADMIN_PW}"}'`,
-    { encoding: "utf8" });
-  SESSION_TOKEN = JSON.parse(out).session || "";
+    + `-H "Content-Type: application/json" --data-binary @-`,
+    { encoding: "utf8",
+      input: JSON.stringify({ username: "admin", password: ADMIN_PW }) });
+  try {
+    SESSION_TOKEN = JSON.parse(out).session || "";
+    if (!SESSION_TOKEN) ANMELDE_GRUND = "Antwort ohne Sitzung: " + out.slice(0, 200);
+  } catch (e) {
+    ANMELDE_GRUND = "Antwort ist kein JSON: " + out.slice(0, 200);
+  }
 } catch (e) {
-  console.error("Anmeldung fehlgeschlagen. Laeuft das Backend, und passt das "
-              + "Passwort von admin (CO37_TEST_ADMIN_PW)?");
+  ANMELDE_GRUND = "curl selbst ist gescheitert: " + String(e.message || e).slice(0, 200);
 }
-if (!SESSION_TOKEN) process.exit(1);
+if (!SESSION_TOKEN) {
+  // Laut werden, nicht still verschwinden. Eine Reihe, die mit null
+  // Pruefungen und ohne Ausgabe abbricht, sieht aus wie ein kaputtes
+  // Testgeruest und ist nicht zu finden.
+  console.error("FEHLER Anmeldung am Testbackend fehlgeschlagen  -> "
+                + (ANMELDE_GRUND || "kein Grund ermittelbar"));
+  console.error("       Laeuft das Backend auf Port " + PORT + ", und passt "
+                + "das Passwort von admin (CO37_TEST_ADMIN_PW)?");
+  process.exit(1);
+}
 const HTML_PATH = process.argv[4] || "/tmp/jt/frontend/index.html";
 const html = fs.readFileSync(HTML_PATH, "utf8");
 // Das Skript liegt seit 0.27.0 in einer eigenen Datei - noetig, damit die
@@ -517,6 +543,57 @@ global.setTimeout = origSetTimeout;
                                 appjs.indexOf('getElementById("slOn").onchange') + 700);
     check("ein abgelehntes Einschalten setzt den Haken zurueck",
           /ev\.target\.checked = !an/.test(anBlock), anBlock.slice(0, 80));
+  }
+
+  console.log("\n=== Anmeldung in zwei Schritten ===");
+  {
+    // Der gefaehrlichste Fehler in dieser ganzen Funktion waere eine
+    // Anmeldemaske, die den Zwischenschritt nicht kennt: das Backend
+    // setzt dann kein Sitzungscookie, die Oberflaeche haelt die Anmeldung
+    // fuer gelungen, und wer den zweiten Faktor eingeschaltet hat, kommt
+    // nie wieder hinein. Deshalb steht diese Pruefung zuerst.
+    check("die Anmeldemaske hat einen zweiten Schritt",
+          html.includes('id="loginSchritt2"') && html.includes('id="loginCode"'));
+    check("app.js wertet mfa_required aus",
+          /mfa_required/.test(appjs));
+    check("und ruft dafuer die zweite Route auf",
+          /\/api\/v1\/login\/totp/.test(appjs));
+    // Ohne credentials nimmt der Browser das Sitzungscookie nicht an.
+    const zweiter = appjs.slice(appjs.indexOf("async function doLoginCode"),
+                                appjs.indexOf("async function doLoginCode") + 900);
+    check("der zweite Schritt nimmt das Sitzungscookie an",
+          /credentials:\s*"same-origin"/.test(zweiter), zweiter.slice(0, 60));
+    check("ein verworfener Vorgang setzt die Maske zurueck",
+          /X-CO37-MFA/.test(appjs));
+
+    const felder = ["mfaGo", "mfaQr", "mfaSecret", "mfaCode", "mfaConfirm",
+                    "mfaCancel", "mfaError", "mfaRettung", "mfaCodes",
+                    "mfaCopy", "mfaDone", "mfaAn", "mfaAus", "mfaOffPw",
+                    "mfaOffCode", "mfaOff", "mfaPolicy", "mfaPolicyState",
+                    "mfaZwangHint", "mfaEinrichtung"];
+    const fehlend = felder.filter(id => !html.includes(`id="${id}"`));
+    check("alle Felder, die app.js anfasst, stehen im Markup",
+          fehlend.length === 0, fehlend.join(", "));
+
+    check("der Pflichtschalter sitzt im Reiter Zugang",
+          html.indexOf('id="mfaPolicy"') > html.indexOf('id="tabProxy"') &&
+          html.indexOf('id="mfaPolicy"') < html.indexOf('id="tabAreas"'));
+    check("die Einrichtung sitzt im Reiter Konto",
+          html.indexOf('id="mfaGo"') > html.indexOf('id="tabAccount"'));
+
+    // Die Wiederherstellungscodes gibt es einmal. Ein Toast waere hier
+    // das falsche Mittel - er verschwindet von selbst.
+    check("die Wiederherstellungscodes stehen in einem eigenen Schritt",
+          /recovery_codes/.test(appjs) &&
+          /getElementById\("mfaCodes"\)\.textContent/.test(appjs));
+
+    // Escape auf einem Dialog mit ausgeblendetem appShell dahinter
+    // hinterlaesst eine leere Seite.
+    check("Escape schliesst die Zwangsdialoge nicht",
+          /"dlgLogin", "dlgPwZwang", "dlgMfaSetup"/.test(appjs));
+
+    check("der Zwang aus dem Backend wird ausgewertet",
+          /mfa_setup_required/.test(appjs));
   }
 
   console.log("\n=== Sprachfelder zeigen den echten Stand ===");

@@ -122,16 +122,36 @@ def huelle():
     """
     Alle Pakete, die von den ausgesuchten aus erreichbar sind.
 
-    Gibt (namen, nicht_lesbar) zurueck. Was nicht installiert ist, kann
+    Gibt (namen, nicht_lesbar, nur_diese_plattform) zurueck. Was nicht
+    installiert ist, kann
     nicht befragt werden - das wird gemeldet statt uebergangen, sonst
     bestuende die Pruefung auf einem Rechner ohne Backend vollstaendig
     und haette nichts angesehen.
     """
-    gesehen, unlesbar = set(), set()
+    gesehen, unlesbar, nur_hier = set(), set(), set()
 
-    def besuche(name, extras):
+    # Bedingungen, die von der PLATTFORM abhaengen und nicht vom Paket.
+    # Ein Paket, das nur ueber eine solche Kante erreichbar ist, gehoert
+    # nicht in die Datei: die wird auf der Zielplattform erzeugt
+    # (KK-OPS01, Linux), und dort gibt es das Paket gar nicht.
+    #
+    # Aufgefallen am 2026-09-07 beim ersten Lauf unter Windows: click
+    # verlangt dort colorama, unter Linux nicht. Die Reihe meldete
+    # "colorama fehlt in requirements.txt" - ein Fehler, der auf der
+    # Zielplattform nicht existiert und dort auch nicht behebbar waere.
+    # Ihn aufzunehmen waere schlimmer: das Paket liesse sich auf einem
+    # Linux-Server nicht installieren.
+    PLATTFORM = ("sys_platform", "platform_system", "os_name",
+                 "platform_machine", "platform_release")
+
+    def besuche(name, extras, ueber_plattform=False):
         norm = name.lower().replace("_", "-").replace(".", "-")
         if norm in gesehen:
+            # Schon gesehen. Fuehrt jetzt ein Weg OHNE Plattformbedingung
+            # hierher, dann wird das Paket ueberall gebraucht und gehoert
+            # in die Datei - der bedingte Weg zaehlt dann nicht mehr.
+            if not ueber_plattform:
+                nur_hier.discard(norm)
             return
         try:
             dist = distribution(name)
@@ -139,25 +159,30 @@ def huelle():
             unlesbar.add(norm)
             return
         gesehen.add(norm)
+        if ueber_plattform:
+            nur_hier.add(norm)
         for roh in (dist.requires or []):
             req = Requirement(roh)
             if req.marker is not None and not any(
                     req.marker.evaluate({"extra": e}) for e in (extras or {""})):
                 continue
-            besuche(req.name, set())
+            plattformbedingt = ueber_plattform or (
+                req.marker is not None
+                and any(p in str(req.marker) for p in PLATTFORM))
+            besuche(req.name, set(), plattformbedingt)
 
     for paket in AUSGESUCHT:
         besuche(paket, EXTRAS.get(paket) or {""})
-    return gesehen, unlesbar
+    return gesehen, unlesbar, nur_hier
 
 
 if Requirement is None:
-    gebraucht, unlesbar = set(), set()
+    gebraucht, unlesbar, nur_hier = set(), set(), set()
     print("       HINWEIS: weder 'packaging' noch die Kopie in pip gefunden - "
           "die Vollstaendigkeit der Huelle wurde NICHT geprueft "
           "(pip install packaging).")
 else:
-    gebraucht, unlesbar = huelle()
+    gebraucht, unlesbar, nur_hier = huelle()
 
 check("die Huelle liess sich ueberhaupt bilden",
       Requirement is None or len(gebraucht) >= 8,
@@ -166,9 +191,32 @@ if unlesbar:
     print(f"       (nicht installiert, deshalb nicht befragt: "
           f"{', '.join(sorted(unlesbar))})")
 
-ungepinnt = sorted(gebraucht - set(pins))
+# Plattformbedingtes bleibt aussen vor - mit Ansage, nicht stillschweigend.
+# Es waere sonst eine Forderung, die auf der Zielplattform gar nicht
+# erfuellbar ist.
+ungepinnt = sorted(gebraucht - set(pins) - nur_hier)
 check("jedes gebrauchte Paket steht in requirements.txt", not ungepinnt,
       ungepinnt)
+_nur_hier_offen = sorted(nur_hier - set(pins))
+if _nur_hier_offen:
+    print(f"       (nur auf DIESER Plattform gebraucht, gehoert deshalb "
+          f"nicht in die Datei: {', '.join(_nur_hier_offen)})")
+
+# Die Unterscheidung selbst nachmessen. Unter Linux gibt es keinen
+# einzigen plattformbedingten Abhaengigen in dieser Huelle - die Ausnahme
+# oben liesse sich hier also nie beobachten, und eine Ausnahme, die
+# niemand sieht, ist eine Luecke mit Kommentar. Deshalb wird die
+# Einordnung an zwei erfundenen Angaben geprueft, nicht am Zufall des
+# Rechners.
+if Requirement is not None:
+    _P = ("sys_platform", "platform_system", "os_name",
+          "platform_machine", "platform_release")
+    _mit = Requirement('colorama; platform_system == "Windows"')
+    _ohne = Requirement('anyio; extra == "standard"')
+    check("eine Plattformbedingung wird als solche erkannt",
+          any(p in str(_mit.marker) for p in _P), str(_mit.marker))
+    check("eine Extra-Bedingung dagegen nicht",
+          not any(p in str(_ohne.marker) for p in _P), str(_ohne.marker))
 check("und es wurde wirklich etwas nachgesehen",
       Requirement is None or len(gebraucht) > len(AUSGESUCHT),
       f"{len(gebraucht)} gegen {len(AUSGESUCHT)} ausgesuchte")
@@ -177,7 +225,7 @@ check("und es wurde wirklich etwas nachgesehen",
 # Nur melden, nicht durchfallen lassen - sie kann auch fuer eine andere
 # Plattform dastehen (die Datei wird auf Python 3.13 erzeugt, gelesen
 # wird sie hier unter Umstaenden mit 3.11).
-ueberfluessig = sorted(set(pins) - gebraucht - unlesbar)
+ueberfluessig = sorted(set(pins) - gebraucht - unlesbar - nur_hier)
 if ueberfluessig:
     print(f"       (steht in der Datei, wird hier aber nicht gebraucht: "
           f"{', '.join(ueberfluessig)})")

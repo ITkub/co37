@@ -312,11 +312,55 @@ check("die Meldung sagt, woran es liegt",
 
 # Ohne Passphrase und ohne Tastatur: abbrechen, nicht haengen. Genau das
 # war der Grund, die Abfrage nach build_release.py zu holen.
+#
+# WAS HIER SCHIEFGING, ZUR ERINNERUNG
+#
+# Diese beiden Zeilen waren unter Linux von Anfang an gruen und haben
+# den Fehler trotzdem nicht gesehen, weil sie nie unter Windows liefen.
+# Am 2026-09-07 auf KK-LENOVO gemessen: der Aufruf brach NICHT ab,
+# sondern blieb an einer Eingabeaufforderung stehen, die getpass an
+# stdin vorbei auf die Konsole geschrieben hatte. Grund war
+# sys.stdin.isatty() - unter Windows ist NUL ein Zeichengeraet, und
+# isatty() meldet fuer jedes Zeichengeraet wahr.
+#
+# Die Reihe kann das hier nicht nachstellen: unter Linux ist DEVNULL
+# kein Terminal, und damit ist der Fall gar nicht herstellbar. Was sie
+# kann, ist sicherstellen, dass niemand zur alten Bedingung zurueckbaut
+# - deshalb die Strukturpruefung weiter unten.
 r = ruf("--schluessel-pruefen")
 check("ohne Passphrase und ohne Terminal wird abgebrochen, nicht gewartet",
       r.returncode != 0)
 check("und die Meldung nennt den Grund",
       "Terminal" in (r.stdout + r.stderr), (r.stdout + r.stderr).strip()[:120])
+
+# Die Bedingung selbst: sie darf nicht mehr an isatty() allein haengen.
+_qu = (WURZEL / "tools" / "schluessel.py").read_text(encoding="utf-8")
+_eing = _qu[_qu.index("def _eingabe("):]
+_eing = _eing[:_eing.index("\ndef ", 1)]
+check("die Abbruchbedingung haengt nicht mehr an isatty() allein",
+      "_tastatur_da()" in _eing and "isatty" not in _eing, _eing[:160])
+check("und der Windows-Zweig fragt die Konsole, nicht das Zeichengeraet",
+      "GetConsoleMode" in _qu)
+check("unter POSIX bleibt es bei isatty()",
+      'os.name != "nt"' in _qu and "sys.stdin.isatty()" in _qu)
+check("hier gemessen: ohne Terminal meldet die Funktion keine Tastatur",
+      schluessel._tastatur_da() is False or sys.stdin.isatty(),
+      f"os.name={os.name}, isatty={sys.stdin.isatty()}")
+
+# build_release.py stellt dieselbe Frage und muss dieselbe Antwort
+# benutzen. Eine Zweitfassung waere genau der Fehler, der in dieser
+# Baustrecke schon einmal steckte (schluessel_schreiben, doppelt).
+_bau_qu = (WURZEL / "build_release.py").read_text(encoding="utf-8")
+# Kommentarzeilen heraus, sonst trifft die Suche die Begruendung statt
+# des Aufrufs - der Fehler, der in dieser Datei schon mehrfach vorkam.
+_bau_code = "\n".join(z for z in _bau_qu.splitlines()
+                      if not z.strip().startswith("#"))
+check("build_release.py holt die Bedingung aus schluessel.py",
+      "_tastatur_da" in _bau_code)
+check("und ruft isatty nicht mehr selbst auf",
+      "sys.stdin.isatty()" not in _bau_code)
+check("und schreibt die Konsolenabfrage nicht ein zweites Mal",
+      "GetConsoleMode" not in _bau_code)
 
 r = ruf(str(paket), pw=PW.decode())
 check("signieren geht", r.returncode == 0, (r.stdout + r.stderr).strip()[:150])
@@ -517,8 +561,10 @@ check("die Passphrase wird vor dem Bauen geprueft",
 check("und landet nicht in os.environ des eigenen Prozesses",
       "os.environ[\"CO37_RELEASE_PASSPHRASE\"]" not in bau
       and "os.environ['CO37_RELEASE_PASSPHRASE']" not in bau)
+_bau_ohne_kommentar = "\n".join(z for z in bau.splitlines()
+                                if not z.strip().startswith("#"))
 check("ohne Terminal wird abgebrochen statt gewartet",
-      "sys.stdin.isatty()" in bau)
+      "_tastatur_da()" in _bau_ohne_kommentar)
 
 # Die Abfrage muss VOR der ersten Schreiboperation stehen. Steht sie
 # dahinter, hat setze_versionen() die Nummern schon in agent.py,
