@@ -546,6 +546,55 @@ else:
 
 
 # ======================================================================
+# Beide Werkzeuge koennen dasselbe
+# ======================================================================
+# Am 2026-09-07 ist ein Schluessel verloren gegangen, weil die Passphrase
+# nach dem Erzeugen nie gegen die GESPEICHERTE Fassung geprueft wurde.
+# sign-release.py kann das mit --schluessel-pruefen in einem Befehl,
+# make-license.py konnte es nicht - und ausgerechnet der Lizenzschluessel
+# wird selten benutzt, der Fehler faellt dort also am spaetesten auf.
+#
+# Geprueft wird beides: dass die Option existiert und dass sie
+# tatsaechlich den Schluessel laedt statt nur etwas auszugeben.
+print()
+print("--- Beide Werkzeuge koennen den Schluessel pruefen ---")
+for _w in ("sign-release.py", "make-license.py"):
+    _q = (WURZEL / "tools" / _w).read_text(encoding="utf-8")
+    check(f"{_w} kennt --schluessel-pruefen",
+          "--schluessel-pruefen" in _q)
+    _ab = _q[_q.index("schluessel_pruefen:"):][:200]
+    check(f"{_w} laedt den Schluessel dabei wirklich",
+          ".laden(" in _ab or "schluessel.laden(" in _ab, _ab[:80])
+
+# Und die Wirkung, ueber die Befehlszeile: eine falsche Passphrase muss
+# scheitern, die richtige durchgehen. Gegen die echten Werkzeuge, mit dem
+# Wegwerf-Schluessel aus TMP.
+for _w, _datei, _umg in (("sign-release.py", "release-private.pem",
+                          "CO37_RELEASE_PASSPHRASE"),
+                         ("make-license.py", "license-private.pem",
+                          "CO37_LICENSE_PASSPHRASE")):
+    _pfad = TMP / _datei
+    _pfad.unlink(missing_ok=True)
+    schluessel.schluessel_schreiben(
+        _pfad, schluessel.als_pem(PRIVAT, b"die richtige passphrase"))
+    _umgeb = dict(os.environ, CO37_LICENSE_HOME=str(TMP))
+    _umgeb[_umg] = "die richtige passphrase"
+    _r = subprocess.run([sys.executable, str(WURZEL / "tools" / _w),
+                         "--schluessel-pruefen"],
+                        capture_output=True, text=True, env=_umgeb,
+                        stdin=subprocess.DEVNULL)
+    check(f"{_w}: mit richtiger Passphrase geht es", _r.returncode == 0,
+          (_r.stdout + _r.stderr).strip()[:120])
+    _umgeb[_umg] = "die voellig falsche"
+    _r = subprocess.run([sys.executable, str(WURZEL / "tools" / _w),
+                         "--schluessel-pruefen"],
+                        capture_output=True, text=True, env=_umgeb,
+                        stdin=subprocess.DEVNULL)
+    check(f"{_w}: mit falscher scheitert es", _r.returncode != 0,
+          (_r.stdout + _r.stderr).strip()[:120])
+
+
+# ======================================================================
 # Die Baustrecke fragt einmal, nicht dreimal
 # ======================================================================
 print()

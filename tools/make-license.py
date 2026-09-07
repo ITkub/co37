@@ -468,6 +468,16 @@ def main():
                    help="Sicherung gegen den oeffentlichen Schluessel pruefen")
     p.add_argument("--zeigen", metavar="SCHLUESSEL",
                    help="Inhalt eines Schluessels anzeigen")
+    # Gab es hier bis 0.37.23 nicht, in sign-release.py dagegen schon.
+    # Die Asymmetrie war folgenreicher, als sie aussieht: nach dem
+    # Erzeugen liess sich beim Signaturschluessel in einem Befehl
+    # beweisen, dass die GESPEICHERTE Passphrase die Datei oeffnet -
+    # beim Lizenzschluessel nicht. Wer sie falsch notiert, merkt es
+    # dann erst beim naechsten Ausstellen, moeglicherweise Monate
+    # spaeter, und der Schluessel ist bis dahin unwiederbringlich.
+    p.add_argument("--schluessel-pruefen", action="store_true",
+                   dest="schluessel_pruefen",
+                   help="nur pruefen, ob sich der Schluessel oeffnen laesst")
     a = p.parse_args()
 
     if a.init:
@@ -475,6 +485,10 @@ def main():
     if a.verschluesseln:
         return werkzeug.verschluesseln(
             PRIVAT, UMGEBUNG, ZWECK, "Der Lizenzschluessel")
+    if a.schluessel_pruefen:
+        werkzeug.laden(PRIVAT, UMGEBUNG, ZWECK)
+        print("Der Lizenzschluessel laesst sich oeffnen.")
+        return
     if a.sicherung:
         return sicherung()
     if a.pruefen:
