@@ -624,6 +624,46 @@ _i_ver = bau.index("setze_versionen(version)", bau.index("def main("))
 check("gefragt wird vor der ersten Schreiboperation", _i_pass < _i_ver,
       (_i_pass, _i_ver))
 
+# Und dieselbe Frage fuer die Geheimnissuche: sie kann abbrechen, also
+# gehoert sie ebenfalls vor die erste Schreiboperation. Bis 0.37.23 stand
+# sie dahinter - am 2026-09-07 brach der Bau daran ab, nachdem
+# setze_versionen() die Nummern schon in vier Dateien geschrieben hatte.
+_i_geheim = bau.index("pruefe_keine_geheimnisse()", bau.index("def main("))
+check("auch die Geheimnissuche laeuft vor der ersten Schreiboperation",
+      _i_geheim < _i_ver, (_i_geheim, _i_ver))
+
+# Und die Wirkung, an einem nachgebauten Projektverzeichnis: eine
+# virtuelle Umgebung darf den Bau nicht anhalten, ein Schluessel im
+# ausgelieferten Teil sehr wohl.
+import importlib.util as _iu2  # noqa: E402
+
+_spec2 = _iu2.spec_from_file_location("br_test", WURZEL / "build_release.py")
+_br = _iu2.module_from_spec(_spec2)
+_spec2.loader.exec_module(_br)
+
+_proj = TMP / "projekt"
+(_proj / ".venv" / "Lib" / "site-packages" / "certifi").mkdir(parents=True)
+(_proj / ".venv" / "Lib" / "site-packages" / "certifi" / "cacert.pem").write_text(
+    "-----BEGIN CERTIFICATE-----\n", encoding="ascii")
+(_proj / "backend").mkdir(parents=True)
+_br.HIER = _proj
+try:
+    _br.pruefe_keine_geheimnisse()
+    _venv_ok = True
+except SystemExit:
+    _venv_ok = False
+check("eine virtuelle Umgebung im Projekt haelt den Bau nicht an",
+      _venv_ok, "certifi bringt cacert.pem mit - ein Zertifikat, kein Schluessel")
+
+(_proj / "backend" / "heimlich.pem").write_text(
+    "-----BEGIN PRIVATE KEY-----\n", encoding="ascii")
+try:
+    _br.pruefe_keine_geheimnisse()
+    _echt_ok = False
+except SystemExit:
+    _echt_ok = True
+check("ein Schluessel im ausgelieferten Teil sehr wohl", _echt_ok)
+
 # Nirgends darf die Passphrase in eine Datei geschrieben werden.
 for name in ("build_release.py", "tools/sign-release.py",
              "tools/make-license.py", "tools/schluessel.py"):

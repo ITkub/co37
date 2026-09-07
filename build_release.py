@@ -135,12 +135,40 @@ def pruefe_keine_geheimnisse():
     versehentlich hineinkopiert, aus einer Sicherung zurueckgeholt - waere
     er sonst in jedem ausgelieferten Paket.
     """
+    # Ordner, die nie ins Paket wandern. Ohne sie durchsucht rglob auch
+    # eine virtuelle Umgebung im Projektverzeichnis - und certifi bringt
+    # dort cacert.pem mit, ein Buendel oeffentlicher Wurzelzertifikate
+    # ohne einen einzigen privaten Schluessel. Am 2026-09-07 hat genau
+    # das einen Bau abgebrochen: die Meldung sagte "Privater Schluessel
+    # gefunden", und es war keiner.
+    #
+    # Die Muster treffen den DATEINAMEN, nicht den Inhalt. Das ist in
+    # Ordnung, solange nur durchsucht wird, was auch ausgeliefert wird.
+    NICHT_IM_PAKET = {".git", ".venv", "venv", "env", "node_modules",
+                      "__pycache__", ".mypy_cache", ".pytest_cache",
+                      ".ruff_cache", "htmlcov"}
+    MUSTER = ("*.pem", "*.key", "license-private*", "release-private*")
+
     treffer = []
-    for muster in ("*.pem", "*.key", "license-private*", "release-private*"):
+    for muster in MUSTER:
         for p in HIER.rglob(muster):
-            if "__pycache__" in p.parts or p.name == "secret.key":
+            if NICHT_IM_PAKET & set(p.parts) or p.name == "secret.key":
                 continue
             treffer.append(p.relative_to(HIER))
+
+    # Und dieselbe Frage noch einmal an der Stelle, an der sie wirklich
+    # zaehlt: an der Dateiliste des Pakets. Die Suche oben laesst Ordner
+    # aus - wuerde einer davon eines Tages doch mitgeliefert, faenden wir
+    # es hier. Der Paketinhalt ist eine weisse Liste, Fehlalarme kann es
+    # also nicht geben.
+    import fnmatch
+    for pfad, name in sammle():
+        if pfad.name == "secret.key":
+            continue
+        if any(fnmatch.fnmatch(pfad.name, m) for m in MUSTER):
+            rel = pfad.relative_to(HIER)
+            if rel not in treffer:
+                treffer.append(rel)
     if treffer:
         print("!!! Privater Schluessel im Projektverzeichnis gefunden:")
         for t in sorted(set(str(t) for t in treffer)):
@@ -382,6 +410,22 @@ def main():
     if not a.no_sign:
         passphrase_vorbereiten()
 
+    # Und aus demselben Grund AUCH die Geheimnissuche hierher, vor die
+    # erste Schreiboperation.
+    #
+    # Sie stand bis 0.37.23 hinter setze_versionen(), also genau da, wovor
+    # der Kommentar oben warnt. Am 2026-09-07 ist sie angeschlagen: der
+    # Bau brach ab, die Versionsnummern standen aber schon in vier
+    # Dateien - ein halb angehobener Arbeitsstand, der prompt als
+    # "Version 0.37.23" eingecheckt wurde, ohne dass es ein Paket dazu
+    # gab. Derselbe Fehler wie bei der Passphrase, eine Zeile weiter
+    # unten, und deshalb ein Jahr lang uebersehen.
+    #
+    # Regel: alles, was abbrechen kann und nicht vom Ergebnis abhaengt,
+    # gehoert VOR die erste Schreiboperation. pruefe_versionen() gehoert
+    # nicht dazu - sie prueft nach, was setze_versionen() geschrieben hat.
+    pruefe_keine_geheimnisse()
+
     vfile = HIER / "backend" / "VERSION"
     if a.version:
         with open(vfile, "w", encoding="ascii", newline="\n") as fh:
@@ -390,7 +434,6 @@ def main():
 
     setze_versionen(version)
     pruefe_versionen(version)
-    pruefe_keine_geheimnisse()
 
     if not a.no_sign:
         signiere_agent()
