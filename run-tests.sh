@@ -65,19 +65,77 @@ werkzeug_fehlt() {
   exit 1
 }
 
+
+# "Ist Python 3" reicht nicht.
+#
+# Gemessen am 2026-09-08 auf KK-LENOVO: ein frisch installiertes
+# Python 3.14 lag im Pfad vor der Arbeitsumgebung des Projekts. Es
+# bestand die Pruefung "ist Python 3" muehelos - und scheiterte dreissig
+# Zeilen spaeter beim Start des Backends mit
+# "ModuleNotFoundError: No module named 'fastapi'", gemeldet als
+# "Backend nicht erreichbar". Wieder eine Meldung mit dem falschen
+# Grund, wie sie die Kommentare hier schon zweimal beschreiben.
+#
+# Darum wird gefragt, was gebraucht wird: ein Python, das die Pakete des
+# Backends laden kann. Alles andere zaehlt nicht als Fund.
+taugt() {
+  [ -n "$1" ] || return 1
+  "$1" -c "import sys, fastapi, uvicorn, sqlmodel
+sys.exit(0 if sys.version_info[0] == 3 else 1)" >/dev/null 2>&1
+}
+
+# Die Arbeitsumgebung des Projekts vor dem, was im Pfad liegt: sie
+# gehoert zu diesem Verzeichnis, ein Python aus dem Pfad zu irgendetwas.
+VENV_L="$HIER/.venv/bin/python"
+VENV_W="$HIER/.venv/Scripts/python.exe"
+
+# Ein ausdruecklich gesetztes CO37_PYTHON wird nicht stillschweigend
+# uebergangen. Taugt es nicht, ist das eine Meldung wert - sonst liefe
+# die Reihe mit einem anderen Python durch, und wer sie eigens auf ein
+# bestimmtes gerichtet hat, erfuehre es nicht.
+if [ -n "${CO37_PYTHON:-}" ] && ! taugt "${CO37_PYTHON:-}"; then
+  echo "CO37_PYTHON zeigt auf $CO37_PYTHON - das ist entweder kein"
+  echo "Python 3 oder es fehlen fastapi, uvicorn oder sqlmodel."
+  echo "Entweder dort nachinstallieren oder CO37_PYTHON weglassen; dann"
+  echo "sucht $(basename "$0") die Arbeitsumgebung des Projekts selbst."
+  werkzeug_fehlt
+fi
+
 PY=""
-for kandidat in "${CO37_PYTHON:-}" python3 python py; do
-  [ -z "$kandidat" ] && continue
-  if "$kandidat" -c "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)" \
-       >/dev/null 2>&1; then
+for kandidat in "${CO37_PYTHON:-}" "$VENV_L" "$VENV_W" python3 python py; do
+  if taugt "$kandidat"; then
     PY="$kandidat"; break
   fi
 done
 
 if [ -z "$PY" ]; then
-  echo "Kein Python 3 gefunden. Versucht wurden: python3, python, py."
-  echo "Unter Windows meldet sich hier oft nur der Platzhalter des"
-  echo "Microsoft Store. Eigener Pfad: CO37_PYTHON=/pfad/zu/python $0"
+  # Getrennt melden: "gar kein Python" und "Python ohne die Pakete" sind
+  # zwei verschiedene Lagen mit zwei verschiedenen Handgriffen.
+  ROH=""
+  for kandidat in "${CO37_PYTHON:-}" python3 python py; do
+    [ -z "$kandidat" ] && continue
+    if "$kandidat" -c "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)" \
+         >/dev/null 2>&1; then
+      ROH="$kandidat"; break
+    fi
+  done
+  if [ -z "$ROH" ]; then
+    echo "Kein Python 3 gefunden. Versucht wurden: python3, python, py."
+    echo "Unter Windows meldet sich hier oft nur der Platzhalter des"
+    echo "Microsoft Store. Eigener Pfad: CO37_PYTHON=/pfad/zu/python $0"
+  else
+    echo "Python 3 gefunden ($ROH), aber ohne die Pakete des Backends"
+    echo "(fastapi, uvicorn, sqlmodel). Die Pruefreihe startet damit kein"
+    echo "Backend."
+    echo
+    echo "Arbeitsumgebung des Projekts anlegen und fuellen:"
+    echo "  $ROH -m venv .venv"
+    echo "  .venv/Scripts/python.exe -m pip install -r backend/requirements.txt"
+    echo "    (unter Linux: .venv/bin/python)"
+    echo
+    echo "Danach findet $(basename "$0") sie von selbst."
+    echo "Oder einen eigenen Pfad angeben: CO37_PYTHON=/pfad/zu/python $0"
+  fi
   werkzeug_fehlt
 fi
 
@@ -372,14 +430,26 @@ done
 # Ergebnis
 # ---------------------------------------------------------------------
 echo
-# grep -c gibt bei null Treffern '0' aus UND meldet Fehlschlag. Ein
-# '|| echo 0' haengt dann eine zweite Null an, und der Vergleich unten
-# scheitert an '0\n0'.
-tracebacks=$(grep -c "Traceback" "$TMP/backend.log" 2>/dev/null)
-tracebacks=${tracebacks:-0}
+# Nicht mehr mit grep gezaehlt: unter Windows steht in jedem Lauf ein
+# Auszug aus der Ereignisschleife von Python, der nichts ueber CO-37
+# sagt. tests/log-tracebacks.py entscheidet, was zaehlt - dort, wo die
+# Entscheidung sich pruefen laesst.
+tb_ausgabe=$("$PY" tests/log-tracebacks.py "$TMP_NATIV/backend.log" 2>&1)
+tracebacks=$(printf '%s\n' "$tb_ausgabe" | head -1)
+# Keine Zahl heisst: der Zaehler selbst ist kaputt. Das als "null
+# Auszuege" durchgehen zu lassen, waere die dritte Meldung mit dem
+# falschen Grund in dieser Datei.
+case "$tracebacks" in
+  ''|*[!0-9]*)
+    echo "  Achtung: die Auszugszaehlung lief nicht"
+    printf '%s\n' "$tb_ausgabe" | tail -5 | sed 's/^/      /'
+    fehlerhaft=$((fehlerhaft + 1))
+    tracebacks=0
+    ;;
+esac
 if [ "$tracebacks" -gt 0 ]; then
   echo "  Achtung: $tracebacks Traceback(s) im Backend-Log"
-  grep -A 12 "Traceback" "$TMP/backend.log" | tail -20 | sed 's/^/      /'
+  printf '%s\n' "$tb_ausgabe" | tail -n +2 | tail -20 | sed 's/^/      /'
   fehlerhaft=$((fehlerhaft + 1))
 fi
 

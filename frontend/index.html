@@ -207,6 +207,11 @@ label input,label select{width:100%}
 .section{border-top:1px solid var(--line);padding-top:14px;
   display:flex;flex-direction:column;gap:11px}
 .section-title{font-family:var(--font-ui);font-weight:600;font-size:12px}
+/* Der Abstand zwischen einem Absatz und dem Knopf darunter. Stand
+   dreimal als margin-top:10px im Markup und an zwei Stellen gar
+   nicht - daher hier, an einer Stelle. Nicht .actions nehmen: das
+   ist oben schon eine Knopfreihe mit ganz anderer Bedeutung. */
+.section-action{margin-top:10px}
 
 /* Der Einstellungsdialog traegt acht Reiter. Bei den 600px der uebrigen
    Dialoge brechen sie in eine zweite Zeile um, obwohl auf einem Bildschirm
@@ -873,7 +878,7 @@ dialog#dlgSettings .hint{max-width:78ch}
       </div>
       <div id="uLogBox" style="display:none">
         <div id="upLog"></div>
-        <div style="margin-top:10px"><button id="uAck" data-i18n="settings.update.reset">Reset</button></div>
+        <div class="section-action"><button id="uAck" data-i18n="settings.update.reset">Reset</button></div>
       </div>
     </div>
 
@@ -885,7 +890,7 @@ dialog#dlgSettings .hint{max-width:78ch}
         <label data-i18n="settings.account.current_pw">Current password<input id="acOld" type="password" autocomplete="current-password"></label>
         <label data-i18n="settings.account.new_pw">New password<input id="acNew" type="password" autocomplete="new-password"></label>
         <label data-i18n="settings.account.new_pw2">Repeat new password<input id="acNew2" type="password" autocomplete="new-password"></label>
-        <div style="margin-top:10px"><button class="primary" id="acSave" data-i18n="settings.account.change">Change password</button></div>
+        <div class="section-action"><button class="primary" id="acSave" data-i18n="settings.account.change">Change password</button></div>
       </div>
 
       <!-- Anmeldung in zwei Schritten. Bewusst hier und nicht bei den
@@ -897,7 +902,7 @@ dialog#dlgSettings .hint{max-width:78ch}
 
         <div id="mfaAus">
           <div class="hint" data-i18n-html="settings.mfa.hint">In addition to the password, a six-digit code from an app on your phone. <b>Google Authenticator, Microsoft Authenticator, Aegis, 2FAS, Bitwarden, 1Password and KeePassXC</b> all work — this is the standard procedure (TOTP, RFC 6238), not a product of ours.<br><br>The app needs no network connection. It computes the code from a shared secret and the current time, which is why the clock on the phone has to be roughly right.</div>
-          <button class="primary" id="mfaGo" style="align-self:flex-start" data-i18n="settings.mfa.setup">Set up</button>
+          <div class="section-action"><button class="primary" id="mfaGo" data-i18n="settings.mfa.setup">Set up</button></div>
         </div>
 
         <div id="mfaAn" style="display:none">
@@ -907,7 +912,7 @@ dialog#dlgSettings .hint{max-width:78ch}
             <label style="max-width:220px" data-i18n="settings.account.current_pw">Current password<input id="mfaOffPw" type="password" autocomplete="current-password"></label>
             <label style="max-width:140px" data-i18n="settings.mfa.confirm_code">Code from the app<input id="mfaOffCode" inputmode="numeric" spellcheck="false"></label>
           </div>
-          <button class="danger" id="mfaOff" style="align-self:flex-start" data-i18n="settings.mfa.turn_off">Switch off</button>
+          <div class="section-action"><button class="danger" id="mfaOff" data-i18n="settings.mfa.turn_off">Switch off</button></div>
         </div>
       </div>
     </div>
@@ -995,7 +1000,7 @@ dialog#dlgSettings .hint{max-width:78ch}
           <span data-i18n="settings.users.may_reboot">May also run and schedule reboots</span>
         </label>
         <div class="hint" id="nuRebootHint" data-i18n="settings.users.may_reboot_hint">Without this, the account can scan and patch, but not restart hosts. Administrators may always do so.</div>
-        <div style="margin-top:10px"><button class="primary" id="nuAdd" data-i18n="settings.users.create">Create</button></div>
+        <div class="section-action"><button class="primary" id="nuAdd" data-i18n="settings.users.create">Create</button></div>
       </div>
     </div>
 

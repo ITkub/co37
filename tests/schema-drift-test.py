@@ -61,15 +61,21 @@ def check(label, ok, extra=""):
     print(f"{'ok    ' if ok else 'FEHLER'} {label}{'  -> ' + str(extra) if extra else ''}")
 
 
-# Alle Spalten ohne NULL-Erlaubnis muessen beim Einfuegen mitkommen -
-# sonst scheitert das Beispiel an einer ganz anderen Spalte als der, um
-# die es geht, und die Meldung zeigt in die falsche Richtung.
-SPALTEN = ("INSERT INTO host (hostname, agent_token_hash, approval_state, "
-           "status, last_seen_secure, updates_available, security_updates, "
-           "reboot_required, updates_require_reboot, downtime_minutes, "
-           "checkmk_downtime_all, auto_reboot, patch_enabled, "
-           "patch_auto_reboot, patch_grace_hours, patch_followup_left, "
-           "sort_order)")
+# Ein Host mit allen Pflichtfeldern. Als Funktion, nicht als
+# Zeichenkette: die Spaltenliste steht damit einmal da, und wenn das
+# Modell eine Pflichtspalte dazubekommt, faellt genau eine Stelle um -
+# nicht fuenf, von denen man vier uebersieht.
+def host_einfuegen(conn, hostname, token="h", sortierung=0):
+    conn.execute(text(
+        "INSERT INTO host (hostname, agent_token_hash, approval_state, "
+        "status, last_seen_secure, updates_available, security_updates, "
+        "reboot_required, updates_require_reboot, downtime_minutes, "
+        "checkmk_downtime_all, auto_reboot, patch_enabled, "
+        "patch_auto_reboot, patch_grace_hours, patch_followup_left, "
+        "sort_order, created_at) "
+        "VALUES (:h, :t, 'approved', 'ok', 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, "
+        "4, 0, :s, '2026-01-01 00:00:00')"),
+        {"h": hostname, "t": token, "s": sortierung})
 
 
 def frische_db(name: str):
@@ -132,25 +138,24 @@ check("die nachgebaute Tabelle ist wirklich strenger",
           for r in motor_alt.connect().execute(
               text("PRAGMA table_info(host)")).fetchall()))
 
-# migrate() darueberlaufen lassen - so, wie es beim Update passiert.
-bericht = migrate.migrate(motor_alt)
-check("migrate() laeuft ohne Ausnahme durch", isinstance(bericht, dict),
-      type(bericht).__name__)
-
-# Und jetzt die Frage, um die es geht.
+# HIER wird NICHT migriert.
+#
+# Der erste Anlauf tat es - und pruefte damit den Zustand NACH der
+# Behebung, waehrend die Beschriftung "so sieht eine alte Anlage aus"
+# lautete. Seit migrate() den Umbau mitbringt, war die Reihe damit grün
+# geworden, ohne den beschriebenen Fall je hergestellt zu haben. Der
+# Umbau wird weiter unten geprueft, in einem eigenen Abschnitt.
 abw = migrate.schema_abweichungen(motor_alt)
-treffer = [z for z in abw if "agent_token_hash" in z]
+treffer = [z for z in abw if "agent_token_hash" in z and "NULL" in z]
 check("der Abgleich meldet host.agent_token_hash", bool(treffer), abw[:5])
 check("und sagt, in welche Richtung es auseinanderliegt",
-      bool(treffer) and "NOT NULL" in treffer[0], treffer[:1])
+      bool(treffer) and "Datenbank sagt NOT NULL" in treffer[0], treffer[:1])
 
 # Die eigentliche Wirkung: auf dieser Datenbank scheitert das
 # Zuruecknehmen des Tokens, auf der frischen nicht. Ohne diese Zeile
 # waere der Abgleich eine Behauptung ueber Metadaten.
 with motor_alt.begin() as conn:
-    conn.execute(text(
-        SPALTEN + " VALUES ('TEST-DRIFT', 'abc', 'approved', 'ok', 0, 0, 0, 0, "
-        "0, 30, 0, 0, 0, 0, 4, 0, 0)"))
+    host_einfuegen(conn, "TEST-DRIFT", "abc")
 try:
     with motor_alt.begin() as conn:
         conn.execute(text(
@@ -169,9 +174,7 @@ check("auf der alten Datenbank scheitert das Zuruecknehmen wirklich",
 motor_frisch = frische_db("frisch2.db")
 try:
     with motor_frisch.begin() as conn:
-        conn.execute(text(
-            SPALTEN + " VALUES ('TEST-DRIFT', 'abc', 'approved', 'ok', 0, 0, "
-            "0, 0, 0, 30, 0, 0, 0, 0, 4, 0, 0)"))
+        host_einfuegen(conn, "TEST-DRIFT", "abc")
         conn.execute(text(
             "UPDATE host SET agent_token_hash = NULL "
             "WHERE hostname = 'TEST-DRIFT'"))
@@ -264,6 +267,158 @@ check("eine unveraenderte Datenbank meldet weiterhin nichts",
 
 
 # ======================================================================
+# Der Umbau: eine alte Datenbank MIT DATEN wird angeglichen
+# ======================================================================
+print()
+print("--- Angleichen an das Modell (Schema 21) ---")
+# Das ist die Pruefung, an der alles haengt. Eine Migration, die eine
+# Tabelle neu baut, kann Daten verlieren, Indizes vergessen oder
+# Fremdschluessel zerreissen - und all das faellt erst beim Kunden auf.
+# Deshalb wird hier mit Inhalt gearbeitet, nicht mit leeren Tabellen.
+umbau = TMP / "umbau.db"
+motor_u = create_engine(f"sqlite:///{umbau}")
+SQLModel.metadata.create_all(motor_u)
+
+
+def _alt_machen(motor, tabelle, streng=(), locker=()):
+    """Baut eine Tabelle so um, wie eine aeltere Fassung sie angelegt hat."""
+    with motor.begin() as conn:
+        spalten = conn.execute(text(f"PRAGMA table_info({tabelle})")).fetchall()
+        namen = [r[1] for r in spalten]
+        teile = []
+        for r in spalten:
+            stueck = f"{r[1]} {r[2] or 'VARCHAR'}"
+            if r[5]:
+                stueck += " PRIMARY KEY"
+            elif r[1] in streng or (r[3] and r[1] not in locker):
+                stueck += " NOT NULL"
+            teile.append(stueck)
+        conn.execute(text(f"ALTER TABLE {tabelle} RENAME TO {tabelle}_x"))
+        conn.execute(text(f"CREATE TABLE {tabelle} ({', '.join(teile)})"))
+        conn.execute(text(
+            f"INSERT INTO {tabelle} ({', '.join(namen)}) "
+            f"SELECT {', '.join(namen)} FROM {tabelle}_x"))
+        conn.execute(text(f"DROP TABLE {tabelle}_x"))
+
+
+# Genau die Form von KK-OPS01: agent_token_hash strenger, eine Reihe
+# spaeter ergaenzter Spalten lockerer.
+LOCKER = ("last_seen_secure", "updates_require_reboot", "downtime_minutes",
+          "checkmk_downtime_all", "patch_enabled", "patch_auto_reboot",
+          "patch_grace_hours", "patch_followup_left", "sort_order")
+_alt_machen(motor_u, "host", streng=("agent_token_hash", "created_at"),
+            locker=LOCKER)
+
+# Daten hinein - drei Hosts, damit ein Verlust auffiele.
+with motor_u.begin() as conn:
+    for i, name in enumerate(("KK-EINS", "KK-ZWEI", "KK-DREI")):
+        host_einfuegen(conn, name, f"hash{i}", i)
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_host_hostname_nocase "
+        "ON host (lower(hostname))"))
+    # Und der Index, den auch das Modell kennt. Das ist der Normalfall -
+    # eine gewachsene Anlage hat ihn laengst. Der Umbau legt die
+    # vorgefundenen Indizes wieder an UND danach die des Modells; faende
+    # er dabei nicht heraus, dass dieser hier schon steht, braeche das
+    # zweite CREATE INDEX ab und der ganze Umbau ginge nicht.
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_host_agent_token_hash "
+        "ON host (agent_token_hash)"))
+
+vorher_zeilen = motor_u.connect().execute(
+    text("SELECT COUNT(*) FROM host")).scalar()
+check("die alte Datenbank hat Inhalt", vorher_zeilen == 3, vorher_zeilen)
+check("und weicht vor dem Umbau ab",
+      len(migrate.schema_abweichungen(motor_u)) >= 10,
+      len(migrate.schema_abweichungen(motor_u)))
+
+bericht = migrate.migrate(motor_u)
+
+abw = migrate.schema_abweichungen(motor_u)
+check("nach der Migration meldet der Abgleich NICHTS mehr", not abw, abw[:6])
+check("der Bericht sagt, dass umgebaut wurde",
+      any("angeglichen" in z for z in bericht["migrated"]),
+      bericht["migrated"][:3])
+
+# Und das, was ein Tabellenneubau kaputtmachen kann:
+with motor_u.connect() as conn:
+    check("keine Zeile verloren",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 3)
+    check("die Inhalte stimmen noch",
+          [r[0] for r in conn.execute(text(
+              "SELECT hostname FROM host ORDER BY hostname")).fetchall()]
+          == ["KK-DREI", "KK-EINS", "KK-ZWEI"])
+    check("agent_token_hash ist erhalten",
+          conn.execute(text(
+              "SELECT agent_token_hash FROM host "
+              "WHERE hostname='KK-EINS'")).scalar() == "hash0")
+    check("die Datenbank ist unversehrt",
+          conn.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok")
+    check("keine gebrochenen Fremdschluessel",
+          not conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall())
+    check("keine Reste der Umbautabelle",
+          not conn.execute(text(
+              "SELECT name FROM sqlite_master WHERE name LIKE '%_neu'"
+          )).fetchall())
+
+# Der Index aus F-33 ist der, den ein Neubau am ehesten verliert: er steht
+# ueber lower(hostname) und kommt nicht aus dem Modell.
+with motor_u.begin() as conn:
+    try:
+        host_einfuegen(conn, "kk-eins", "x")
+        doppelt = True
+    except Exception:  # noqa: BLE001
+        doppelt = False
+check("der eindeutige Index ueber lower(hostname) haelt weiterhin",
+      not doppelt)
+
+# Und die eigentliche Wirkung, um die es ging.
+with motor_u.begin() as conn:
+    conn.execute(text(
+        "UPDATE host SET agent_token_hash = NULL WHERE hostname='KK-ZWEI'"))
+check("das Zuruecknehmen eines Tokens geht jetzt",
+      motor_u.connect().execute(text(
+          "SELECT agent_token_hash FROM host "
+          "WHERE hostname='KK-ZWEI'")).scalar() is None)
+
+# Ein zweiter Lauf darf nichts mehr tun. Eine Migration, die bei jedem
+# Start Tabellen neu baut, waere bei jedem Neustart ein Datenrisiko.
+bericht2 = migrate.migrate(motor_u)
+check("ein zweiter Lauf baut nichts mehr um",
+      not any("angeglichen" in z for z in bericht2["migrated"]),
+      bericht2["migrated"][:3])
+
+
+# ======================================================================
+# Der Umbau haelt an, wenn Daten im Weg stehen
+# ======================================================================
+print()
+print("--- Ein NULL in einer Pflichtspalte haelt den Umbau an ---")
+# Eine Migration, die in so einem Fall abbricht, liesse die Anlage auf
+# einem alten Stand stehen. Eine, die die Zeile stillschweigend
+# wegwirft, waere schlimmer. Also: Tabelle unveraendert lassen und es
+# in den Bericht schreiben.
+sperr = TMP / "sperre.db"
+motor_s = create_engine(f"sqlite:///{sperr}")
+SQLModel.metadata.create_all(motor_s)
+_alt_machen(motor_s, "host", streng=("agent_token_hash",), locker=("sort_order",))
+with motor_s.begin() as conn:
+    host_einfuegen(conn, "KK-LEER")
+    conn.execute(text("UPDATE host SET sort_order = NULL"))
+
+bericht_s = migrate.migrate(motor_s)
+check("die Tabelle wird nicht angeglichen",
+      not any("host an das Modell" in z for z in bericht_s["migrated"]),
+      bericht_s["migrated"][:3])
+check("und der Bericht nennt Spalte und Anzahl",
+      any("sort_order" in z and "1 Zeilen" in z for z in bericht_s["notes"]),
+      bericht_s["notes"][:3])
+with motor_s.connect() as conn:
+    check("die Zeile ist noch da",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 1)
+
+
+# ======================================================================
 # Der Abgleich darf nichts verändern
 # ======================================================================
 print()
@@ -289,6 +444,190 @@ check("und schreibt auch im Quelltext nichts",
 # Der Aufruf von Hand oeffnet ausdruecklich nur lesend.
 check("der Aufruf von Hand oeffnet die Datei mit mode=ro",
       "mode=ro" in quelle)
+
+
+# ======================================================================
+# Wenn der Umbau schiefgeht, bleibt die alte Tabelle stehen
+# ======================================================================
+print()
+print("--- Ein misslungener Umbau darf nichts kosten ---")
+# Der gefaehrlichste Fall ueberhaupt: der Umbau bricht mittendrin ab,
+# nachdem die alte Tabelle schon geloescht ist. Dagegen steht die
+# Transaktion - aber "steht in einer Transaktion" ist eine Behauptung,
+# solange es niemand ausloest.
+#
+# Ausgeloest wird es hier mit Daten, die eine Bedingung des Modells
+# verletzen: zwei Hosts mit demselben agent_token_hash. Die alte Tabelle
+# hat dort keinen eindeutigen Index, das Modell verlangt einen - beim
+# Anlegen scheitert er.
+kaputt = TMP / "kaputt.db"
+motor_k = create_engine(f"sqlite:///{kaputt}")
+SQLModel.metadata.create_all(motor_k)
+_alt_machen(motor_k, "host", streng=("agent_token_hash",), locker=LOCKER)
+with motor_k.begin() as conn:
+    host_einfuegen(conn, "KK-A", "gleicher-hash")
+    host_einfuegen(conn, "KK-B", "gleicher-hash")
+
+bericht_k = migrate.migrate(motor_k)
+with motor_k.connect() as conn:
+    check("beide Zeilen sind noch da",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 2)
+    check("die Tabelle ist unversehrt",
+          conn.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok")
+    check("und keine halbfertige Tabelle liegt herum",
+          not conn.execute(text(
+              "SELECT name FROM sqlite_master WHERE name LIKE '%_neu'"
+          )).fetchall())
+check("der Bericht sagt, dass es nicht ging",
+      any("host" in z and "nicht" in z.lower() for z in bericht_k["notes"]),
+      bericht_k["notes"][:2])
+
+# Und die zweite Sicherung: stimmt die Zeilenzahl nach dem Kopieren
+# nicht, wird zurueckgerollt. Ausloesen laesst sich das nur, indem man
+# den Zaehler belügt - eine echte Datenbank verliert beim INSERT ... 
+# SELECT keine Zeilen, ohne vorher eine Ausnahme zu werfen.
+print()
+print("--- Die Zeilenzahl wird verglichen ---")
+echt_zaehlen = migrate._zeilen
+aufrufe = {"n": 0}
+
+
+def _luegen(conn, tabelle):
+    aufrufe["n"] += 1
+    # Der erste Aufruf ist das "vorher", der zweite das "nachher".
+    wert = echt_zaehlen(conn, tabelle)
+    return wert + 1 if aufrufe["n"] == 2 else wert
+
+
+luege = TMP / "luege.db"
+motor_l = create_engine(f"sqlite:///{luege}")
+SQLModel.metadata.create_all(motor_l)
+_alt_machen(motor_l, "host", streng=("agent_token_hash",), locker=LOCKER)
+with motor_l.begin() as conn:
+    host_einfuegen(conn, "KK-ZAEHL", "z1")
+
+migrate._zeilen = _luegen
+try:
+    bericht_l = migrate.migrate(motor_l)
+finally:
+    migrate._zeilen = echt_zaehlen
+
+check("eine abweichende Zeilenzahl haelt den Umbau an",
+      any("Zeilen vorher" in z for z in bericht_l["notes"]),
+      bericht_l["notes"][:2])
+with motor_l.connect() as conn:
+    check("und die Tabelle steht unveraendert da",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 1)
+    check("mit ihrer alten Form",
+          any(r[1] == "agent_token_hash" and r[3] for r in
+              conn.execute(text("PRAGMA table_info(host)")).fetchall()))
+
+
+# ======================================================================
+# Die Annahme, auf der der Umbau steht
+# ======================================================================
+print()
+print("--- Fremdschluessel sind aus, und das muss so bleiben ---")
+# Der Tabellenneubau verzichtet bewusst darauf, PRAGMA foreign_keys zu
+# schalten - die Durchsetzung ist in SQLite ab Werk aus, je Verbindung,
+# und CO-37 schaltet sie nirgends ein. Wird das eines Tages geaendert,
+# gehoert der Umbau erneut angesehen: dann kann ein DROP TABLE in
+# verweisenden Tabellen aufraeumen.
+#
+# Diese Zeilen halten die Annahme fest, damit die Aenderung nicht
+# unbemerkt bleibt.
+motor_fk = frische_db("fk.db")
+with motor_fk.connect() as conn:
+    check("SQLite hat die Durchsetzung ab Werk aus",
+          conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 0)
+
+_backend = WURZEL / "backend"
+_schalter = []
+for datei in sorted(_backend.glob("*.py")):
+    quelle = datei.read_text(encoding="utf-8")
+    ohne_kommentar = "\n".join(
+        z for z in quelle.splitlines() if not z.strip().startswith("#"))
+    if "foreign_keys" in ohne_kommentar:
+        _schalter.append(datei.name)
+check("kein Backend-Modul schaltet sie ein", not _schalter, _schalter)
+
+# Und der Umbau selbst fasst sie nicht an.
+_fn = quelle_um = (WURZEL / "backend" / "migrate.py").read_text(encoding="utf-8")
+_umbau = quelle_um[quelle_um.index("def _tabelle_angleichen("):]
+_umbau = _umbau[:_umbau.index("\ndef ", 1)]
+check("und der Umbau schaltet nichts um",
+      "PRAGMA foreign_keys" not in "\n".join(
+          z for z in _umbau.splitlines() if not z.strip().startswith("#")))
+
+
+# ======================================================================
+# Der Ruecklauf ist Sache des Umbaus, nicht des Verbindungspools
+# ======================================================================
+print()
+print("--- Der Umbau rollt selbst zurueck ---")
+# Dass SQLAlchemy eine zurueckgegebene Verbindung zurueckrollt, ist eine
+# Voreinstellung (pool_reset_on_return). Wer sich darauf verlaesst, hat
+# die Datensicherheit einer Migration an eine Einstellung gehaengt, die
+# jemand aendern kann, ohne von dieser Datei zu wissen.
+#
+# Deshalb dieselbe Probe noch einmal mit abgeschaltetem Ruecklauf des
+# Pools: geht der Umbau schief, muss trotzdem alles dastehen wie vorher.
+ohne_reset = TMP / "ohne-reset.db"
+motor_o = create_engine(f"sqlite:///{ohne_reset}", pool_reset_on_return=None)
+SQLModel.metadata.create_all(motor_o)
+_alt_machen(motor_o, "host", streng=("agent_token_hash",), locker=LOCKER)
+with motor_o.begin() as conn:
+    host_einfuegen(conn, "KK-O-A", "gleicher-hash")
+    host_einfuegen(conn, "KK-O-B", "gleicher-hash")
+
+bericht_o = migrate.migrate(motor_o)
+check("der Umbau ist misslungen, wie vorgesehen",
+      any("nicht angleichen" in z for z in bericht_o["notes"]),
+      bericht_o["notes"][:1])
+
+# Eine frische Verbindung, damit nichts aus dem Pool die Antwort faerbt.
+pruef = create_engine(f"sqlite:///{ohne_reset}")
+with pruef.connect() as conn:
+    check("beide Zeilen stehen noch da",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 2)
+    check("und keine Zwischentabelle liegt herum",
+          not conn.execute(text(
+              "SELECT name FROM sqlite_master WHERE name='host_neu'"
+          )).fetchall(),
+          conn.execute(text(
+              "SELECT name FROM sqlite_master WHERE type='table'")).fetchall())
+
+# Und die Sperre ist weg. Ohne ausdruecklichen Ruecklauf ginge die
+# Verbindung mit offener Transaktion in den Pool zurueck und hielte die
+# Schreibsperre der Datei - der naechste Schreiber liefe in "database is
+# locked". Auf der Platte saehe man davon nichts, deshalb wird es hier
+# ausprobiert statt nachgesehen.
+sperre = create_engine(f"sqlite:///{ohne_reset}",
+                       connect_args={"timeout": 2})
+try:
+    with sperre.begin() as conn:
+        host_einfuegen(conn, "KK-NACH-DEM-FEHLER", "frei", 42)
+    ging_los = True
+    fehlermeldung = ""
+except Exception as exc:                                    # noqa: BLE001
+    ging_los = False
+    fehlermeldung = str(exc)[:120]
+check("und die Datei ist wieder beschreibbar", ging_los, fehlermeldung)
+
+# Der ausdrueckliche Ruecklauf im Fehlerzweig laesst sich von aussen
+# nicht ausloesen: der SQLite-Treiber rollt hier von sich aus zurueck,
+# und wo nichts festgeschrieben wurde, ist auf der Platte auch nichts zu
+# sehen. Gemessen wurde beides oben - beschreibbar und unveraendert.
+#
+# Die Zeile steht trotzdem im Quelltext, und diese Pruefung haelt sie
+# fest: sonst haengt die Datensicherheit einer Migration an einem
+# Verhalten, das der Treiber nirgends zusagt.
+_quelle_m = (WURZEL / "backend" / "migrate.py").read_text(encoding="utf-8")
+_umbau_q = _quelle_m[_quelle_m.index("def _tabelle_angleichen("):]
+_umbau_q = _umbau_q[:_umbau_q.index("\ndef ", 1)]
+_fehlerzweig = _umbau_q[_umbau_q.index("except BaseException:"):]
+check("und der Fehlerzweig rollt ausdruecklich zurueck",
+      'cur.execute("ROLLBACK")' in _fehlerzweig[:400])
 
 
 print(f"\nFehler: {fails}")

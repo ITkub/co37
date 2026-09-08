@@ -149,7 +149,7 @@ class Host(SQLModel, table=True):
     # erledigt markieren, bevor sie ueberhaupt gefragt wurden.
     area_patch_last_run: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
 
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
 
 
 class Area(SQLModel, table=True):
@@ -179,7 +179,7 @@ class Area(SQLModel, table=True):
     patch_auto_reboot: bool = Field(default=False)
     patch_grace_hours: int = Field(default=4)
 
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
 
 
 class Job(SQLModel, table=True):
@@ -222,7 +222,7 @@ class Job(SQLModel, table=True):
     # Kennzeichnung der fuer diesen Job gesetzten Downtime
     downtime_ref: Optional[str] = None
 
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
     started_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
     finished_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
 
@@ -239,7 +239,7 @@ class UpdatePackage(SQLModel, table=True):
     requires_reboot: bool = Field(default=False)
     size_bytes: Optional[int] = None
 
-    detected_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+    detected_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
 
 
 class Setting(SQLModel, table=True):
@@ -260,7 +260,7 @@ class JobLogChunk(SQLModel, table=True):
     job_id: int = Field(foreign_key="job.id", index=True)
     seq: int = Field(index=True)
     content: str
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
 
 
 # ======================================================================
@@ -284,7 +284,7 @@ class PendingLogin(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     token_hash: str = Field(index=True, unique=True)
-    expires_at: datetime = Field(sa_column=Column(UTCDateTime))
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime, nullable=False))
     from_ip: Optional[str] = None
 
     # Fehlversuche fuer GENAU diesen Zwischenschritt. Sechs Stellen sind
@@ -360,7 +360,7 @@ class User(SQLModel, table=True):
     # bestehende Benutzer nie.
     language: Optional[str] = Field(default=None)
 
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
     last_login: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
 
 
@@ -375,8 +375,8 @@ class LoginSession(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     token_hash: str = Field(index=True, unique=True)
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
-    expires_at: datetime = Field(sa_column=Column(UTCDateTime, index=True))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime, index=True, nullable=False))
     last_seen: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
     from_ip: Optional[str] = None
 
@@ -397,8 +397,8 @@ class InstallToken(SQLModel, table=True):
     """
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, unique=True)
-    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime))
-    expires_at: datetime = Field(sa_column=Column(UTCDateTime, index=True))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime, index=True, nullable=False))
     uses: int = Field(default=0)
     max_uses: int = Field(default=3)
     created_by: str = ""
@@ -417,7 +417,7 @@ class AuditEntry(SQLModel, table=True):
     erfolgreicher.
     """
     id: Optional[int] = Field(default=None, primary_key=True)
-    at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, index=True))
+    at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, index=True, nullable=False))
     actor: str = Field(index=True)       # Benutzername, "api-key" oder "?"
     action: str = Field(index=True)      # z.B. "login.failed", "host.approve"
     detail: Optional[str] = None

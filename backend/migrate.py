@@ -72,7 +72,19 @@ logger = logging.getLogger(__name__)
 #    kommt danach also wieder mit dem Passwort allein hinein - das ist
 #    kein Fehler, sondern die Kehrseite davon, dass ein Rueckschritt
 #    ueberhaupt moeglich bleiben soll.
-SCHEMA_VERSION = 20
+# 21: Tabellen an das Modell angeglichen (F-71). Kein neues Feld - die
+#    NULLBARKEIT bestehender Spalten wird nachgezogen. SQLite kann das
+#    nur ueber einen Tabellenneubau, und deshalb ist es bis hierher nie
+#    passiert: eine gewachsene Anlage trug ein anderes Schema als eine
+#    frisch installierte. Aufgefallen am 2026-09-07, als "Token
+#    zurueckziehen" mit "NOT NULL constraint failed:
+#    host.agent_token_hash" endete - waehrend dieselbe Route in jeder
+#    Pruefreihe gruen war, weil die immer eine frische Datenbank anlegt.
+#    Auf KK-OPS01 betraf es 16 Spalten in fuenf Tabellen.
+#    Ein Rueckschritt auf 20 ist unkritisch: die aeltere Fassung schreibt
+#    in dieselben Spalten, sie sind danach nur strenger als sie es
+#    erwartet - und Werte stehen ueberall.
+SCHEMA_VERSION = 21
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -276,6 +288,11 @@ def migrate(engine: Engine) -> dict:
                     f"{table}: ungenutzte Altspalten bleiben erhalten "
                     f"({', '.join(leftover)})"
                 )
+
+    # Zuletzt: Tabellen an das Modell angleichen (F-71). Steht ganz am
+    # Ende, weil davor Spalten ergaenzt und Werte gesetzt werden - erst
+    # danach steht fest, was wirklich noch abweicht.
+    angleichen(engine, report)
 
     _set_version(engine, SCHEMA_VERSION)
     return report
@@ -537,3 +554,257 @@ if __name__ == "__main__":
     for z in zeilen:
         print(f"  {z}")
     raise SystemExit(1)
+
+
+# ======================================================================
+# Tabellen an das Modell angleichen (F-71, Schema 21)
+# ======================================================================
+# SQLite kann die Nullbarkeit einer bestehenden Spalte nicht aendern. Der
+# einzige Weg ist der, den die SQLite-Anleitung unter "Making Other Kinds
+# Of Table Schema Changes" beschreibt: neue Tabelle anlegen, Daten
+# kopieren, alte loeschen, umbenennen, Indizes neu anlegen.
+#
+# WELCHE TABELLEN UMGEBAUT WERDEN, ENTSCHEIDET NICHT EINE LISTE
+#
+# Sondern schema_abweichungen(). Eine hier hineingeschriebene Aufzaehlung
+# waere zum dritten Mal derselbe Fehler (F-14, F-59): sie stimmt, bis
+# jemand das Modell aendert und sie vergisst. So wird umgebaut, was
+# tatsaechlich abweicht - und nach dem Umbau wird nachgesehen, ob es
+# gewirkt hat.
+#
+# WAS VORHER GEPRUEFT WIRD
+#
+# Eine Spalte, die im Modell NOT NULL ist und in der Datenbank NULL-Werte
+# enthaelt, laesst sich nicht umbauen - das INSERT in die neue Tabelle
+# scheitert. Das wird VORHER festgestellt und die Tabelle uebersprungen,
+# mit einer Zeile im Bericht. Ein Update, das an so etwas abbricht, waere
+# die schlechtere Antwort: die Anlage stuende auf einem alten Stand.
+#
+# Auf KK-OPS01 am 2026-09-08 nachgemessen: null NULL-Werte in allen elf
+# betroffenen Spalten. Der Umbau ist dort reine Vorsorge.
+
+
+def _nullbarkeit_weicht_ab(zeile: str) -> bool:
+    return "Datenbank sagt" in zeile and "Modell sagt" in zeile
+
+
+def _tabellen_mit_drift(engine: Engine) -> list[str]:
+    """Tabellennamen, deren Nullbarkeit vom Modell abweicht."""
+    namen = []
+    for zeile in schema_abweichungen(engine):
+        if not _nullbarkeit_weicht_ab(zeile):
+            continue
+        tabelle = zeile.split(".", 1)[0].strip()
+        if tabelle and tabelle not in namen:
+            namen.append(tabelle)
+    return namen
+
+
+def _zeilen(cur, tabelle: str) -> int:
+    """
+    Zeilen zaehlen, auf einem DBAPI-Cursor.
+
+    Eigene Funktion, damit die Pruefreihe sich hier einhaengen und eine
+    Abweichung erzwingen kann - die Sicherung "gleich viele Zeilen wie
+    vorher" laesst sich sonst nicht ausloesen, ohne die Datenbank
+    absichtlich zu beschaedigen.
+    """
+    cur.execute(f"SELECT COUNT(*) FROM {tabelle}")
+    return cur.fetchone()[0]
+
+
+def _indizes_von(conn, tabelle: str) -> list[str]:
+    """
+    Die CREATE-INDEX-Anweisungen dieser Tabelle, wie sie dastehen.
+
+    Aus sqlite_master, nicht aus dem Modell: hier steht auch der Index
+    ueber lower(hostname) aus F-33, den das Modell gar nicht kennt. Ginge
+    er beim Umbau verloren, waeren zwei Hosts mit unterschiedlicher
+    Gross-/Kleinschreibung wieder moeglich - und niemandem fiele es auf.
+    """
+    rows = conn.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=:t "
+        "AND sql IS NOT NULL"), {"t": tabelle}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _tabelle_angleichen(engine: Engine, tabelle: str, report: dict) -> bool:
+    """
+    Baut eine Tabelle so neu, wie das Modell sie beschreibt.
+
+    Gibt True zurueck, wenn umgebaut wurde. Die Daten der gemeinsamen
+    Spalten werden uebernommen; Spalten, die es nur in der alten Tabelle
+    gibt (OBSOLETE), fallen dabei weg - das ist der einzige Ort, an dem
+    sie ueberhaupt verschwinden koennen.
+    """
+    from models import SQLModel                      # noqa: PLC0415
+    from sqlalchemy.schema import CreateIndex, CreateTable   # noqa: PLC0415
+
+    ziel = SQLModel.metadata.tables.get(tabelle)
+    if ziel is None:
+        return False
+
+    with engine.connect() as conn:
+        alt = {r[1] for r in conn.execute(
+            text(f"PRAGMA table_info({tabelle})")).fetchall()}
+        gemeinsam = [c.name for c in ziel.columns if c.name in alt]
+
+        # Wuerde der Umbau an einem NULL scheitern? Lieber vorher wissen.
+        leer = []
+        for spalte in ziel.columns:
+            if spalte.nullable or spalte.name not in alt:
+                continue
+            n = conn.execute(text(
+                f"SELECT COUNT(*) FROM {tabelle} "
+                f"WHERE {spalte.name} IS NULL")).scalar()
+            if n:
+                leer.append(f"{tabelle}.{spalte.name} ({n} Zeilen)")
+        if leer:
+            report["notes"].append(
+                f"Tabelle {tabelle} nicht angeglichen: dort stehen NULL-Werte "
+                f"in Spalten, die das Modell als Pflicht fuehrt - "
+                f"{', '.join(leer)}. Die Anlage laeuft unveraendert weiter; "
+                f"die Werte muessen erst gesetzt werden.")
+            return False
+
+        indizes = _indizes_von(conn, tabelle)
+
+    ddl = str(CreateTable(ziel).compile(engine)).strip()
+    ddl_neu = ddl.replace(f"CREATE TABLE {tabelle}",
+                          f"CREATE TABLE {tabelle}_neu", 1)
+    spaltenliste = ", ".join(gemeinsam)
+
+    # KEIN Herumschalten an PRAGMA foreign_keys - und das ist gemessen,
+    # nicht angenommen.
+    #
+    # Die SQLite-Anleitung empfiehlt fuer diesen Umbau, die Durchsetzung
+    # von Fremdschluesseln vorher abzuschalten. Sie ist in SQLite aber ab
+    # Werk AUS, je Verbindung, und CO-37 schaltet sie nirgends ein
+    # (nachgesehen: kein einziges "PRAGMA foreign_keys" im Backend, kein
+    # entsprechender Ereignishorcher). Es gibt hier also nichts
+    # abzuschalten.
+    #
+    # Der erste Anlauf tat es trotzdem - und hatte damit zwei Fehler auf
+    # einmal: SQLAlchemy beginnt die Transaktion bereits bei der ersten
+    # Anweisung, das PRAGMA waere also wirkungslos in einer Transaktion
+    # gelandet; und das PRAGMA ... = ON am Ende haette die Durchsetzung
+    # auf einer Verbindung EINgeschaltet, die aus dem Pool kommt und
+    # danach weiterverwendet wird. Eine Migration, die nebenbei das
+    # Verhalten der Datenbank aendert, ist keine.
+    #
+    # Sollte die Durchsetzung eines Tages eingeschaltet werden, gehoert
+    # dieser Umbau erneut angesehen. tests/schema-drift-test.py haelt
+    # genau diese Annahme fest, damit die Aenderung nicht unbemerkt
+    # bleibt.
+    # Warum hier von Hand BEGIN geschrieben wird und nicht engine.begin()
+    # genommen wird - gemessen, nicht angenommen:
+    #
+    # Der SQLite-Treiber von Python faengt eine Transaktion von sich aus
+    # erst bei der ersten SCHREIBENDEN Anweisung an, also bei INSERT,
+    # UPDATE oder DELETE. CREATE TABLE und DROP TABLE zaehlen nicht dazu.
+    # In engine.begin() liefe das CREATE der Zwischentabelle deshalb
+    # ausserhalb jeder Transaktion und waere sofort dauerhaft. Bricht der
+    # Umbau danach ab, sind die Daten zwar heil - das INSERT hatte die
+    # Transaktion inzwischen aufgemacht, der Ruecklauf holt DROP und
+    # RENAME zurueck -, aber {tabelle}_neu bleibt als Geistertabelle
+    # liegen. "Ein misslungener Umbau kostet nichts" waere dann nur fast
+    # wahr.
+    #
+    # Ein ausdrueckliches BEGIN vor der ersten Anweisung zieht auch die
+    # DDL mit hinein. Behauptet wird das hier nicht: tests/
+    # schema-drift-test.py laesst einen Umbau scheitern und sieht nach,
+    # ob eine Zwischentabelle herumliegt - auf jeder Anlage, auf der die
+    # Pruefreihe laeuft.
+    #
+    # An der Verbindung selbst wird nichts umgestellt. Sie kommt aus dem
+    # Pool und wird danach weiterverwendet; eine Migration, die nebenbei
+    # das Verhalten der Datenbank aendert, ist keine.
+    roh = engine.raw_connection()
+    try:
+        cur = roh.cursor()
+        try:
+            cur.execute("BEGIN")
+            vorher = _zeilen(cur, tabelle)
+            cur.execute(f"DROP TABLE IF EXISTS {tabelle}_neu")
+            cur.execute(ddl_neu)
+            cur.execute(f"INSERT INTO {tabelle}_neu ({spaltenliste}) "
+                        f"SELECT {spaltenliste} FROM {tabelle}")
+            cur.execute(f"DROP TABLE {tabelle}")
+            cur.execute(f"ALTER TABLE {tabelle}_neu RENAME TO {tabelle}")
+            for anweisung in indizes:
+                cur.execute(anweisung)
+            # Und die Indizes, die das MODELL kennt, aber in der alten
+            # Tabelle fehlten. Sonst hiesse "an das Modell angeglichen"
+            # nur "die Spalten stimmen jetzt" - und der Abgleich meldete
+            # danach weiter etwas, womit er als Warnung wertlos waere.
+            #
+            # Erst nachsehen, was die Zeile darueber schon angelegt hat:
+            # ein zweites CREATE INDEX auf denselben Namen bricht ab, und
+            # das traefe jede Anlage, deren alte Tabelle den Index des
+            # Modells bereits hatte - also den Normalfall.
+            cur.execute("SELECT name FROM sqlite_master WHERE type='index' "
+                        "AND tbl_name=?", (tabelle,))
+            vorhandene = {r[0] for r in cur.fetchall()}
+            for index in ziel.indexes:
+                if index.name in vorhandene:
+                    continue
+                cur.execute(str(CreateIndex(index).compile(engine)))
+            nachher = _zeilen(cur, tabelle)
+            if nachher != vorher:
+                # Loest den Ruecklauf der Transaktion aus - die alte
+                # Tabelle steht danach unveraendert da.
+                raise RuntimeError(
+                    f"{vorher} Zeilen vorher, {nachher} nachher")
+            cur.execute("COMMIT")
+        except BaseException:
+            # Ausdruecklich, nicht dem Pool ueberlassen: dass eine
+            # zurueckgegebene Verbindung zurueckgerollt wird, ist eine
+            # Einstellung von SQLAlchemy, keine Zusage dieser Funktion.
+            cur.execute("ROLLBACK")
+            raise
+        finally:
+            cur.close()
+    finally:
+        roh.close()
+
+    report["migrated"].append(
+        f"Tabelle {tabelle} an das Modell angeglichen "
+        f"({vorher} Zeilen, {len(indizes)} Index(e) erhalten)")
+    return True
+
+
+def angleichen(engine: Engine, report: dict):
+    """
+    Bringt abweichende Tabellen auf die Form des Modells (F-71).
+
+    Laeuft bei jedem Start. Gibt es nichts zu tun - der Normalfall,
+    einschliesslich jeder frisch installierten Anlage - kostet das eine
+    Abfrage je Tabelle und sonst nichts.
+    """
+    try:
+        offen = _tabellen_mit_drift(engine)
+    except Exception as exc:  # noqa: BLE001
+        report["notes"].append(f"Schema nicht vergleichbar: {exc}")
+        return
+    if not offen:
+        return
+
+    for tabelle in offen:
+        try:
+            _tabelle_angleichen(engine, tabelle, report)
+        except Exception as exc:  # noqa: BLE001
+            # Ein misslungener Umbau darf die Anlage nicht anhalten. Die
+            # Transaktion ist zurueckgerollt, die alte Tabelle steht
+            # unveraendert da - es laeuft weiter wie bisher, und im
+            # Bericht steht, was nicht ging.
+            report["notes"].append(
+                f"Tabelle {tabelle} liess sich nicht angleichen: {exc}. "
+                f"Die Tabelle ist unveraendert.")
+
+    # Und nachsehen, ob es gewirkt hat. Ein Umbau, der sich selbst nicht
+    # nachprueft, ist eine Behauptung.
+    rest = [z for z in schema_abweichungen(engine) if _nullbarkeit_weicht_ab(z)]
+    if rest:
+        report["notes"].append(
+            f"Nach dem Angleichen bleiben {len(rest)} Abweichung(en): "
+            + "; ".join(rest[:5]))
