@@ -359,3 +359,181 @@ def verify(engine: Engine) -> tuple[bool, list[str]]:
     except Exception as exc:  # noqa: BLE001
         return False, [f"Schema nicht pruefbar: {exc}"]
     return not missing, missing
+
+
+# ======================================================================
+# Schema-Abgleich gegen das Datenmodell (F-71)
+# ======================================================================
+# Anlass, 2026-09-07 im Betrieb gefunden: "Token zurueckziehen" endete mit
+# 500, und im Protokoll stand
+#
+#     sqlite3.IntegrityError: NOT NULL constraint failed:
+#     host.agent_token_hash
+#
+# models.py fuehrt die Spalte seit langem als Optional[str], also
+# nullable. Die Datenbank auf KK-OPS01 stammt aus einer Zeit, in der sie
+# es nicht war - und SQLite kann die Nullbarkeit einer bestehenden Spalte
+# nicht aendern. migrate() ergaenzt fehlende Spalten mit ALTER TABLE, baut
+# aber keine um.
+#
+# Die Folge ist groesser als dieser eine Fall: eine frisch installierte
+# Anlage und eine gewachsene haben nicht dasselbe Schema. Und keine
+# Pruefreihe kann das sehen, weil jede von ihnen eine frische Datenbank
+# anlegt.
+#
+# WARUM DIESE FUNKTION GEGEN models.py VERGLEICHT UND NICHT GEGEN
+# EXPECTED_COLUMNS
+#
+# EXPECTED_COLUMNS ist eine von Hand gepflegte zweite Aufzaehlung. Genau
+# so eine war F-14 (die Pins des Agents, die kein Bauschritt las) und
+# F-59 (acht genannte Pakete, dreissig installierte). Eine zweite Liste
+# ist genau dann falsch, wenn es darauf ankommt - naemlich wenn jemand
+# das Modell aendert und die Liste vergisst. SQLModel.metadata IST das
+# Modell; daran gemessen kann nichts vergessen werden.
+#
+# Die Funktion aendert NICHTS. Sie liest und berichtet.
+
+# Typen werden nach Familie verglichen, nicht wortgleich. SQLite kennt
+# ohnehin nur Affinitaeten, und VARCHAR gegen VARCHAR(255) oder JSON
+# gegen TEXT waere ein Fehlalarm - beides landet in derselben Affinitaet.
+# Gemeldet wird nur, was wirklich auseinanderliegt, etwa INTEGER gegen
+# VARCHAR.
+_TYP_FAMILIE = {
+    "TEXT": "text", "VARCHAR": "text", "CHAR": "text", "NVARCHAR": "text",
+    "JSON": "text", "CLOB": "text",
+    "INTEGER": "zahl", "INT": "zahl", "BIGINT": "zahl", "SMALLINT": "zahl",
+    "BOOLEAN": "zahl", "TINYINT": "zahl",
+    "DATETIME": "zeit", "TIMESTAMP": "zeit", "DATE": "zeit",
+    "FLOAT": "komma", "REAL": "komma", "NUMERIC": "komma", "DECIMAL": "komma",
+    "BLOB": "blob",
+}
+
+
+def _familie(typ: str) -> str:
+    kopf = (typ or "").split("(")[0].strip().upper()
+    return _TYP_FAMILIE.get(kopf, kopf.lower() or "unbekannt")
+
+
+def schema_abweichungen(engine: Engine) -> list[str]:
+    """
+    Vergleicht das tatsaechliche Schema mit dem Datenmodell.
+
+    Gibt eine Liste lesbarer Zeilen zurueck; leer heisst "deckt sich".
+    Geprueft wird je Tabelle und Spalte: Vorhandensein, Nullbarkeit und
+    Typfamilie, dazu die eindeutigen Indizes.
+
+    Aendert nichts.
+    """
+    try:
+        from models import SQLModel        # noqa: PLC0415
+    except ImportError as exc:             # pragma: no cover
+        return [f"Datenmodell nicht ladbar, kein Abgleich moeglich: {exc}"]
+
+    abweichungen: list[str] = []
+    vorhandene = _tables(engine)
+
+    try:
+        with engine.connect() as conn:
+            for tabelle in SQLModel.metadata.sorted_tables:
+                name = tabelle.name
+                if name not in vorhandene:
+                    abweichungen.append(f"Tabelle {name} fehlt ganz")
+                    continue
+
+                rows = conn.execute(
+                    text(f"PRAGMA table_info({name})")).fetchall()
+                # PRAGMA liefert (cid, name, type, notnull, dflt_value, pk)
+                ist = {r[1]: {"typ": r[2], "notnull": bool(r[3]),
+                              "pk": bool(r[5])} for r in rows}
+
+                for spalte in tabelle.columns:
+                    da = ist.get(spalte.name)
+                    if da is None:
+                        abweichungen.append(
+                            f"{name}.{spalte.name} fehlt "
+                            f"(im Modell vorhanden)")
+                        continue
+
+                    # Der Primaerschluessel ist in SQLite immer NOT NULL,
+                    # auch wenn das Modell ihn als optional fuehrt. Das
+                    # ist kein Unterschied, sondern SQLite.
+                    if not da["pk"]:
+                        soll_null = bool(spalte.nullable)
+                        ist_null = not da["notnull"]
+                        if soll_null != ist_null:
+                            abweichungen.append(
+                                f"{name}.{spalte.name}: Datenbank sagt "
+                                f"{'NOT NULL' if da['notnull'] else 'NULL erlaubt'}, "
+                                f"Modell sagt "
+                                f"{'NULL erlaubt' if soll_null else 'NOT NULL'}"
+                            )
+
+                    soll_typ = _familie(
+                        spalte.type.compile(engine.dialect))
+                    ist_typ = _familie(da["typ"])
+                    if soll_typ != ist_typ:
+                        abweichungen.append(
+                            f"{name}.{spalte.name}: Datenbank hat "
+                            f"{da['typ'] or '(ohne Typ)'}, Modell erwartet "
+                            f"{spalte.type.compile(engine.dialect)}")
+
+                # Eindeutige Indizes. Der Index ux_host_hostname_nocase
+                # steht ueber lower(hostname) und gehoert keiner Spalte -
+                # er wird deshalb nur gezaehlt, nicht zugeordnet.
+                idx = conn.execute(
+                    text(f"PRAGMA index_list({name})")).fetchall()
+                eindeutig = set()
+                for zeile in idx:
+                    if not zeile[2]:                 # unique-Flag
+                        continue
+                    for teil in conn.execute(
+                            text(f"PRAGMA index_info({zeile[1]})")).fetchall():
+                        if teil[2]:
+                            eindeutig.add(teil[2])
+                for spalte in tabelle.columns:
+                    if spalte.unique and not spalte.primary_key \
+                            and spalte.name not in eindeutig:
+                        abweichungen.append(
+                            f"{name}.{spalte.name}: im Modell eindeutig, "
+                            f"in der Datenbank ohne eindeutigen Index")
+    except Exception as exc:  # noqa: BLE001
+        return [f"Schema nicht vergleichbar: {exc}"]
+
+    return abweichungen
+
+
+if __name__ == "__main__":
+    # Lesender Aufruf von Hand, fuer eine bestehende Anlage:
+    #
+    #     python3 backend/migrate.py --pruefen /opt/co37/data/co37.db
+    #
+    # Oeffnet die Datei ausdruecklich NUR LESEND (mode=ro). Wer eine
+    # Produktivdatenbank untersucht, soll das ohne die Frage tun muessen,
+    # ob das Werkzeug etwas veraendert.
+    import sys
+    from pathlib import Path
+    from sqlalchemy import create_engine
+
+    if len(sys.argv) != 3 or sys.argv[1] != "--pruefen":
+        print(__doc__.strip())
+        print()
+        print("Schema gegen das Datenmodell pruefen (nur lesend):")
+        print("    python3 backend/migrate.py --pruefen /pfad/zur/co37.db")
+        raise SystemExit(2)
+
+    pfad = Path(sys.argv[2]).resolve()
+    if not pfad.is_file():
+        raise SystemExit(f"Keine Datei: {pfad}")
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    motor = create_engine(f"sqlite:///file:{pfad}?mode=ro&uri=true")
+    zeilen = schema_abweichungen(motor)
+    print(f"Schema-Version laut Datenbank: {get_version(motor)} "
+          f"(Code erwartet {SCHEMA_VERSION})")
+    if not zeilen:
+        print("Keine Abweichung zum Datenmodell gefunden.")
+        raise SystemExit(0)
+    print(f"{len(zeilen)} Abweichung(en) zum Datenmodell:")
+    for z in zeilen:
+        print(f"  {z}")
+    raise SystemExit(1)
