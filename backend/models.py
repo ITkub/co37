@@ -63,7 +63,22 @@ class Host(SQLModel, table=True):
     # gleichzeitig in diesem Zustand stehen.
     agent_token_hash: Optional[str] = Field(default=None, index=True, unique=True)
 
-    tags: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    # nullable=False, und das ist keine Haertung, sondern das Beheben
+    # einer Abweichung: der Python-Typ ist list[str], nicht
+    # Optional[list[str]] - das Modell sagt also seit jeher "immer eine
+    # Liste". Nur Column(JSON) hatte kein nullable=False bekommen, und
+    # damit sagte die Datenbank "darf NULL sein". Der Abgleich konnte das
+    # nicht sehen: er vergleicht gegen spalte.nullable, also gegen die
+    # Spaltendefinition, nicht gegen den Typ darueber. Genau dort, wo die
+    # beiden Darstellungen auseinandergehen, hatte das Werkzeug einen
+    # blinden Fleck (Schema 22, dieselbe Familie wie F-71).
+    #
+    # Der Eingang ist seit F-51 dicht - ein ausdrueckliches null im PATCH
+    # wird abgewiesen. Das hier ist die zweite Reihe: sie verhindert,
+    # dass ein kuenftiger Codepfad eine Zeile so vergiftet, dass JEDE
+    # Hostliste stirbt (HostRead.tags ist list[str], nicht optional).
+    tags: list[str] = Field(default_factory=list,
+                            sa_column=Column(JSON, nullable=False))
 
     # Freigabe - Vorgabe pending, da alle Hosts durch Anmeldung entstehen
     approval_state: ApprovalState = Field(default=ApprovalState.pending, index=True)
@@ -91,7 +106,8 @@ class Host(SQLModel, table=True):
     # Warum ein Neustart angezeigt ist. Ohne den Grund laesst sich nicht
     # unterscheiden, ob Windows selbst einen braucht oder ob nur OneDrive
     # eine DLL zum Aufraeumen vorgemerkt hat.
-    reboot_reasons: list = Field(default_factory=list, sa_column=Column(JSON))
+    reboot_reasons: list = Field(default_factory=list,
+                                 sa_column=Column(JSON, nullable=False))
     # Vorschau statt Zustand: erfordern die *gefundenen* Updates einen
     # Neustart? Bewusst getrennt von reboot_required, das den aktuellen
     # Zustand meldet ("steht jetzt einer aus"). Beides in ein Feld zu
@@ -102,7 +118,8 @@ class Host(SQLModel, table=True):
 
     # Checkmk: mehrere Hosts moeglich. Faellt der Host aus, sind oft weitere
     # Objekte mit betroffen - Cluster-Ressourcen, Dienste, Anwendungen.
-    checkmk_hosts: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    checkmk_hosts: list[str] = Field(default_factory=list,
+                                     sa_column=Column(JSON, nullable=False))
     downtime_minutes: int = Field(default=30)
     # Downtime auf alle in Checkmk konfigurierten Hosts statt nur auf die
     # verknuepften. Noetig, wenn dieser Host das Monitoring selbst traegt -
@@ -119,7 +136,8 @@ class Host(SQLModel, table=True):
     # Hintergrunddienst. Genauigkeit entspricht dem Abfrageintervall, was
     # fuer ein naechtliches Fenster ausreicht.
     patch_enabled: bool = Field(default=False)
-    patch_days: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    patch_days: list[str] = Field(default_factory=list,
+                                  sa_column=Column(JSON, nullable=False))
     patch_time: Optional[str] = None            # "03:00" in Serverzeit
     patch_auto_reboot: bool = Field(default=False)
     patch_grace_hours: int = Field(default=4)   # Nachlauf, falls Host aus war
@@ -169,12 +187,14 @@ class Area(SQLModel, table=True):
     # Eigene Reihenfolge der Bereiche, getrennt von Host.sort_order.
     sort_order: int = Field(default=0, index=True)
 
-    checkmk_hosts: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    checkmk_hosts: list[str] = Field(default_factory=list,
+                                     sa_column=Column(JSON, nullable=False))
     checkmk_downtime_all: bool = Field(default=False)
     downtime_minutes: int = Field(default=30)
 
     patch_enabled: bool = Field(default=False)
-    patch_days: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    patch_days: list[str] = Field(default_factory=list,
+                                  sa_column=Column(JSON, nullable=False))
     patch_time: Optional[str] = None
     patch_auto_reboot: bool = Field(default=False)
     patch_grace_hours: int = Field(default=4)
@@ -189,7 +209,12 @@ class Job(SQLModel, table=True):
     job_type: JobType
     state: JobState = Field(default=JobState.pending)
 
-    params: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    params: dict = Field(default_factory=dict,
+                         sa_column=Column(JSON, nullable=False))
+    # Bleibt als EINZIGE JSON-Spalte nullable, und das ist kein
+    # Versehen: NULL heisst hier "noch kein Ergebnis". Der Typ sagt es
+    # auch - Optional[dict], anders als bei den sechs Listenspalten und
+    # bei params.
     result: Optional[dict] = Field(default=None, sa_column=Column(JSON))
 
     # Geplante Ausfuehrung. Ist gesetzt, gibt der Heartbeat den Auftrag erst

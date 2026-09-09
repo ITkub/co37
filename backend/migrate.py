@@ -85,7 +85,23 @@ logger = logging.getLogger(__name__)
 #    Ein Rueckschritt auf 20 ist unkritisch: die aeltere Fassung schreibt
 #    in dieselben Spalten, sie sind danach nur strenger als sie es
 #    erwartet - und Werte stehen ueberall.
-SCHEMA_VERSION = 21
+# 22: die JSON-Spalten sind jetzt NOT NULL - sieben von acht. Kein
+#    neues Feld und keine neue Idee, sondern dieselbe Abweichung wie 21,
+#    eine Ebene hoeher: models.py fuehrt sie als list bzw. dict, nicht
+#    als Optional - das Modell sagt also "immer eine Liste". Nur
+#    Column(JSON) hatte kein nullable=False, und damit sagte die
+#    Datenbank etwas anderes. Der Abgleich konnte das nicht sehen, weil
+#    er gegen spalte.nullable vergleicht, also gegen die
+#    Spaltendefinition und nicht gegen den Typ darueber.
+#    job.result bleibt nullable - dort heisst NULL "noch kein Ergebnis",
+#    und der Typ sagt es auch (Optional[dict]).
+#    Vor dem Umbau werden vorhandene NULL-Werte auf '[]' bzw. '{}'
+#    gesetzt; auf KK-OPS01 waren es null Zeilen, bei einer aelteren
+#    Anlage kann das anders sein.
+#    Ein Rueckschritt auf 21 ist unkritisch: die aeltere Fassung schreibt
+#    in dieselben Spalten immer Listen, sie sind danach nur strenger als
+#    sie es erwartet.
+SCHEMA_VERSION = 22
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -224,11 +240,33 @@ def migrate(engine: Engine) -> dict:
                     f"sich neu anmelden."
                 )
 
-        # Leere JSON-Felder auf gueltige Werte setzen, sonst scheitert das Lesen
-        for col in ("checkmk_hosts", "tags", "patch_days"):
-            if col in have_host:
+        # Leere JSON-Felder auf gueltige Werte setzen, sonst scheitert das
+        # Lesen - und seit Schema 22 auch der Tabellenumbau: die Spalten
+        # sind dort NOT NULL, und _tabelle_angleichen() weigert sich zu
+        # Recht, eine Tabelle umzubauen, in der Pflichtspalten leer sind.
+        #
+        # DIE EINZIGE STELLE, an der das passiert. Beim Bauen von Schema
+        # 22 stand hier zuerst eine zweite Liste weiter oben bei
+        # 'defaults' - die Mutationsprobe hat sie entlarvt: das Entfernen
+        # der neuen Zeile fuer 'tags' aenderte nichts, weil diese Schleife
+        # es ohnehin tat. Ein Wert an zwei Stellen, von denen nur eine
+        # wirkt - dieselbe Fehlerart wie F-12/F-14 und der feste
+        # Dateiname in i18n.js.
+        #
+        # 'area' kam mit 0.36.1 dazu und fehlt in aelteren Datenbanken,
+        # deshalb die Abfrage auf die Tabelle.
+        for tabelle, spalten in (
+                ("host", ("checkmk_hosts", "tags", "patch_days",
+                          "reboot_reasons")),
+                ("area", ("checkmk_hosts", "patch_days"))):
+            if tabelle not in tables:
+                continue
+            vorhanden = _columns(conn, tabelle)
+            for col in spalten:
+                if col not in vorhanden:
+                    continue
                 conn.execute(text(
-                    f"UPDATE host SET {col} = '[]' "
+                    f"UPDATE {tabelle} SET {col} = '[]' "
                     f"WHERE {col} IS NULL OR {col} = '' OR {col} = 'null'"
                 ))
 

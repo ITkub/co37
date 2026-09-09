@@ -72,9 +72,10 @@ def host_einfuegen(conn, hostname, token="h", sortierung=0):
         "reboot_required, updates_require_reboot, downtime_minutes, "
         "checkmk_downtime_all, auto_reboot, patch_enabled, "
         "patch_auto_reboot, patch_grace_hours, patch_followup_left, "
-        "sort_order, created_at) "
+        "sort_order, created_at, tags, reboot_reasons, checkmk_hosts, "
+        "patch_days) "
         "VALUES (:h, :t, 'approved', 'ok', 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, "
-        "4, 0, :s, '2026-01-01 00:00:00')"),
+        "4, 0, :s, '2026-01-01 00:00:00', '[]', '[]', '[]', '[]')"),
         {"h": hostname, "t": token, "s": sortierung})
 
 
@@ -806,6 +807,149 @@ _fehlerzweig = _umbau_q[_umbau_q.index("except BaseException:"):]
 check("und der Fehlerzweig rollt ausdruecklich zurueck",
       'cur.execute("ROLLBACK")' in _fehlerzweig[:400])
 
+
+
+# ======================================================================
+# Schema 22: die JSON-Spalten waren nullable, die Werte fehlten
+# ======================================================================
+print()
+print("--- Eine alte Anlage mit NULL in den Listenspalten ---")
+# models.py fuehrt sieben der acht JSON-Spalten als list bzw. dict, nicht
+# als Optional - das Modell sagt also "immer eine Liste". Nur
+# Column(JSON) hatte kein nullable=False, und damit sagte die Datenbank
+# etwas anderes. Der Abgleich sah es nicht: er vergleicht gegen
+# spalte.nullable, also gegen die Spaltendefinition und nicht gegen den
+# Typ darueber.
+#
+# Nachgebaut wird eine Tabelle, in der diese Spalten nullable sind UND
+# NULL enthalten. Beides gehoert dazu: eine Tabelle mit nullable
+# Spalten, in der ueberall Werte stehen, wuerde den Umbau ohne das
+# Vorfuellen ebenfalls bestehen - und dann bewiese die Reihe nichts.
+JSON_SPALTEN = ("tags", "reboot_reasons", "checkmk_hosts", "patch_days")
+# 'area' traegt zwei derselben Spalten und ist in aelteren Datenbanken
+# gar nicht vorhanden - beides gehoert geprueft. Ohne diesen Teil blieb
+# beim Bauen von Schema 22 eine Mutation gruen: das Streichen von 'area'
+# aus der Vorfuellung fiel niemandem auf.
+AREA_SPALTEN = ("checkmk_hosts", "patch_days")
+
+
+def tabelle_lockern(conn, tabelle, spalten):
+    """Baut eine Tabelle so nach, wie eine aeltere Fassung sie anlegte:
+    die genannten Spalten ohne NOT NULL."""
+    zeilen = conn.execute(text(f"PRAGMA table_info({tabelle})")).fetchall()
+    teile = []
+    for r in zeilen:
+        stueck = f"{r[1]} {r[2] or 'VARCHAR'}"
+        if r[5]:
+            stueck += " PRIMARY KEY"
+        elif r[3] and r[1] not in spalten:
+            stueck += " NOT NULL"
+        teile.append(stueck)
+    conn.execute(text(f"ALTER TABLE {tabelle} RENAME TO {tabelle}_alt"))
+    conn.execute(text(f"CREATE TABLE {tabelle} ({', '.join(teile)})"))
+    conn.execute(text(f"DROP TABLE {tabelle}_alt"))
+
+alt22 = TMP / "alt22.db"
+motor22 = create_engine(f"sqlite:///{alt22}")
+SQLModel.metadata.create_all(motor22)
+
+with motor22.begin() as conn:
+    tabelle_lockern(conn, "host", JSON_SPALTEN)
+    tabelle_lockern(conn, "area", AREA_SPALTEN)
+    host_einfuegen(conn, "KK-ALT-NULL", "tok22")
+    conn.execute(text(
+        "INSERT INTO area (name, sort_order, checkmk_downtime_all, "
+        "downtime_minutes, patch_enabled, patch_auto_reboot, "
+        "patch_grace_hours, checkmk_hosts, patch_days, created_at) "
+        "VALUES ('Serverraum', 0, 0, 30, 0, 0, 4, '[]', '[]', "
+        "'2026-01-01 00:00:00')"))
+    # Und jetzt das, was eine alte Anlage tatsaechlich stehen hat.
+    for sp in JSON_SPALTEN:
+        conn.execute(text(f"UPDATE host SET {sp} = NULL"))
+    for sp in AREA_SPALTEN:
+        conn.execute(text(f"UPDATE area SET {sp} = NULL"))
+
+def spalte_nullable(motor, tabelle, name):
+    # Mit 'with', nicht mit motor.connect() allein: die Funktion wird
+    # oft aufgerufen, und eine nicht geschlossene Verbindung je Aufruf
+    # laesst den Pool volllaufen ("QueuePool limit of size 5 ...").
+    with motor.connect() as conn:
+        for r in conn.execute(
+                text(f"PRAGMA table_info({tabelle})")).fetchall():
+            if r[1] == name:
+                return not r[3]
+    return None
+
+check("die nachgebaute Tabelle laesst NULL zu",
+      all(spalte_nullable(motor22, "host", sp) for sp in JSON_SPALTEN),
+      {sp: spalte_nullable(motor22, "host", sp) for sp in JSON_SPALTEN})
+with motor22.connect() as conn:
+    _vorher = conn.execute(text(
+        "SELECT tags, reboot_reasons, checkmk_hosts, patch_days FROM host"
+    )).fetchone()
+check("und es stehen wirklich NULL-Werte drin",
+      all(v is None for v in _vorher), _vorher)
+
+# Der Abgleich muss die Abweichung ueberhaupt sehen, sonst baut
+# angleichen() die Tabelle nie um.
+_abw22 = migrate.schema_abweichungen(motor22)
+_treffer22 = [z for z in _abw22 if "host.tags" in z]
+check("der Abgleich meldet host.tags", bool(_treffer22), _abw22[:5])
+
+bericht22 = migrate.migrate(motor22)
+check("die Migration meldet keine Probleme",
+      not bericht22["problems"], bericht22["problems"])
+check("und sie meldet Schema 22", bericht22["version"] == 22,
+      bericht22["version"])
+
+with motor22.connect() as conn:
+    _nachher = conn.execute(text(
+        "SELECT hostname, tags, reboot_reasons, checkmk_hosts, patch_days "
+        "FROM host")).fetchone()
+check("die Zeile ist noch da", _nachher and _nachher[0] == "KK-ALT-NULL",
+      _nachher)
+check("aus NULL wurde eine leere Liste",
+      all(v == "[]" for v in _nachher[1:]), _nachher)
+check("die Spalten lassen jetzt kein NULL mehr zu",
+      not any(spalte_nullable(motor22, "host", sp) for sp in JSON_SPALTEN),
+      {sp: spalte_nullable(motor22, "host", sp) for sp in JSON_SPALTEN})
+check("und der Abgleich meldet nichts mehr",
+      not migrate.schema_abweichungen(motor22),
+      migrate.schema_abweichungen(motor22)[:5])
+
+# Die Wirkung, um die es geht: ein NULL kommt danach gar nicht mehr in
+# die Zeile. Vorher schrieb ein ausdrueckliches null im PATCH es hinein,
+# und ab da fiel JEDE Hostliste ueber diese eine Zeile.
+try:
+    with motor22.begin() as conn:
+        conn.execute(text("UPDATE host SET patch_days = NULL"))
+    _ging22 = True
+except Exception:  # noqa: BLE001
+    _ging22 = False
+check("ein NULL laesst sich nicht mehr hineinschreiben", not _ging22)
+
+# job.result bleibt nullable, und das ist die halbe Aussage: waere der
+# Umbau pauschal ueber alle JSON-Spalten gegangen, stuende dort jetzt
+# ebenfalls NOT NULL - und ein Auftrag ohne Ergebnis liesse sich nicht
+# mehr anlegen.
+check("job.result bleibt nullable", spalte_nullable(motor22, "job", "result"),
+      spalte_nullable(motor22, "job", "result"))
+check("job.params dagegen nicht",
+      not spalte_nullable(motor22, "job", "params"),
+      spalte_nullable(motor22, "job", "params"))
+
+# Und dasselbe fuer 'area'. Die Tabelle traegt zwei derselben Spalten,
+# und sie wird gern vergessen: eine Mutation, die 'area' aus der
+# Vorfuellung strich, blieb ohne diesen Abschnitt gruen.
+with motor22.connect() as conn:
+    _area = conn.execute(text(
+        "SELECT name, checkmk_hosts, patch_days FROM area")).fetchone()
+check("der Bereich ist noch da", _area and _area[0] == "Serverraum", _area)
+check("auch dort wurde aus NULL eine leere Liste",
+      _area and all(v == "[]" for v in _area[1:]), _area)
+check("und die Bereichsspalten lassen kein NULL mehr zu",
+      not any(spalte_nullable(motor22, "area", sp) for sp in AREA_SPALTEN),
+      {sp: spalte_nullable(motor22, "area", sp) for sp in AREA_SPALTEN})
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)
