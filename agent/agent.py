@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.28"
+AGENT_VERSION = "0.37.29"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -191,7 +191,29 @@ VERIFY = CFG.get("verify_ssl", "true").lower() != "false"
 if not VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-HEADERS = {"Content-Type": "application/json"}
+# Accept-Encoding wird ABSICHTLICH gesetzt, nicht requests ueberlassen.
+#
+# requests traegt sonst ein, was urllib3 zu koennen glaubt - und das ist
+# auf openSUSE Leap 16.0 auch "zstd". urllib3 2.5.0 spricht dort aber ein
+# anderes zstd-Modul an, als es erwartet: es greift auf .eof zu, was der
+# Decompressor des Pakets python313-zstandard nicht hat. Ergebnis am
+# 2026-09-09 auf KK-LEAP gemessen:
+#
+#     AttributeError: 'zstd.ZstdDecompressor' object has no attribute 'eof'
+#
+# Der Agent stirbt damit an der ERSTEN Antwort, die der Server oder ein
+# Reverse Proxy zstd-komprimiert ausliefert - nach der Anmeldung, die
+# serverseitig schon durch ist. Der Host steht dann im Dashboard und
+# bekommt trotzdem nie ein Token.
+#
+# Es ist ein Packungsfehler der Distribution, kein Fehler von CO-37. Nur
+# nuetzt uns das nichts: der Agent laeuft auf fremden Anlagen mit deren
+# Python, und was er dort vorfindet, koennen wir nicht aussuchen. Also
+# nennen wir die Verfahren, die seit Jahrzehnten ueberall gleich
+# funktionieren. Die Antworten sind JSON von wenigen Kilobyte - zstd
+# spart daran nichts, was den Ausfall aufwiegt.
+HEADERS = {"Content-Type": "application/json",
+           "Accept-Encoding": "gzip, deflate"}
 
 
 def clear_token():

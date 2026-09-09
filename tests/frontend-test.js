@@ -387,10 +387,19 @@ global.setTimeout = origSetTimeout;
         gebaut.dnf.split(" -o ")[0] === gebaut.zypper.split(" -o ")[0]);
   check("nur der Debian-Befehl nennt apt-get",
         !gebaut.dnf.includes("apt-get") && !gebaut.zypper.includes("apt-get"));
+  // Gemessen am 2026-09-09: zypper bricht ohne diesen Schalter bei der
+  // unsignierten lokalen Datei ab, dnf nimmt sie ohne Weiteres.
   check("SUSE erlaubt das unsignierte Paket ausdruecklich",
         gebaut.zypper.includes("--allow-unsigned-rpm"));
-  check("Red Hat erlaubt das unsignierte Paket ausdruecklich",
-        gebaut.dnf.includes("--nogpgcheck"));
+  // Und die Gegenrichtung, die genauso wichtig ist: kein Befehl darf die
+  // Signaturpruefung der Distributionsquellen abschalten. --nogpgcheck
+  // und --no-gpg-checks gelten fuer die ganze Transaktion und wuerden
+  // auch python3-requests & Co. ungeprueft durchlassen.
+  for (const [wahl, c] of Object.entries(gebaut)) {
+    check(`${wahl}: schaltet die Pruefung der Quellen nicht ab`,
+          !c.includes("--nogpgcheck") && !c.includes("--no-gpg-checks"),
+          c.slice(-90));
+  }
   if (pkgs && pkgs.rpm) {
     check("RPM-Befehl nutzt echten Dateinamen",
           gebaut.dnf.includes(pkgs.rpm.name), pkgs.rpm.name);

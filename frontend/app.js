@@ -1764,20 +1764,32 @@ let LINUX_PKG = "", LINUX_PKG_RPM = "", LINUX_BASE = "",
     INSTALL_TOKEN = null, TOKEN_TIMER = null;
 
 // Ein Paket, drei Aufrufe. Die Unterschiede sind nicht kosmetisch:
-// apt-get gibt es auf Red Hat und SUSE nicht, der Dateiname des Pakets
-// ist ein anderer, und beide RPM-Paketmanager weisen ein unsigniertes
-// Paket ab, wenn man es ihnen nicht ausdruecklich erlaubt. Unser RPM ist
-// unsigniert - genau wie das .deb, das apt-get bei einer lokalen Datei
-// ebenfalls nicht prueft. Der Schalter schaltet also keine Pruefung ab,
-// die sonst etwas faende, sondern macht das Verhalten ueber die
-// Distributionen hinweg gleich. Ein signiertes RPM waere die bessere
-// Loesung und braucht einen GPG-Schluessel, der auf jedem Zielsystem
-// bekannt sein muss - das ist eine eigene Entscheidung, keine Zugabe.
+// apt-get gibt es auf Red Hat und SUSE nicht, und der Dateiname des
+// Pakets ist ein anderer.
+//
+// Unser RPM ist nicht signiert. Die beiden Paketmanager gehen damit
+// verschieden um - am 2026-09-09 auf zwei Anlagen gemessen:
+//
+//   dnf (Oracle Linux 10) nimmt die lokale Datei ohne Weiteres. Ein
+//   --nogpgcheck stand hier zuerst drin und ist wieder raus: der
+//   Schalter gilt fuer die GANZE Transaktion, also auch fuer
+//   python3-requests und die uebrigen Abhaengigkeiten aus den
+//   Distributionsquellen. Genau deren Signaturen prueft dnf sonst - und
+//   importiert dafuer bei Bedarf den Schluessel der Distribution.
+//
+//   zypper (openSUSE Leap 16.0) bricht ab: "Paket-Kopfdaten sind nicht
+//   signiert!". --allow-unsigned-rpm erlaubt gezielt diese eine lokale
+//   Datei; die Quellen prueft zypper weiter (das waere --no-gpg-checks,
+//   und das steht hier bewusst NICHT).
+//
+// Ein signiertes RPM waere die bessere Loesung und setzt einen
+// GPG-Schluessel voraus, der auf jedem Zielsystem bekannt sein muss -
+// eine eigene Entscheidung, keine Zugabe.
 const LINUX_INSTALL = {
   deb:    { datei: "/tmp/co37-agent.deb", rpm: false,
             befehl: "apt-get install -y --allow-downgrades" },
   dnf:    { datei: "/tmp/co37-agent.rpm", rpm: true,
-            befehl: "dnf install -y --nogpgcheck" },
+            befehl: "dnf install -y" },
   zypper: { datei: "/tmp/co37-agent.rpm", rpm: true,
             befehl: "zypper --non-interactive install --allow-unsigned-rpm" },
 };

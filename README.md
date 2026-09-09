@@ -170,7 +170,7 @@ curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api
 **Red Hat, Oracle, Rocky, AlmaLinux:**
 
 ```
-curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent-VERSION-1.noarch.rpm -o /tmp/co37-agent.rpm && CO37_SERVER="http://192.168.1.10:8080" dnf install -y --nogpgcheck /tmp/co37-agent.rpm
+curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent-VERSION-1.noarch.rpm -o /tmp/co37-agent.rpm && CO37_SERVER="http://192.168.1.10:8080" dnf install -y /tmp/co37-agent.rpm
 ```
 
 **SUSE, openSUSE:**
@@ -186,12 +186,16 @@ auf SUSE gleich.
 `apt-get install` statt `dpkg -i` und `dnf`/`zypper` statt `rpm -i` — sonst
 wird `python3-requests` nicht mitaufgelöst.
 
-Das Paket ist nicht signiert; deshalb steht `--nogpgcheck` beziehungsweise
-`--allow-unsigned-rpm` im Befehl. Das schaltet keine Prüfung ab, die sonst
-etwas fände — es macht das Verhalten über die Distributionen hinweg gleich.
-Beim `.deb` prüft `apt-get` eine lokale Datei ohnehin nicht. Ein signiertes
-RPM wäre die bessere Lösung und setzt einen GPG-Schlüssel voraus, der auf
-jedem Zielsystem bekannt sein muss.
+Das Paket ist nicht signiert. `dnf` nimmt die lokale Datei trotzdem an,
+`zypper` bricht ab („Paket-Kopfdaten sind nicht signiert!") — deshalb steht
+nur im SUSE-Befehl `--allow-unsigned-rpm`. Der Schalter erlaubt gezielt diese
+eine Datei; die Signaturen der Distributionsquellen prüfen beide Paketmanager
+weiter. Ein pauschales `--nogpgcheck` oder `--no-gpg-checks` gehört hier
+ausdrücklich **nicht** hin: es gälte für die ganze Transaktion und ließe auch
+`python3-requests` und die übrigen Abhängigkeiten ungeprüft durch.
+
+Ein signiertes RPM wäre die bessere Lösung und setzt einen GPG-Schlüssel
+voraus, der auf jedem Zielsystem bekannt sein muss.
 
 ### 3.3 Prüfen
 

@@ -1526,5 +1526,63 @@ else:
     print("       (wixl/msiinfo fehlen - der Bau selbst wurde NICHT geprueft)")
 
 
+# ======================================================================
+# Der Agent nennt die Kompression selbst
+# ======================================================================
+# Am 2026-09-09 auf KK-LEAP (openSUSE Leap 16.0) gemessen: requests
+# ueberliess urllib3 die Wahl, urllib3 bot zstd an, und beim Auspacken
+# der ersten Antwort stand
+#
+#     AttributeError: 'zstd.ZstdDecompressor' object has no attribute 'eof'
+#
+# Das urllib3 der Distribution spricht ein anderes zstd-Modul an, als es
+# erwartet. Der Agent starb an der ERSTEN Antwort - die Anmeldung war
+# serverseitig da schon durch, der Host stand im Dashboard und bekam nie
+# ein Token. Also nennt der Agent die Verfahren selbst.
+#
+# Geprueft wird der AUFRUF, nicht die Zeile: requests.request wird durch
+# einen Aufzeichner ersetzt und api() wirklich ausgefuehrt. Eine Suche
+# nach "Accept-Encoding" im Quelltext bewiese nur, dass jemand etwas
+# hingeschrieben hat.
+print("\n=== Accept-Encoding ===")
+_gesehen = {}
+
+
+class _Antwort:
+    status_code = 200
+    content = b"{}"
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {}
+
+
+def _aufzeichnen(method, url, **kw):
+    _gesehen["method"] = method
+    _gesehen["url"] = url
+    _gesehen["headers"] = dict(kw.get("headers") or {})
+    return _Antwort()
+
+
+_echt_request = mit.requests.request
+mit.requests.request = _aufzeichnen
+try:
+    mit.api("GET", "/api/v1/agent/jobs", auth=False)
+finally:
+    mit.requests.request = _echt_request
+
+_ae = _gesehen.get("headers", {}).get("Accept-Encoding", "")
+check("der Agent setzt Accept-Encoding selbst", bool(_ae), repr(_ae))
+check("und bietet zstd nicht an", "zstd" not in _ae.lower(), _ae)
+# Gegenprobe zur Pruefung darueber: es darf nicht einfach alles
+# abgeschaltet sein. Ohne gzip laedt jeder Bericht unkomprimiert.
+check("gzip bleibt erlaubt", "gzip" in _ae.lower(), _ae)
+check("Content-Type steht weiterhin dabei",
+      _gesehen.get("headers", {}).get("Content-Type") == "application/json",
+      str(_gesehen.get("headers")))
+
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
