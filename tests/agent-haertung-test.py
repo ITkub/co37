@@ -810,8 +810,48 @@ for name, inhalt in (("build_deb.py", deb), ("build_msi.py", msi)):
 # woran man sich spaeter orientiert.
 print()
 print("--- tools/ bleibt draussen (F-45) ---")
-check("build_release.py packt tools/ nicht ein",
-      '"tools"' not in bau.split("VERZEICHNISSE =")[1].split("]")[0])
+
+# Geprueft wird das ERGEBNIS von sammle(), nicht der Wortlaut der Listen.
+#
+# Die Vorgaengerpruefung sah in 'VERZEICHNISSE' nach, ob dort "tools"
+# steht. Zwei Luecken: sie sah 'DATEIEN' gar nicht an - ein Eintrag
+# "tools/make-license.py" dort waere ungehindert ins Paket gewandert,
+# also genau der Fall, der F-45 ausgeloest hat - und sie bewies nur, dass
+# jemand etwas hingeschrieben hat, nicht was passiert.
+#
+# sammle() gegen das echte Projektverzeichnis laufen zu lassen taugt
+# nicht: diese Reihe laeuft aus dem entpackten Paket, und dort gibt es
+# tools/ ohnehin nicht - die Pruefung waere wirkungslos gruen, egal was
+# in den Listen steht (dieselbe Falle wie F-71). Deshalb wird eine
+# Ausgangslage MIT tools/ gebaut und 'HIER' darauf umgebogen.
+_bau_spec = importlib.util.spec_from_file_location(
+    "_co37_build_release", WURZEL / "build_release.py")
+_bau_mod = importlib.util.module_from_spec(_bau_spec)
+_bau_spec.loader.exec_module(_bau_mod)
+with tempfile.TemporaryDirectory() as _td:
+    _w = Path(_td)
+    (_w / "backend").mkdir()
+    (_w / "backend" / "main.py").write_text("x", encoding="utf-8")
+    (_w / "tools").mkdir()
+    (_w / "tools" / "make-license.py").write_text("x", encoding="utf-8")
+    (_w / "tools" / "sign-release.py").write_text("x", encoding="utf-8")
+    (_w / "README.md").write_text("x", encoding="utf-8")
+    _alt_hier = _bau_mod.HIER
+    try:
+        _bau_mod.HIER = _w
+        _namen = [rel for _, rel in _bau_mod.sammle()]
+    finally:
+        _bau_mod.HIER = _alt_hier
+
+_tools_drin = [n for n in _namen if n == "tools" or n.startswith("tools/")]
+check("build_release.py packt tools/ nicht ein (sammle() gemessen)",
+      not _tools_drin, ", ".join(_tools_drin))
+# Ohne diese Gegenprobe koennte sammle() schlicht nichts geliefert haben
+# und die Pruefung darueber waere aus dem falschen Grund gruen.
+check("die Ausgangslage der Pruefung wird ueberhaupt eingesammelt",
+      "backend/main.py" in _namen and "README.md" in _namen,
+      ", ".join(sorted(_namen)))
+
 _sh = (WURZEL / "build_release.sh").read_text(encoding="utf-8")
 _zip = _sh.split("zip -rq")[1].split("-x")[0] if "zip -rq" in _sh else ""
 check("build_release.sh packt tools/ nicht ein", "tools" not in _zip, _zip.strip())
