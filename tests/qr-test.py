@@ -140,8 +140,13 @@ if not LESER:
     check("uebersprungen, weil kein Leser da ist - NICHT als bestanden "
           "zaehlen", False, "pyzbar/pillow/numpy fehlen")
 else:
-    ECHT = ("otpauth://totp/CO-37%20OPS01%3Amike?"
-            "secret=RDYU7FCDJJE3VXKQ5ZIIJVPX4QGZ2ELF&issuer=CO-37%20OPS01"
+    # Form einer echten otpauth-Adresse, Werte erfunden: das Geheimnis
+    # ist eine Attrappe aus lauter gleichen Silben, der Kontoname
+    # generisch. Ein Geheimnis, bei dem jemand ueberlegen muss, ob es
+    # echt ist, gehoert nicht in ein oeffentliches Repository - auch
+    # dieses hier war nur ein Wegwerfwert, aber das sah man ihm nicht an.
+    ECHT = ("otpauth://totp/CO-37%20SERVER01%3Abenutzer?"
+            "secret=TESTTESTTESTTESTTESTTESTTESTTEST&issuer=CO-37%20SERVER01"
             "&algorithm=SHA1&digits=6&period=30")
     check("die echte otpauth-Adresse wird korrekt gelesen",
           gelesen(ECHT) == ECHT, (gelesen(ECHT) or "")[:50])
