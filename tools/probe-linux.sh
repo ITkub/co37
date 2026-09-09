@@ -19,8 +19,18 @@
 # Aufruf auf dem Zielsystem, als beliebiger Benutzer:
 #     sh probe-linux.sh > probe-$(hostname).txt 2>&1
 #
-# Die Ausgabe enthaelt Systemnamen und Paketstaende, sonst nichts.
+# Die Ausgabe enthaelt Systemnamen und Paketstaende, sonst nichts. Auf dem
+# Zielsystem bleibt nichts zurueck: die Zwischendateien liegen in einem
+# eigenen Verzeichnis von mktemp und werden beim Verlassen geloescht, auch
+# bei Abbruch. Feste Namen unter /tmp waeren angreifbar - wer /tmp
+# beschreiben darf, koennte eine Verknuepfung dorthin legen.
 export LC_ALL=C LANG=C
+
+TMPD=$(mktemp -d 2>/dev/null) || { echo "Kein temporaeres Verzeichnis" >&2; exit 1; }
+# PIPE und HUP gehoeren dazu: 'sh probe-linux.sh | head' beendet das
+# Skript mit SIGPIPE, und ohne diesen Eintrag laeuft der EXIT-Trap dann
+# nicht - das Verzeichnis bliebe stehen. Im Container nachgemessen.
+trap 'rm -rf "$TMPD"' EXIT INT TERM PIPE HUP
 echo "=== os-release ==="
 grep -E '^(ID|VERSION_ID|PRETTY_NAME)=' /etc/os-release
 
@@ -62,26 +72,26 @@ command -v getenforce >/dev/null 2>&1 && getenforce || echo "kein getenforce"
 echo
 echo "=== Update-Liste (erste 40 Zeilen, roh) ==="
 if command -v dnf >/dev/null 2>&1; then
-  dnf -q check-update > /tmp/co37-upd.txt 2>&1
-  echo "dnf check-update -> $?  ($(wc -l < /tmp/co37-upd.txt) Zeilen)"
-  cat -A /tmp/co37-upd.txt | head -40 | sed 's/\$$//'
+  dnf -q check-update > "$TMPD/upd.txt" 2>&1
+  echo "dnf check-update -> $?  ($(wc -l < "$TMPD/upd.txt") Zeilen)"
+  cat -A "$TMPD/upd.txt" | head -40 | sed 's/\$$//'
 elif command -v zypper >/dev/null 2>&1; then
   zypper --non-interactive refresh >/dev/null 2>&1
-  zypper --non-interactive --quiet list-updates > /tmp/co37-upd.txt 2>&1
-  echo "zypper list-updates -> $?  ($(wc -l < /tmp/co37-upd.txt) Zeilen)"
-  head -40 /tmp/co37-upd.txt
+  zypper --non-interactive --quiet list-updates > "$TMPD/upd.txt" 2>&1
+  echo "zypper list-updates -> $?  ($(wc -l < "$TMPD/upd.txt") Zeilen)"
+  head -40 "$TMPD/upd.txt"
 fi
 
 echo
 echo "=== Sicherheitsupdates (erste 30 Zeilen, roh) ==="
 if command -v dnf >/dev/null 2>&1; then
-  dnf -q check-update --security > /tmp/co37-sec.txt 2>&1
-  echo "dnf check-update --security -> $?  ($(wc -l < /tmp/co37-sec.txt) Zeilen)"
-  head -30 /tmp/co37-sec.txt
+  dnf -q check-update --security > "$TMPD/sec.txt" 2>&1
+  echo "dnf check-update --security -> $?  ($(wc -l < "$TMPD/sec.txt") Zeilen)"
+  head -30 "$TMPD/sec.txt"
 elif command -v zypper >/dev/null 2>&1; then
-  zypper --non-interactive patch --dry-run --category security > /tmp/co37-sec.txt 2>&1
-  echo "zypper patch --dry-run --category security -> $?  ($(wc -l < /tmp/co37-sec.txt) Zeilen)"
-  head -30 /tmp/co37-sec.txt
+  zypper --non-interactive patch --dry-run --category security > "$TMPD/sec.txt" 2>&1
+  echo "zypper patch --dry-run --category security -> $?  ($(wc -l < "$TMPD/sec.txt") Zeilen)"
+  head -30 "$TMPD/sec.txt"
 fi
 echo
 echo "=== ENDE ==="

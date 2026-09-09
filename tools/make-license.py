@@ -3,7 +3,7 @@
 CO-37 - Lizenzschluessel erzeugen.
 
 Nur fuer den Lizenzgeber. Gehoert NICHT auf den Server und nicht in das
-Auslieferungspaket - build_release.sh nimmt tools/ bewusst nicht mit.
+Auslieferungspaket - build_release.py nimmt tools/ bewusst nicht mit.
 
     python make-license.py --init
     python make-license.py --kunde "Firma Meier" --hosts 100 --jahre 3

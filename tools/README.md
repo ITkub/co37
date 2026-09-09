@@ -1,7 +1,7 @@
 # Werkzeuge für den Lizenzgeber
 
 Dieses Verzeichnis gehört **nicht** ins Auslieferungspaket —
-`build_release.sh` nimmt `tools/` bewusst nicht mit.
+`build_release.py` nimmt `tools/` bewusst nicht mit (F-45).
 
 Neben den Lizenz- und Signaturwerkzeugen liegt hier `probe-linux.sh`, ein
 Messskript für Zielsysteme — siehe ganz unten.
@@ -380,6 +380,7 @@ auf den Test-VMs aufgefallen sind.
    heißt es anders oder liefert es einen unerwarteten Rückgabewert, steht
    es in der Ausgabe.
 
-Das Skript legt seine Zwischendateien unter `/tmp/co37-upd.txt` und
-`/tmp/co37-sec.txt` ab und räumt sie nicht weg. Auf einer Wegwerf-VM ist
-das gleichgültig; auf einem Kundensystem gehören sie hinterher gelöscht.
+Auf dem Zielsystem bleibt nichts zurück. Die Zwischendateien liegen in
+einem eigenen Verzeichnis von `mktemp`, das ein `trap` beim Verlassen
+löscht — auch bei Abbruch. Feste Namen unter `/tmp` wären angreifbar: wer
+dort schreiben darf, könnte eine Verknüpfung unterschieben.
