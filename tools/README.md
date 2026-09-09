@@ -3,6 +3,9 @@
 Dieses Verzeichnis gehört **nicht** ins Auslieferungspaket —
 `build_release.sh` nimmt `tools/` bewusst nicht mit.
 
+Neben den Lizenz- und Signaturwerkzeugen liegt hier `probe-linux.sh`, ein
+Messskript für Zielsysteme — siehe ganz unten.
+
 ---
 
 ## Einmalig: Schlüsselpaar erzeugen
@@ -345,3 +348,38 @@ Das ist der Zustand eines Quelltextes, aus dem sich jemand selbst baut —
 wer das tut, hat den Code ohnehin in der Hand. Liegt der Schlüssel
 dagegen vor, ist die Signatur Pflicht; sonst könnte ein Angreifer sie
 einfach weglassen.
+
+---
+
+# Ein Zielsystem vermessen
+
+```
+sh tools/probe-linux.sh > probe-oracle.txt 2>&1
+```
+
+`probe-linux.sh` liest die Paketmanager-Umgebung eines Linux-Hosts aus und
+ändert nichts. Es gehört nicht ins Auslieferungspaket, kann aber einem
+Kunden einzeln geschickt werden — es enthält nichts Internes.
+
+Ausgegeben werden `os-release`, welche Paketwerkzeuge vorhanden sind, der
+laufende Kernel samt `/boot`-Inhalt, der SELinux-Zustand und die rohen
+Ausgaben der Update-Abfragen. Der Kern sind aber die **Rückgabewerte** von
+`zypper needs-rebooting`, `needs-restarting -r` und
+`dnf needs-restarting -r`: der Agent entscheidet an ihnen, nicht am Text,
+und genau dort lagen zwei der fünf Irrtümer, die beim Bau des RPM-Wegs nur
+auf den Test-VMs aufgefallen sind.
+
+**Wofür es gedacht ist:**
+
+1. **Vor jeder Änderung am RPM-Weg oder an den zypper-/dnf-Aufrufen.** Auf
+   VM 111 (Oracle Linux 10) und VM 112 (openSUSE Leap 16.0) laufen lassen
+   und die Ausgabe mit der vorherigen vergleichen. Eine Prüfreihe im
+   Container ersetzt das nicht — drei der fünf Irrtümer hätte sie nicht
+   gefunden.
+2. **Bei der Frage „warum erkennt CO-37 dort nichts".** Fehlt das Werkzeug,
+   heißt es anders oder liefert es einen unerwarteten Rückgabewert, steht
+   es in der Ausgabe.
+
+Das Skript legt seine Zwischendateien unter `/tmp/co37-upd.txt` und
+`/tmp/co37-sec.txt` ab und räumt sie nicht weg. Auf einer Wegwerf-VM ist
+das gleichgültig; auf einem Kundensystem gehören sie hinterher gelöscht.
