@@ -147,6 +147,27 @@ ist danach nicht mehr abrufbar.
 Hosts werden **nicht** von Hand angelegt. Sie entstehen durch die Anmeldung des
 Agents und warten dann auf Freigabe.
 
+### Unterstützte Zielsysteme
+
+| System | Paket | Paketmanager |
+|---|---|---|
+| Debian, Ubuntu | `.deb` | `apt-get` |
+| Red Hat, Oracle Linux, Rocky, AlmaLinux | `.rpm` | `dnf` (oder `yum`) |
+| SUSE Linux Enterprise, openSUSE Leap | `.rpm` | `zypper` |
+| Windows | `.msi` | Windows Update |
+
+Das `.rpm` ist **ein** Paket für beide RPM-Familien: `noarch`, und seine drei
+Abhängigkeiten heißen dort gleich.
+
+**openSUSE Tumbleweed wird nicht gepatcht.** Auf einer rollenden Anlage ist
+`zypper update` der falsche Befehl — richtig wäre `zypper dup`, und das ist ein
+anderer Vorgang mit anderen Folgen. Der Agent erkennt Tumbleweed, sagt es im
+Auftragsprotokoll und lässt es bleiben; der Scan läuft weiter. Lieber gar
+nichts als das Falsche.
+
+Gemessen wurde auf Debian 13, Ubuntu, Oracle Linux 10 und openSUSE Leap 16.0,
+die beiden letzten unter SELinux Enforcing.
+
 ## Linux
 
 ### 3.1 Befehl aus der Oberfläche holen
@@ -223,7 +244,7 @@ Zielsystem kopieren.
 In einer Eingabeaufforderung als Administrator:
 
 ```
-msiexec /i co37-agent-0.4.1.msi /qn CO37SERVER="http://192.168.1.10:8080"
+msiexec /i co37-agent-VERSION.msi /qn CO37SERVER="http://192.168.1.10:8080"
 ```
 
 Python ist im Paket enthalten, auf dem Zielsystem wird nichts vorausgesetzt.
@@ -536,7 +557,7 @@ cd /opt/co37 && bash build_packages.sh
 Die Oberfläche kennzeichnet veraltete Pakete und bietet sie nicht zur
 Installation an. Steht dort ein Hinweis, ist dieser Befehl fällig.
 
-**Agent und System tragen dieselbe Versionsnummer.** `build_release.sh` setzt
+**Agent und System tragen dieselbe Versionsnummer.** `build_release.py` setzt
 `AGENT_VERSION` in `agent/agent.py` beim Bauen auf die Release-Version.
 
 Bis 0.8.4 waren es zwei unabhängige Nummern. Das hat nur verwirrt — und beim
@@ -557,8 +578,12 @@ Neubau ist nur für **neue** Installationen nötig.
 Neues Paket bauen:
 
 ```
-cd /opt/co37 && bash build_release.sh 0.5.0
+cd /opt/co37 && python3 build_release.py 0.5.0
 ```
+
+`build_release.sh` gibt es noch, ist aber abgelöst: es braucht `zip` und
+`unzip`, die Git Bash unter Windows nicht mitbringt, und es signiert das
+Paket nicht mit.
 
 Unter **Einstellungen → Update** hochladen. Das Backend prüft Signatur und
 ZIP-Struktur und stellt bereit, führt aber nichts aus. Erst nach Bestätigung
@@ -573,9 +598,9 @@ ZIP-Struktur und stellt bereit, führt aber nichts aus. Erst nach Bestätigung
 
 Ausgetauscht werden `backend/`, `frontend/`, `agent/`, `packaging/`, `tests/`
 sowie die Skripte auf oberster Ebene (`setup.sh`, `build_packages.sh`,
-`build_release.sh`) und der Watcher selbst.
+`build_release.py`) und der Watcher selbst.
 
-`build_release.sh` prüft beim Bauen, dass alles aus `MANAGED_FILES` auch
+`build_release.py` prüft beim Bauen, dass alles aus `MANAGED_FILES` auch
 wirklich im Paket liegt, und bricht sonst ab. Eine fehlende Datei würde der
 Watcher stillschweigend überspringen — ihre Korrekturen erreichten den Betrieb
 dann nie. `data/` wird nie angefasst. Die letzten drei
