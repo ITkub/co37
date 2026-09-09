@@ -328,7 +328,7 @@ check("der Eingang bleibt unter data/",
 # Der finally-Zweig raeumte bis 0.37.14 nur WORK_DIR (= SAFE_DIR/_work).
 # Die Kopie des Pakets liegt aber eine Ebene darueber, direkt in SAFE_DIR,
 # und blieb liegen - gut 550 KB nach jedem Update, am 2026-08-31 auf
-# KK-OPS01 gesehen.
+# OPS01 gesehen.
 #
 # Ueber den Syntaxbaum, weil im Kommentar daneben beide Namen stehen und
 # eine Zeichenkettensuche deshalb nichts aussagt.

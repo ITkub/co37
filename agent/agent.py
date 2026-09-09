@@ -197,7 +197,7 @@ if not VERIFY:
 # auf openSUSE Leap 16.0 auch "zstd". urllib3 2.5.0 spricht dort aber ein
 # anderes zstd-Modul an, als es erwartet: es greift auf .eof zu, was der
 # Decompressor des Pakets python313-zstandard nicht hat. Ergebnis am
-# 2026-09-09 auf KK-LEAP gemessen:
+# 2026-09-09 auf LEAP gemessen:
 #
 #     AttributeError: 'zstd.ZstdDecompressor' object has no attribute 'eof'
 #
@@ -1209,7 +1209,7 @@ def patch_linux(sink: LogSink) -> bool:
         #     Flag --auto-agree-with-licenses ist unbekannt.
         #     Installation fehlgeschlagen.
         #
-        # Am 2026-09-09 auf KK-LEAP so gemessen; 'zypper update --help'
+        # Am 2026-09-09 auf LEAP so gemessen; 'zypper update --help'
         # fuehrt den Schalter unter den Optionen des Befehls.
         code = run_streaming(
             ["zypper", "--non-interactive", "update",

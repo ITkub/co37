@@ -233,7 +233,7 @@ check("normale Werte bleiben erhalten",
 # ======================================================================
 # Zweite Anmeldung desselben Namens
 # ======================================================================
-# Am 2026-09-09 auf KK-LEAP: der Agent starb beim Auspacken der Antwort,
+# Am 2026-09-09 auf LEAP: der Agent starb beim Auspacken der Antwort,
 # serverseitig war die Anmeldung aber schon vollzogen. Jeder weitere
 # Versuch prallt seitdem an dieser Meldung ab - und der Agent gibt sie
 # WOERTLICH ins Journal. Wer sie liest, tut was dort steht. Sie muss

@@ -219,7 +219,7 @@ gefaelschte_quelle.parent.mkdir(parents=True, exist_ok=True)
 # der Platte trug damit CRLF, read_text() gab sie als LF zurueck,
 # signiert wurde die LF-Fassung - und das Backend liefert die BYTES aus.
 # Die Signatur passte dann nicht, und die Reihe meldete am 2026-09-07 auf
-# KK-LENOVO "Der Agent nimmt sie nicht an".
+# LENOVO "Der Agent nimmt sie nicht an".
 #
 # Am Produkt liegt das nicht: die ganze Kette arbeitet auf Bytes
 # (sign-release.py liest binaer, agent_code() liefert read_bytes(), der
@@ -865,7 +865,7 @@ check("die Geheimnissuche durchsucht tools/ weiterhin",
 # aus einer vorhandenen agent.conf. Beim Upgrade per Doppelklick gibt
 # aber niemand CO37SERVER auf der Befehlszeile mit - danach stand gar
 # keine Adresse mehr da, das Skript beendete sich mit exit(1), und der
-# Installer meldete Fehler 1721. Auf KK-WIN01 passiert.
+# Installer meldete Fehler 1721. Auf WIN01 passiert.
 #
 # Die Pruefung davor sah nur nach, DASS die Zeile da ist. Sie prueft
 # jetzt, was sie BEWIRKT - und zwar fuer alle vier Wege, auf denen
@@ -977,7 +977,7 @@ check("untergeschobene Datei blockiert eine Installation mit CO37SERVER nicht",
 # hat keine Rueckrollaktion, der Installer stellt sie nicht wieder her.
 # Der Host steht dann ganz ohne Agent da und meldet sich nie wieder.
 #
-# Am 2026-09-01 auf KK-WIN01 genau so passiert.
+# Am 2026-09-01 auf WIN01 genau so passiert.
 #
 # Geprueft wird der ganze Ablauf, nicht nur die Konfiguration: schtasks
 # und icacls werden abgefangen, und wir sehen, WAS aufgerufen worden
@@ -1076,7 +1076,7 @@ check("der Ablaufteil ist auffindbar",
 _ab, _ = _ablauf(None, "")
 check("die Attrappe stellt einen Abbruch her", _ab is True)
 
-# Der Fall von KK-WIN01: Upgrade, Konfiguration unbrauchbar.
+# Der Fall von WIN01: Upgrade, Konfiguration unbrauchbar.
 _ab, _aufgabe = _ablauf("token = abc\n", "")
 check("Upgrade mit unbrauchbarer Konfiguration bricht ab", _ab is True)
 check("aber die Aufgabe wird vorher wiederhergestellt", _aufgabe is True)
@@ -1569,7 +1569,7 @@ else:
 # ======================================================================
 # Der Agent nennt die Kompression selbst
 # ======================================================================
-# Am 2026-09-09 auf KK-LEAP (openSUSE Leap 16.0) gemessen: requests
+# Am 2026-09-09 auf LEAP (openSUSE Leap 16.0) gemessen: requests
 # ueberliess urllib3 die Wahl, urllib3 bot zstd an, und beim Auspacken
 # der ersten Antwort stand
 #

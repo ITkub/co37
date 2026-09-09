@@ -14,7 +14,7 @@
 # die PyPI im Augenblick des Updates gerade auslieferte.
 #
 # Das ist derselbe Befund wie F-14 beim Windows-Agenten, nur eine Ebene
-# tiefer - und er war nicht theoretisch. Am 2026-09-04 auf KK-OPS01
+# tiefer - und er war nicht theoretisch. Am 2026-09-04 auf OPS01
 # gegen eine frische Aufloesung verglichen:
 #
 #     anyio        installiert 4.14.2   frisch aufgeloest 4.15.0
@@ -41,7 +41,7 @@
 #     /opt/co37/venv/bin/pip list --format=freeze
 #
 # Erzeugt wird der Block auf der ZIELPLATTFORM, nicht auf dem
-# Entwicklungsrechner: KK-OPS01 laeuft auf Python 3.13, ein Container mit
+# Entwicklungsrechner: OPS01 laeuft auf Python 3.13, ein Container mit
 # 3.11 loest anders auf.
 #
 # WAS HIER BEWUSST NICHT STEHT: --hash-Angaben, wie sie
@@ -85,7 +85,7 @@ starlette==1.6.0
 # Fassung - niemand hat das je verglichen.
 #
 # cryptography war der Fall mit Substanz. Das Backend stand auf 50.0.0,
-# der Agent auf 50.0.1. Auf KK-OPS01 nachgemessen:
+# der Agent auf 50.0.1. Auf OPS01 nachgemessen:
 #
 #     Backend: cryptography 50.0.0, eingebautes OpenSSL 4.0.1
 #     Agent:   cryptography 50.0.1, eingebautes OpenSSL 4.0.2
@@ -104,7 +104,7 @@ starlette==1.6.0
 # ----------------------------------------------------------------------
 # Mittelbar - haengen an den oberen, nicht selbst ausgesucht
 # ----------------------------------------------------------------------
-# Abgelesen am 2026-09-04 auf KK-OPS01 (Python 3.13.5), also an dem
+# Abgelesen am 2026-09-04 auf OPS01 (Python 3.13.5), also an dem
 # Stand, der dort seit dem Einspielen von 0.37.15 laeuft und getestet
 # ist. Bewusst NICHT die neueste Aufloesung: das waere neben dem Pinnen
 # gleichzeitig ein Versionssprung gewesen, und zwei Dinge auf einmal

@@ -68,7 +68,7 @@ werkzeug_fehlt() {
 
 # "Ist Python 3" reicht nicht.
 #
-# Gemessen am 2026-09-08 auf KK-LENOVO: ein frisch installiertes
+# Gemessen am 2026-09-08 auf LENOVO: ein frisch installiertes
 # Python 3.14 lag im Pfad vor der Arbeitsumgebung des Projekts. Es
 # bestand die Pruefung "ist Python 3" muehelos - und scheiterte dreissig
 # Zeilen spaeter beim Start des Backends mit

@@ -5,7 +5,7 @@
 #
 # Der Grund ist praktisch. Ein Shell-Skript mit Windows-Zeilenenden
 # startet auf Linux nicht - und die Meldung ('bad interpreter') deutet in
-# die falsche Richtung. Dasselbe gilt fuer alles, was auf KK-OPS01 oder
+# die falsche Richtung. Dasselbe gilt fuer alles, was auf OPS01 oder
 # den Agent-Hosts laeuft.
 
 # Vorgabe: Git entscheidet, was Text ist, und legt es mit LF ab

@@ -1132,7 +1132,7 @@ und `tls` mit vorangestellter Länge nach RFC 6587, damit der Empfänger
 weiß, wo eine Meldung endet.
 
 ```
-<131>1 2026-09-05T12:00:00.000000Z kk-ops01 co37 - login.failed
+<131>1 2026-09-05T12:00:00.000000Z ops01 co37 - login.failed
   [co37@0 actor="mike" src="192.168.2.10"] Anmeldung fehlgeschlagen
 ```
 

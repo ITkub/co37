@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 #    zurueckziehen" mit "NOT NULL constraint failed:
 #    host.agent_token_hash" endete - waehrend dieselbe Route in jeder
 #    Pruefreihe gruen war, weil die immer eine frische Datenbank anlegt.
-#    Auf KK-OPS01 betraf es 16 Spalten in fuenf Tabellen.
+#    Auf OPS01 betraf es 16 Spalten in fuenf Tabellen.
 #    Ein Rueckschritt auf 20 ist unkritisch: die aeltere Fassung schreibt
 #    in dieselben Spalten, sie sind danach nur strenger als sie es
 #    erwartet - und Werte stehen ueberall.
@@ -96,7 +96,7 @@ logger = logging.getLogger(__name__)
 #    job.result bleibt nullable - dort heisst NULL "noch kein Ergebnis",
 #    und der Typ sagt es auch (Optional[dict]).
 #    Vor dem Umbau werden vorhandene NULL-Werte auf '[]' bzw. '{}'
-#    gesetzt; auf KK-OPS01 waren es null Zeilen, bei einer aelteren
+#    gesetzt; auf OPS01 waren es null Zeilen, bei einer aelteren
 #    Anlage kann das anders sein.
 #    Ein Rueckschritt auf 21 ist unkritisch: die aeltere Fassung schreibt
 #    in dieselben Spalten immer Listen, sie sind danach nur strenger als
@@ -441,7 +441,7 @@ def verify(engine: Engine) -> tuple[bool, list[str]]:
 #     host.agent_token_hash
 #
 # models.py fuehrt die Spalte seit langem als Optional[str], also
-# nullable. Die Datenbank auf KK-OPS01 stammt aus einer Zeit, in der sie
+# nullable. Die Datenbank auf OPS01 stammt aus einer Zeit, in der sie
 # es nicht war - und SQLite kann die Nullbarkeit einer bestehenden Spalte
 # nicht aendern. migrate() ergaenzt fehlende Spalten mit ALTER TABLE, baut
 # aber keine um.
@@ -633,7 +633,7 @@ if __name__ == "__main__":
 # mit einer Zeile im Bericht. Ein Update, das an so etwas abbricht, waere
 # die schlechtere Antwort: die Anlage stuende auf einem alten Stand.
 #
-# Auf KK-OPS01 am 2026-09-08 nachgemessen: null NULL-Werte in allen elf
+# Auf OPS01 am 2026-09-08 nachgemessen: null NULL-Werte in allen elf
 # betroffenen Spalten. Der Umbau ist dort reine Vorsorge.
 
 
@@ -784,7 +784,7 @@ def _tabelle_angleichen(engine: Engine, tabelle: str, report: dict) -> bool:
         # mitgenommen werden - die Spalte gibt es in der neuen Tabelle
         # nicht mehr.
         #
-        # Genau daran ist der Umbau auf KK-OPS01 am 2026-09-08
+        # Genau daran ist der Umbau auf OPS01 am 2026-09-08
         # gescheitert: dort steht ein Index auf checkmk_host, einer der
         # Altspalten aus OBSOLETE. Die Meldung war "no such column:
         # checkmk_host" - richtig, aber ohne den Hinweis, dass es um

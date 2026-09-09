@@ -118,7 +118,7 @@ def warten_auf(anzahl, sekunden=5.0):
 # ======================================================================
 print("--- RFC 5424 ---")
 roh = syslogfwd.bauen("local0", "error", "2026-09-05T12:00:00.000000Z",
-                      "kk-ops01", "login.failed",
+                      "ops01", "login.failed",
                       {"actor": "mike", "src": "192.168.2.10"},
                       "Anmeldung fehlgeschlagen").decode()
 check("faengt mit PRI und Fassung 1 an", roh.startswith("<131>1 "), roh[:12])
@@ -191,7 +191,7 @@ EMPFANGEN.clear()
 d = syslogfwd.Weiterleitung()
 d.einstellen(True, "127.0.0.1", port_tcp, "tcp", "local0")
 for i in range(3):
-    d.melden("job.done", f"Auftrag {i}", host="kk-ag01", job=i)
+    d.melden("job.done", f"Auftrag {i}", host="ag01", job=i)
 check("alle drei kommen an", warten_auf(3), len(EMPFANGEN))
 check("und lassen sich einzeln trennen",
       len(EMPFANGEN) == 3 and all("Auftrag" in m for m in EMPFANGEN),

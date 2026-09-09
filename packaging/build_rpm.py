@@ -182,7 +182,7 @@ aussteht.
 # lassen: das galt bis rpm 4.19. Ab 4.20 bestimmt rpmbuild den Buildroot
 # selbst ({{_builddir}}/{{name}}-{{version}}-build/BUILDROOT) und
 # uebergeht die Vorgabe. Gemessen am 2026-09-09: der Bau lief im
-# Container mit rpm 4.18.2 durch und brach auf KK-OPS01 mit rpm 4.20.1
+# Container mit rpm 4.18.2 durch und brach auf OPS01 mit rpm 4.20.1
 # mit "File not found: .../BUILDROOT/usr/lib/co37/agent.py" ab - die
 # Dateien lagen da, nur woanders, als rpmbuild sie suchte.
 #

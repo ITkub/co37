@@ -218,7 +218,7 @@ python tools\make-license.py  --verschluesseln     # Lizenzschlüssel
 
 ### Git Bash
 
-Am 2026-09-05 auf KK-LENOVO nachgemessen: die Passphrase-Abfrage
+Am 2026-09-05 auf LENOVO nachgemessen: die Passphrase-Abfrage
 **funktioniert** in Git Bash (MINGW64) — `build_release.py 0.37.21` lief
 dort durch, mit Abfrage und Annahme. Die Vermutung, das könne nicht
 gehen, war falsch.

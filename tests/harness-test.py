@@ -48,7 +48,7 @@ def check(label, ok, extra=""):
 # (C:\Projekte\...). In ein sh-Skript geschrieben sind das
 # Fluchtzeichen, die Attrappe startet nicht - und ein Test, der die
 # Attrappe nicht starten kann, prueft etwas anderes als gedacht. Am
-# 2026-09-08 auf KK-LENOVO genau so passiert.
+# 2026-09-08 auf LENOVO genau so passiert.
 PY_SH = Path(sys.executable).as_posix()
 
 
@@ -172,7 +172,7 @@ check("und wird nicht als fehlendes Python ausgegeben",
 # ----------------------------------------------------------------------
 # Python 3 da, aber ohne die Pakete des Backends
 # ----------------------------------------------------------------------
-# Am 2026-09-08 auf KK-LENOVO passiert: ein frisch installiertes
+# Am 2026-09-08 auf LENOVO passiert: ein frisch installiertes
 # Python 3.14 lag im Pfad vor der Arbeitsumgebung des Projekts. Es ist
 # unzweifelhaft Python 3 - und hat kein fastapi. Das Geruest startete
 # damit das Backend und meldete "Backend nicht erreichbar", mit einem

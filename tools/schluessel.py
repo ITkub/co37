@@ -199,7 +199,7 @@ def _tastatur_da() -> bool:
     diese Werkzeuge startet, sah damit aus wie ein Mensch vor der
     Tastatur.
 
-    Nachgemessen am 2026-09-07 auf KK-LENOVO, Python 3.14:
+    Nachgemessen am 2026-09-07 auf LENOVO, Python 3.14:
 
         Kind mit Konsole   isatty() -> True    GetConsoleMode -> True
         Kind mit DEVNULL   isatty() -> True    GetConsoleMode -> False

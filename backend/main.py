@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
             print(f"Schema angepasst: {SCHEMA_REPORT}", flush=True)
         # Getrennt und ohne Bedingung: ein misslungener Abgleich ergaenzt
         # nichts und baut nichts um, faellt also durch die Zeile darueber.
-        # Auf KK-OPS01 stand der Grund deshalb am 2026-09-08 nur im
+        # Auf OPS01 stand der Grund deshalb am 2026-09-08 nur im
         # Bericht, den niemand abruft - die Anlage schwieg, und der
         # Umbau war trotzdem nicht passiert.
         for satz in SCHEMA_REPORT.get("problems", []):
@@ -2723,7 +2723,7 @@ def agent_enroll(
             # entfernen" - das verwirft Zeitplan, Checkmk-Verknuepfung
             # und Verlauf, obwohl "Token zurueckziehen" an der Hostzeile
             # dasselbe Ziel erreicht und all das behaelt. Am 2026-09-09
-            # auf KK-LEAP gesehen: der Agent gibt diese Zeile woertlich
+            # auf LEAP gesehen: der Agent gibt diese Zeile woertlich
             # ins Journal, und wer sie liest, tut was dort steht.
             f"'{hostname}' ist bereits angemeldet. Fuer eine "
             f"Neuanmeldung im Dashboard das Token dieses Hosts "
@@ -2815,7 +2815,7 @@ def agent_enroll(
             # entfernen" - das verwirft Zeitplan, Checkmk-Verknuepfung
             # und Verlauf, obwohl "Token zurueckziehen" an der Hostzeile
             # dasselbe Ziel erreicht und all das behaelt. Am 2026-09-09
-            # auf KK-LEAP gesehen: der Agent gibt diese Zeile woertlich
+            # auf LEAP gesehen: der Agent gibt diese Zeile woertlich
             # ins Journal, und wer sie liest, tut was dort steht.
             f"'{hostname}' ist bereits angemeldet. Fuer eine "
             f"Neuanmeldung im Dashboard das Token dieses Hosts "
@@ -6120,7 +6120,7 @@ def totp_off(payload: TotpOffIn, request: Request,
     # 401 heisst "du bist nicht angemeldet". Hier IST der Aufrufer
     # angemeldet - falsch war ein Feld in einem Formular. Die Oberflaeche
     # wertet 401 global als "Sitzung abgelaufen", wirft die Sitzung weg
-    # und zeigt die Anmeldemaske. Am 2026-09-07 auf KK-LENOVO im
+    # und zeigt die Anmeldemaske. Am 2026-09-07 auf LENOVO im
     # Handtest gesehen: wer hier etwas vertippt, wird abgemeldet und
     # bekommt als Begruendung eine Unwahrheit zu lesen.
     #

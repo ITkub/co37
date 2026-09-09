@@ -317,7 +317,7 @@ check("die Meldung sagt, woran es liegt",
 #
 # Diese beiden Zeilen waren unter Linux von Anfang an gruen und haben
 # den Fehler trotzdem nicht gesehen, weil sie nie unter Windows liefen.
-# Am 2026-09-07 auf KK-LENOVO gemessen: der Aufruf brach NICHT ab,
+# Am 2026-09-07 auf LENOVO gemessen: der Aufruf brach NICHT ab,
 # sondern blieb an einer Eingabeaufforderung stehen, die getpass an
 # stdin vorbei auf die Konsole geschrieben hatte. Grund war
 # sys.stdin.isatty() - unter Windows ist NUL ein Zeichengeraet, und

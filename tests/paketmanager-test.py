@@ -554,7 +554,7 @@ check("der Bau prueft das fertige Paket nach",
 
 # Der Buildroot wird NICHT vorgegeben, sondern im %install-Abschnitt
 # gefuellt. Gemessen am 2026-09-09: mit rpm 4.18.2 lief beides, mit
-# 4.20.1 auf KK-OPS01 nur noch dieser Weg - ab 4.20 bestimmt rpmbuild
+# 4.20.1 auf OPS01 nur noch dieser Weg - ab 4.20 bestimmt rpmbuild
 # den Buildroot selbst und uebergeht ein --define.
 #
 # Diese Pruefung liest den Quelltext, weil sie den Unterschied sonst
@@ -708,7 +708,7 @@ else:
 # zypper trennt globale Optionen von denen des Befehls. --non-interactive
 # gilt global und darf vor dem Verb stehen, --auto-agree-with-licenses
 # gehoert dem Befehl 'update' und muss dahinter. Stand es davor, brach
-# der Patchlauf am 2026-09-09 auf KK-LEAP sofort ab:
+# der Patchlauf am 2026-09-09 auf LEAP sofort ab:
 #
 #     Flag --auto-agree-with-licenses ist unbekannt.
 #

@@ -4,7 +4,7 @@ CO-37 - eine gewachsene Anlage hat ein anderes Schema als eine frische
 
 DER ANLASS
 
-Am 2026-09-07 endete "Token zurueckziehen" auf KK-OPS01 mit 500:
+Am 2026-09-07 endete "Token zurueckziehen" auf OPS01 mit 500:
 
     sqlite3.IntegrityError: NOT NULL constraint failed:
     host.agent_token_hash
@@ -104,13 +104,13 @@ check("dabei wurden ueberhaupt Tabellen betrachtet",
 
 
 # ======================================================================
-# Der Fall von KK-OPS01, nachgebaut
+# Der Fall von OPS01, nachgebaut
 # ======================================================================
 print()
 print("--- host.agent_token_hash als NOT NULL, wie auf einer alten Anlage ---")
 # Nachgebaut wird die Tabelle so, wie eine alte Fassung sie angelegt hat:
 # dieselben Spalten, aber agent_token_hash ohne Nullbarkeit. Genau das
-# steht auf KK-OPS01.
+# steht auf OPS01.
 alt = TMP / "alt.db"
 motor_alt = create_engine(f"sqlite:///{alt}")
 SQLModel.metadata.create_all(motor_alt)
@@ -332,7 +332,7 @@ def mit_falscher_zeilenzahl(arbeit):
         migrate._zeilen = echt
 
 
-# Genau die Form von KK-OPS01: agent_token_hash strenger, eine Reihe
+# Genau die Form von OPS01: agent_token_hash strenger, eine Reihe
 # spaeter ergaenzter Spalten lockerer.
 LOCKER = ("last_seen_secure", "updates_require_reboot", "downtime_minutes",
           "checkmk_downtime_all", "patch_enabled", "patch_auto_reboot",
@@ -342,7 +342,7 @@ _alt_machen(motor_u, "host", streng=("agent_token_hash", "created_at"),
 
 # Daten hinein - drei Hosts, damit ein Verlust auffiele.
 with motor_u.begin() as conn:
-    for i, name in enumerate(("KK-EINS", "KK-ZWEI", "KK-DREI")):
+    for i, name in enumerate(("EINS", "ZWEI", "DREI")):
         host_einfuegen(conn, name, f"hash{i}", i)
     conn.execute(text(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_host_hostname_nocase "
@@ -378,11 +378,11 @@ with motor_u.connect() as conn:
     check("die Inhalte stimmen noch",
           [r[0] for r in conn.execute(text(
               "SELECT hostname FROM host ORDER BY hostname")).fetchall()]
-          == ["KK-DREI", "KK-EINS", "KK-ZWEI"])
+          == ["DREI", "EINS", "ZWEI"])
     check("agent_token_hash ist erhalten",
           conn.execute(text(
               "SELECT agent_token_hash FROM host "
-              "WHERE hostname='KK-EINS'")).scalar() == "hash0")
+              "WHERE hostname='EINS'")).scalar() == "hash0")
     check("die Datenbank ist unversehrt",
           conn.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok")
     check("keine gebrochenen Fremdschluessel",
@@ -396,7 +396,7 @@ with motor_u.connect() as conn:
 # ueber lower(hostname) und kommt nicht aus dem Modell.
 with motor_u.begin() as conn:
     try:
-        host_einfuegen(conn, "kk-eins", "x")
+        host_einfuegen(conn, "eins", "x")
         doppelt = True
     except Exception:  # noqa: BLE001
         doppelt = False
@@ -406,11 +406,11 @@ check("der eindeutige Index ueber lower(hostname) haelt weiterhin",
 # Und die eigentliche Wirkung, um die es ging.
 with motor_u.begin() as conn:
     conn.execute(text(
-        "UPDATE host SET agent_token_hash = NULL WHERE hostname='KK-ZWEI'"))
+        "UPDATE host SET agent_token_hash = NULL WHERE hostname='ZWEI'"))
 check("das Zuruecknehmen eines Tokens geht jetzt",
       motor_u.connect().execute(text(
           "SELECT agent_token_hash FROM host "
-          "WHERE hostname='KK-ZWEI'")).scalar() is None)
+          "WHERE hostname='ZWEI'")).scalar() is None)
 
 # Ein zweiter Lauf darf nichts mehr tun. Eine Migration, die bei jedem
 # Start Tabellen neu baut, waere bei jedem Neustart ein Datenrisiko.
@@ -434,7 +434,7 @@ motor_s = create_engine(f"sqlite:///{sperr}")
 SQLModel.metadata.create_all(motor_s)
 _alt_machen(motor_s, "host", streng=("agent_token_hash",), locker=("sort_order",))
 with motor_s.begin() as conn:
-    host_einfuegen(conn, "KK-LEER")
+    host_einfuegen(conn, "LEER")
     conn.execute(text("UPDATE host SET sort_order = NULL"))
 
 bericht_s = migrate.migrate(motor_s)
@@ -482,7 +482,7 @@ check("der Aufruf von Hand oeffnet die Datei mit mode=ro",
 # ======================================================================
 print()
 print("--- Ein Index auf einer entfallenen Spalte ---")
-# Der Fall von KK-OPS01 am 2026-09-08, und der Grund, warum der Umbau
+# Der Fall von OPS01 am 2026-09-08, und der Grund, warum der Umbau
 # dort NICHT lief: die Tabelle traegt einen Index auf checkmk_host, eine
 # der Altspalten aus OBSOLETE. Der Umbau laesst solche Spalten wegfallen
 # und legt danach die vorgefundenen Indizes wieder an - einer davon zeigt
@@ -494,8 +494,8 @@ SQLModel.metadata.create_all(motor_a)
 _alt_machen(motor_a, "host", streng=("agent_token_hash",), locker=LOCKER,
             zusatz=("checkmk_host VARCHAR",))
 with motor_a.begin() as conn:
-    host_einfuegen(conn, "KK-ALT-A", "hash-alt-a", 1)
-    host_einfuegen(conn, "KK-ALT-B", "hash-alt-b", 2)
+    host_einfuegen(conn, "ALT-A", "hash-alt-a", 1)
+    host_einfuegen(conn, "ALT-B", "hash-alt-b", 2)
     conn.execute(text(
         "CREATE INDEX ix_host_checkmk_host ON host (checkmk_host)"))
     conn.execute(text(
@@ -553,7 +553,7 @@ for beschreibung, anweisung, erwartet in FAELLE:
 
 print()
 print("--- Doppelte Werte halten den Umbau an, bevor er anfaengt ---")
-# Auf KK-OPS01 am 2026-09-08: der Umbau lief nicht, der Abgleich meldete
+# Auf OPS01 am 2026-09-08: der Umbau lief nicht, der Abgleich meldete
 # weiter zehn Abweichungen, und im Bericht stand eine rohe
 # IntegrityError. Die sagt nicht, WELCHE Spalte und wie viele Zeilen -
 # also genau das, was als Naechstes gefragt wird.
@@ -565,8 +565,8 @@ motor_d = create_engine(f"sqlite:///{dopp}")
 SQLModel.metadata.create_all(motor_d)
 _alt_machen(motor_d, "host", streng=("agent_token_hash",), locker=LOCKER)
 with motor_d.begin() as conn:
-    host_einfuegen(conn, "KK-D-A", "derselbe-wert", 1)
-    host_einfuegen(conn, "KK-D-B", "derselbe-wert", 2)
+    host_einfuegen(conn, "D-A", "derselbe-wert", 1)
+    host_einfuegen(conn, "D-B", "derselbe-wert", 2)
 
 bericht_d = migrate.migrate(motor_d)
 treffer_d = [z for z in bericht_d["problems"] if "Eindeutigkeit" in z]
@@ -596,8 +596,8 @@ motor_n = create_engine(f"sqlite:///{ohne}")
 SQLModel.metadata.create_all(motor_n)
 _alt_machen(motor_n, "host", streng=("created_at",), locker=LOCKER)
 with motor_n.begin() as conn:
-    host_einfuegen(conn, "KK-N-A", "x", 1)
-    host_einfuegen(conn, "KK-N-B", "y", 2)
+    host_einfuegen(conn, "N-A", "x", 1)
+    host_einfuegen(conn, "N-B", "y", 2)
     conn.execute(text("UPDATE host SET agent_token_hash = NULL"))
 
 bericht_n = migrate.migrate(motor_n)
@@ -626,8 +626,8 @@ motor_k = create_engine(f"sqlite:///{kaputt}")
 SQLModel.metadata.create_all(motor_k)
 _alt_machen(motor_k, "host", streng=("agent_token_hash",), locker=LOCKER)
 with motor_k.begin() as conn:
-    host_einfuegen(conn, "KK-A", "hash-a")
-    host_einfuegen(conn, "KK-B", "hash-b")
+    host_einfuegen(conn, "A", "hash-a")
+    host_einfuegen(conn, "B", "hash-b")
 
 bericht_k = mit_falscher_zeilenzahl(lambda: migrate.migrate(motor_k))
 with motor_k.connect() as conn:
@@ -647,7 +647,7 @@ check("der Bericht sagt, dass es nicht ging",
 #
 # Bis 0.37.24 stand ein misslungener Umbau nur in notes. main.py gab
 # notes aber nur aus, wenn ausserdem etwas ergaenzt oder umgebaut wurde -
-# und ein misslungener Umbau tut genau das nicht. Auf KK-OPS01 blieb der
+# und ein misslungener Umbau tut genau das nicht. Auf OPS01 blieb der
 # Grund deshalb unsichtbar: der Abgleich meldete weiter zehn
 # Abweichungen, und das Protokoll schwieg dazu.
 check("und zwar in problems, nicht nur in notes",
@@ -682,7 +682,7 @@ motor_l = create_engine(f"sqlite:///{luege}")
 SQLModel.metadata.create_all(motor_l)
 _alt_machen(motor_l, "host", streng=("agent_token_hash",), locker=LOCKER)
 with motor_l.begin() as conn:
-    host_einfuegen(conn, "KK-ZAEHL", "z1")
+    host_einfuegen(conn, "ZAEHL", "z1")
 
 migrate._zeilen = _luegen
 try:
@@ -755,8 +755,8 @@ motor_o = create_engine(f"sqlite:///{ohne_reset}", pool_reset_on_return=None)
 SQLModel.metadata.create_all(motor_o)
 _alt_machen(motor_o, "host", streng=("agent_token_hash",), locker=LOCKER)
 with motor_o.begin() as conn:
-    host_einfuegen(conn, "KK-O-A", "hash-o-a")
-    host_einfuegen(conn, "KK-O-B", "hash-o-b")
+    host_einfuegen(conn, "O-A", "hash-o-a")
+    host_einfuegen(conn, "O-B", "hash-o-b")
 
 bericht_o = mit_falscher_zeilenzahl(lambda: migrate.migrate(motor_o))
 check("der Umbau ist misslungen, wie vorgesehen",
@@ -784,7 +784,7 @@ sperre = create_engine(f"sqlite:///{ohne_reset}",
                        connect_args={"timeout": 2})
 try:
     with sperre.begin() as conn:
-        host_einfuegen(conn, "KK-NACH-DEM-FEHLER", "frei", 42)
+        host_einfuegen(conn, "NACH-DEM-FEHLER", "frei", 42)
     ging_los = True
     fehlermeldung = ""
 except Exception as exc:                                    # noqa: BLE001
@@ -856,7 +856,7 @@ SQLModel.metadata.create_all(motor22)
 with motor22.begin() as conn:
     tabelle_lockern(conn, "host", JSON_SPALTEN)
     tabelle_lockern(conn, "area", AREA_SPALTEN)
-    host_einfuegen(conn, "KK-ALT-NULL", "tok22")
+    host_einfuegen(conn, "ALT-NULL", "tok22")
     conn.execute(text(
         "INSERT INTO area (name, sort_order, checkmk_downtime_all, "
         "downtime_minutes, patch_enabled, patch_auto_reboot, "
@@ -906,7 +906,7 @@ with motor22.connect() as conn:
     _nachher = conn.execute(text(
         "SELECT hostname, tags, reboot_reasons, checkmk_hosts, patch_days "
         "FROM host")).fetchone()
-check("die Zeile ist noch da", _nachher and _nachher[0] == "KK-ALT-NULL",
+check("die Zeile ist noch da", _nachher and _nachher[0] == "ALT-NULL",
       _nachher)
 check("aus NULL wurde eine leere Liste",
       all(v == "[]" for v in _nachher[1:]), _nachher)

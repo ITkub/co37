@@ -16,7 +16,7 @@ Die beiden Betriebssysteme meinen mit dieser Option nicht dasselbe.
   Windows erlaubt das Binden, OBWOHL ein anderer Prozess dort schon
           lauscht. Der Port sah damit immer frei aus.
 
-Nachgemessen am 2026-09-07 auf KK-LENOVO: die Reihe 'harness' belegte
+Nachgemessen am 2026-09-07 auf LENOVO: die Reihe 'harness' belegte
 einen Port und liess run-tests.sh darauf los - das Backend startete
 anstandslos. Der Schutz, der verhindern soll, dass die Tests gegen einen
 fremden Dienst laufen, war unter Windows also gar keiner.

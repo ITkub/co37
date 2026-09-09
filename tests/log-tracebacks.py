@@ -25,7 +25,7 @@ import sys
 # WinError 10054 aus asyncio/proactor_events: unter Windows schliesst
 # der Client die Verbindung, bevor der Server sie zurueckbaut. Der
 # Auszug entsteht in der Ereignisschleife von Python, nicht in CO-37,
-# und er kam am 2026-09-08 bei jedem Lauf auf KK-LENOVO. Eine Warnung,
+# und er kam am 2026-09-08 bei jedem Lauf auf LENOVO. Eine Warnung,
 # die immer da ist, bringt einem das Wegsehen bei.
 HARMLOS = (
     ("proactor_events", "WinError 10054"),

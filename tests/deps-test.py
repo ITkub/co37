@@ -133,7 +133,7 @@ def huelle():
     # Bedingungen, die von der PLATTFORM abhaengen und nicht vom Paket.
     # Ein Paket, das nur ueber eine solche Kante erreichbar ist, gehoert
     # nicht in die Datei: die wird auf der Zielplattform erzeugt
-    # (KK-OPS01, Linux), und dort gibt es das Paket gar nicht.
+    # (OPS01, Linux), und dort gibt es das Paket gar nicht.
     #
     # Aufgefallen am 2026-09-07 beim ersten Lauf unter Windows: click
     # verlangt dort colorama, unter Linux nicht. Die Reihe meldete
@@ -238,7 +238,7 @@ if ueberfluessig:
 # vergleichen, und ein Fehlschlag deswegen waere eine Falschmeldung.
 #
 # STRENG nur fuer die ausgesuchten Pakete. Die mittelbaren werden zwar
-# gepinnt, aber die Datei wird auf der Zielplattform erzeugt (KK-OPS01,
+# gepinnt, aber die Datei wird auf der Zielplattform erzeugt (OPS01,
 # Python 3.13); wer die Reihe woanders laufen laesst, hat dort eine
 # andere Aufloesung im System stehen. Eine Reihe, die deswegen rot wird,
 # meldet den falschen Grund - und genau davor warnt der Kommentar hier

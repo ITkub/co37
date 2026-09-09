@@ -145,7 +145,7 @@ if CONF.exists():
 # Beim Upgrade per Doppelklick gibt niemand CO37SERVER auf der
 # Befehlszeile mit; ohne den 'server' aus der vorhandenen Datei stand
 # dann gar keine Adresse mehr da, das Skript beendete sich mit exit(1),
-# und der Installer meldete Fehler 1721. Auf KK-WIN01 am 2026-09-01
+# und der Installer meldete Fehler 1721. Auf WIN01 am 2026-09-01
 # passiert, in 0.37.11 zurueckgenommen.
 #
 # GEKLAERT am 2026-09-01 auf einem Windows-Testhost. Der Gedanke, eine
@@ -297,7 +297,7 @@ def registriere_aufgabe():
 # wieder her. Der Host steht dann ganz ohne Agent da und meldet sich nie
 # wieder.
 #
-# Genau so passiert am 2026-09-01 auf KK-WIN01: eine Haertung verwarf den
+# Genau so passiert am 2026-09-01 auf WIN01: eine Haertung verwarf den
 # 'server' aus der vorhandenen agent.conf, das Skript brach hier ab, und
 # der Host war anschliessend still. Erst dieser Vorfall hat gezeigt, dass
 # die Abwaegung im alten Kommentar falsch herum stand: dort hiess es
