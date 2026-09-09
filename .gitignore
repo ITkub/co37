@@ -73,3 +73,11 @@ venv/
 Thumbs.db
 desktop.ini
 OPS_*_Edition_*.pdf
+
+# ======================================================================
+# Nicht ins oeffentliche Repository
+# ======================================================================
+# Arbeitsstaende und Geschaeftspost. Die PDF-Regel gilt nur im
+# Wurzelverzeichnis - PDFs in Unterordnern bleiben versionierbar.
+Claude outputs/
+/*.pdf
