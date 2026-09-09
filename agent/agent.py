@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.33"
+AGENT_VERSION = "0.38.0"
 IS_WINDOWS = platform.system() == "Windows"
 
 

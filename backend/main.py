@@ -190,10 +190,33 @@ async def lifespan(app: FastAPI):
     yield
 
 
+# Die eingebaute API-Beschreibung ist AB WERK AUS.
+#
+# /docs, /redoc und /openapi.json haengen an keiner Anmeldung; der
+# HTTPS-Zwang prueft nur das Schema. Wer den Server erreicht, bekaeme
+# sonst unangemeldet die vollstaendige Routenkarte samt interaktivem
+# Tester - fuer ein Werkzeug, dessen Administrator auf jedem Host
+# Auftraege als SYSTEM anlegen kann, senkt das einem Angreifer die
+# Einarbeitung auf null (Blackbox-Lauf 2026-09-09, B-01). Die Oberflaeche
+# braucht die Beschreibung nicht.
+#
+# Wer sie doch will - etwa eigene Entwickler -, setzt CO37_API_DOCS in
+# backend.env auf einen Wert; dann ist sie wie zuvor unangemeldet offen,
+# eine bewusste Entscheidung des Betreibers. Gleiche Bauform wie
+# CO37_AUDIT_ARCHIVE.
+#
+# Der Fuzzing-Lauf (Runde 6) braucht die openapi.json NICHT ueber diese
+# Route: sie laesst sich mit app.openapi() aus dem App-Objekt erzeugen -
+# siehe den Kommentar oben in tests/eingaben-test.py.
+API_DOCS = os.getenv("CO37_API_DOCS", "").strip()
+
 app = FastAPI(
     title="CO-37",
     version=update_manager.get_current_version(),
     lifespan=lifespan,
+    docs_url="/docs" if API_DOCS else None,
+    redoc_url="/redoc" if API_DOCS else None,
+    openapi_url="/openapi.json" if API_DOCS else None,
 )
 
 # CORS: standardmaessig gar keine fremde Herkunft.

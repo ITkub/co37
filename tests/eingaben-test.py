@@ -57,6 +57,11 @@ Braucht ein laufendes Backend mit eigener Testdatenbank.
 
 Fuzzing-Lauf von Hand (Backend auf 8123, Sitzung in $S, Agent-Token in $T):
 
+    # openapi.json aus dem App-Objekt erzeugen - die HTTP-Route ist ab
+    # Werk aus (B-01). Braucht die Backend-Abhaengigkeiten im Pfad.
+    python3 -c "import json,sys; sys.path.insert(0,'backend'); import main; \\
+      json.dump(main.app.openapi(), open('openapi.json','w'))"
+
     schemathesis run ./openapi.json --url http://127.0.0.1:8123 \\
       -H "X-Session: $S" -H "X-Agent-Token: $T" \\
       --checks not_a_server_error --continue-on-failure

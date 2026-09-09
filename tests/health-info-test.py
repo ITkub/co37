@@ -208,5 +208,48 @@ check("der 503-Zweig fragt, wer zusehen darf",
 check("missing steht im 503-Zweig nicht mehr bedingungslos drin",
       '"missing": missing' not in _block, _block[-300:])
 
+
+# ======================================================================
+# Die eingebaute API-Beschreibung ist ab Werk aus (B-01)
+# ======================================================================
+# /docs, /redoc und /openapi.json haengen an keiner Anmeldung. Ab Werk
+# sollen sie gar nicht erst registriert sein; ein Schalter CO37_API_DOCS
+# schaltet sie bewusst wieder ein. Blackbox-Lauf 2026-09-09.
+#
+# Diese Reihe laeuft OHNE CO37_API_DOCS - also der Auslieferungszustand.
+# Geprueft wird das Verhalten (404 ueber den Router), nicht nur das
+# Attribut; und der Ein-Zustand in einem eigenen Prozess, sonst ueberlebt
+# eine Mutation, die den Schalter ignoriert und fest None schreibt.
+from starlette.testclient import TestClient  # noqa: E402
+import subprocess as _sp  # noqa: E402
+
+_DOKUPFADE = ("/docs", "/redoc", "/openapi.json")
+
+with TestClient(main.app) as _c:
+    for _pfad in _DOKUPFADE:
+        _r = _c.get(_pfad)
+        check(f"{_pfad} ist unangemeldet nicht erreichbar (ab Werk)",
+              _r.status_code == 404, _r.status_code)
+
+_registriert = {getattr(r, "path", None) for r in main.app.routes}
+check("keiner der Dokupfade ist ab Werk registriert",
+      not any(p in _registriert for p in _DOKUPFADE),
+      sorted(p for p in _DOKUPFADE if p in _registriert))
+
+# Der Ein-Zustand: eigener Prozess mit gesetztem Schalter. Beweist, dass
+# der Schalter wirkt - und schlaegt an, wenn jemand die drei Routen fest
+# abschaltet statt an CO37_API_DOCS zu haengen.
+_prog = ("import main;"
+         "p={getattr(r,'path',None) for r in main.app.routes};"
+         "print(int(all(x in p for x in ('/docs','/redoc','/openapi.json'))))")
+_umg = dict(os.environ, CO37_API_DOCS="1", CO37_DB=f"sqlite:///{TMP}/ein.db",
+            CO37_DATA=str(TMP), CO37_SECRET_KEY="test")
+_erg = _sp.run([sys.executable, "-c", _prog],
+               cwd=str(WURZEL / "backend"), env=_umg,
+               capture_output=True, text=True)
+check("mit CO37_API_DOCS werden die drei Routen registriert",
+      _erg.stdout.strip().endswith("1"), (_erg.stdout + _erg.stderr).strip()[-200:])
+
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
