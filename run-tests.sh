@@ -220,6 +220,7 @@ REIHEN=(
   "totp            $PY tests/totp-test.py"
   "qr              $PY tests/qr-test.py"
   "schema-drift    $PY tests/schema-drift-test.py"
+  "paketmanager    $PY tests/paketmanager-test.py"
   "agent-selfheal  $PY tests/agent-selfheal-test.py"
   "reboot-report   $PY tests/reboot-report-test.py"
   "harness         $PY tests/harness-test.py"

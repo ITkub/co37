@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.25"
+AGENT_VERSION = "0.37.26"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -267,11 +267,28 @@ def api(method: str, path: str, payload=None, params=None, timeout=120, auth=Tru
     return resp.json() if resp.content else {}
 
 
-def run(cmd: list[str], timeout=3600) -> tuple[int, str]:
+# Umgebung fuer Aufrufe, deren AUSGABE ausgewertet wird.
+#
+# zypper und dnf uebersetzen ihre Meldungen. Auf einem deutschen System
+# heisst die Zeile, hinter der die zu aktualisierenden Pakete stehen,
+# nicht "The following packages are going to be upgraded" - und ein
+# Auswerter, der danach sucht, findet dort nichts und meldet null
+# Updates. Kein Fehler, keine Meldung, nur eine falsche Zahl.
+#
+# Bewusst NICHT fuer die Patchlaeufe selbst: deren Ausgabe liest ein
+# Mensch im Auftragsprotokoll, und die darf in seiner Sprache bleiben.
+C_UMGEBUNG = {"LC_ALL": "C", "LANG": "C"}
+
+
+def run(cmd: list[str], timeout=3600, env: dict = None) -> tuple[int, str]:
     try:
+        umgebung = None
+        if env:
+            umgebung = dict(os.environ)
+            umgebung.update(env)
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", env=umgebung,
         )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
@@ -472,6 +489,78 @@ def _which(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
+def _werkzeug_da(name: str) -> bool:
+    """
+    Liegt dieses Werkzeug auf dem System?
+
+    Erst der feste Pfad, dann PATH. Beides, weil keins allein reicht: der
+    Dienst startet mit eingeschraenktem PATH, und umgekehrt liegt nicht
+    jedes Werkzeug unter /usr/bin - 'needs-restarting' kommt auf manchen
+    Anlagen aus /usr/libexec.
+    """
+    if Path(f"/usr/bin/{name}").exists():
+        return True
+    return _which(name)
+
+
+def _os_release() -> dict:
+    """
+    /etc/os-release als Woerterbuch, oder leer.
+
+    Die Datei ist der einzige Weg, eine Linux-Anlage verlaesslich zu
+    benennen: sie ist genormt (freedesktop.org), liegt auf jeder
+    systemd-Anlage und nennt sich selbst - im Gegensatz zu Rateschluessen
+    ueber Dateinamen oder den Hostnamen.
+    """
+    werte = {}
+    try:
+        for zeile in Path("/etc/os-release").read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            zeile = zeile.strip()
+            if not zeile or zeile.startswith("#") or "=" not in zeile:
+                continue
+            schluessel, wert = zeile.split("=", 1)
+            werte[schluessel.strip()] = wert.strip().strip('"\'')
+    except Exception:  # noqa: BLE001
+        return {}
+    return werte
+
+
+def is_tumbleweed() -> bool:
+    """
+    openSUSE Tumbleweed - eine rollende Anlage.
+
+    Wichtig, weil dort 'zypper update' der FALSCHE Befehl ist: Tumbleweed
+    wird mit 'zypper dup' aktualisiert, und ein 'update' laesst Pakete
+    zurueck, deren Abhaengigkeiten sich geaendert haben. Dasselbe
+    Verhaeltnis wie apt-get upgrade zu dist-upgrade auf Proxmox.
+    """
+    return _os_release().get("ID", "") == "opensuse-tumbleweed"
+
+
+def paketmanager() -> str:
+    """
+    Welcher Paketmanager auf dieser Anlage gilt: apt, zypper, dnf, yum
+    oder '' (keiner erkannt).
+
+    An einer Stelle statt an fuenfen. Vorher stand die Erkennung dreimal
+    im Quelltext - im Scan, im Patchlauf und bei der Neustartpruefung -,
+    jedes Mal etwas anders geschrieben, und die zypper-Haelfte fehlte in
+    zweien davon.
+
+    Die Reihenfolge ist nicht beliebig. apt zuerst, weil ein Debian mit
+    nachtraeglich installiertem dnf sonst als RPM-Anlage gaelte. yum
+    zuletzt, weil es auf RHEL seit Jahren nur noch eine Verknuepfung auf
+    dnf ist - wer beides findet, will dnf.
+    """
+    if IS_WINDOWS:
+        return ""
+    for name in ("apt-get", "zypper", "dnf", "yum"):
+        if _werkzeug_da(name):
+            return "apt" if name == "apt-get" else name
+    return ""
+
+
 def is_proxmox() -> bool:
     """
     Erkennt Proxmox VE eindeutig - keine Heuristik ueber Hostnamen o.ae.
@@ -553,16 +642,44 @@ def reboot_reasons() -> list[str]:
     if Path("/var/run/reboot-required").exists():
         return ["package_manager"]
 
-    # RHEL / Rocky / Alma - nur wenn das Werkzeug wirklich vorhanden ist.
-    # Exit 1 = Neustart noetig, 0 = nicht noetig.
-    if _which("needs-restarting"):
-        code, _ = run(["needs-restarting", "-r"], timeout=180)
-        if code == 1:
+    # SUSE - 'zypper needs-rebooting' gibt es seit zypper 1.14.28
+    # (SLES 15 SP2, Leap 15.2). Rueckgabe 102 = Neustart noetig, 0 =
+    # nicht noetig; alles andere heisst "kennt den Unterbefehl nicht",
+    # und dann faellt es auf den Kernelvergleich zurueck.
+    #
+    # NICHT 'zypper ps -s'. Das beantwortet eine andere Frage - welche
+    # PROZESSE laufende Dateien benutzen, die ersetzt wurden - und ist
+    # keine Aussage ueber einen Neustart. Es stand hier bis 0.37.25 als
+    # Aufruf, dessen Ergebnis verworfen wurde: bis zu drei Minuten
+    # Laufzeit bei jedem Heartbeat, ohne dass er etwas entschied.
+    if _werkzeug_da("zypper"):
+        code, _ = run(["zypper", "--non-interactive", "needs-rebooting"],
+                      timeout=180, env=C_UMGEBUNG)
+        if code == 102:
             return ["package_manager"]
         if code == 0:
             return []
 
-    return _kernel_mismatch_reason()
+    # RHEL / Oracle / Rocky / Alma - nur wenn das Werkzeug wirklich da
+    # ist. Exit 1 = Neustart noetig, 0 = nicht noetig.
+    #
+    # Zwei Aufrufformen, weil es zwei gibt: das eigenstaendige
+    # 'needs-restarting' aus dnf-utils und, seit dnf5, der Unterbefehl
+    # 'dnf needs-restarting'. Auf RHEL 10 liegt nur noch der Unterbefehl
+    # bei. Wer nur die alte Form kennt, faellt dort still auf den
+    # Kernelvergleich zurueck und meldet einen ausstehenden Neustart bei
+    # jedem Paket, das gar keinen braucht.
+    if _werkzeug_da("needs-restarting"):
+        code, _ = run(["needs-restarting", "-r"], timeout=180, env=C_UMGEBUNG)
+        if code in (0, 1):
+            return ["package_manager"] if code == 1 else []
+    if _werkzeug_da("dnf"):
+        code, _ = run(["dnf", "needs-restarting", "-r"], timeout=180,
+                      env=C_UMGEBUNG)
+        if code in (0, 1):
+            return ["package_manager"] if code == 1 else []
+
+    return _kernel_verschwunden_reason()
 
 
 def reboot_required_strong() -> bool:
@@ -581,39 +698,85 @@ def reboot_required_strong() -> bool:
     return bool(set(reboot_reasons()) - WEAK_REBOOT_REASONS)
 
 
-def _kernel_mismatch_reason() -> list[str]:
-    # Arch / openSUSE und Fallback: laufenden Kernel gegen den
-    # installierten vergleichen.
-    if _which("zypper"):
-        code, _ = run(["zypper", "ps", "-s"], timeout=180)
+def _kernel_namen(boot: Path) -> set:
+    """
+    Die Kernelversionen, die in /boot liegen - aus den Dateinamen.
 
-    code, running = run(["uname", "-r"], timeout=30)
+    Der Dateiname traegt genau das, was 'uname -r' spaeter meldet; das
+    gilt auf Debian, RHEL und SUSE gleichermassen. Aus den Paketdaten
+    liesse es sich nicht ablesen: SUSE haengt die Kernelvariante an
+    ('6.12.0-160000.35-default'), waehrend das RPM anders heisst.
+    """
+    namen = set()
+    try:
+        eintraege = list(boot.glob("vmlinuz-*"))
+    except OSError:
+        return namen
+    for eintrag in eintraege:
+        namen.add(eintrag.name[len("vmlinuz-"):])
+    return namen
+
+
+def _laufender_kernel_weg(namen: set, laufend: str) -> bool:
+    """
+    Laeuft ein Kernel, den es in /boot gar nicht mehr gibt?
+
+    Das ist die einzige Aussage, die dieser Rueckfall sicher treffen
+    kann - und der Weg dorthin ist zweimal falsch abgebogen. Beide Male
+    haetten die Testreihen es nicht gemerkt; gefunden hat es erst eine
+    Messung auf einer echten Anlage:
+
+    ERSTER VERSUCH, "neuestes Abbild gegen laufenden Kernel". Auf
+    Oracle Linux 10.2 gemessen:
+
+        uname -r   6.12.0-204.92.4.2.el10uek.x86_64
+        /boot      vmlinuz-0-rescue-05ac793a...        <- die juengste Datei
+                   vmlinuz-6.12.0-204...el10uek        <- laeuft
+                   vmlinuz-6.12.0-211.7.3.el10_2       <- andere Variante
+
+    Das Rettungsabbild traegt gar keine Kernelversion, und Oracle haelt
+    zwei Kernelvarianten nebeneinander. "Neuestes ist nicht das
+    laufende" ist dort der Normalzustand.
+
+    ZWEITER VERSUCH, "ist seit dem Start ein Kernel dazugekommen". Auf
+    openSUSE Leap 16.0 gemessen:
+
+        Start                                   07:51:37
+        vmlinuz-6.12.0-160000.35-default        07:51:41
+
+    Die Kerneldateien werden dort waehrend des Bootens angefasst,
+    Sekunden NACH dem Start. Auch das haette dauerhaft einen Neustart
+    gemeldet, den es nicht gibt.
+
+    WAS BLEIBT: nur der Fall, in dem der laufende Kernel aus /boot
+    verschwunden ist. Dann ist ein Neustart zweifelsfrei faellig.
+
+    Was dieser Rueckfall NICHT sieht: einen neu installierten Kernel,
+    der neben dem laufenden liegt. Das ist bewusst so. Auf allen drei
+    unterstuetzten Familien beantwortet diese Frage das jeweilige
+    Werkzeug - /var/run/reboot-required, 'dnf needs-restarting -r',
+    'zypper needs-rebooting' -, und die stehen alle vor diesem
+    Rueckfall. Er greift nur, wenn keins davon geantwortet hat. Ein
+    Melder, der dauerhaft "Neustart noetig" sagt, ist dort schlechter
+    als einer, der schweigt: nach der dritten falschen Meldung sieht
+    niemand mehr hin.
+    """
+    if not namen or not laufend:
+        return False
+    return laufend not in namen
+
+
+def _kernel_verschwunden_reason() -> list[str]:
+    """Der Rueckfall, wenn kein Werkzeug der Anlage geantwortet hat."""
+    boot = Path("/boot")
+    if not boot.is_dir():
+        return []
+    code, laufend = run(["uname", "-r"], timeout=30)
     if code != 0:
         return []
-    running = running.strip()
-
-    newest = ""
-    boot = Path("/boot")
-    if boot.is_dir():
-        versions = []
-        for entry in boot.glob("vmlinuz-*"):
-            versions.append(entry.name.replace("vmlinuz-", ""))
-        if versions:
-            # Debian-Versionsvergleich, wo verfuegbar
-            if _which("dpkg"):
-                newest = versions[0]
-                for cand in versions[1:]:
-                    code, _ = run(["dpkg", "--compare-versions", cand, "gt", newest], timeout=15)
-                    if code == 0:
-                        newest = cand
-            else:
-                newest = sorted(versions)[-1]
-
-    if newest and running and newest != running:
+    if _laufender_kernel_weg(_kernel_namen(boot), laufend.strip()):
         return ["kernel"]
-
     return []
-
 
 # ======================================================================
 # Update-Scan
@@ -653,10 +816,185 @@ def scan_windows() -> list[dict]:
     return data if isinstance(data, list) else [data]
 
 
+def _dnf_zeilen(out: str) -> list[tuple]:
+    """
+    Die Paketzeilen aus 'dnf check-update', als (Name, neue Version).
+
+    Zwei Dinge, die eine einfache Zerlegung uebersieht:
+
+    1. dnf BRICHT UM. Ist der Name lang, steht 'name.arch' allein auf
+       einer Zeile und Version und Quelle eingerueckt darunter:
+
+           NetworkManager-config-server.noarch
+                                   1:1.46.0-1.el9    baseos
+
+       Eine Zerlegung, die drei Felder je Zeile verlangt, verwirft beide
+       Haelften - das Paket fehlt im Scan, ohne dass irgendwo etwas
+       schiefgeht. Ausgerechnet die langen Namen fallen weg.
+
+    2. Der Name traegt die Architektur. 'bash.x86_64' ist kein
+       Paketname; angezeigt und mit der Sicherheitsliste verglichen
+       gehoert 'bash'.
+
+       Abgeschnitten wird der letzte Punktabschnitt, ohne Liste
+       bekannter Architekturen. Das sieht zuerst zu grob aus - aus
+       'python3.11' wuerde 'python3' -, ist es aber nicht: in der ersten
+       Spalte von check-update steht IMMER 'name.arch', also
+       'python3.11.x86_64'. Eine Liste haette nur den Fall geaendert, in
+       dem die Architektur nicht darauf steht, und dort das Falsche
+       getan: 'foo.loongarch64' bliebe mit Architektur stehen.
+    """
+    def ohne_arch(name: str) -> str:
+        stamm, punkt, _ = name.rpartition(".")
+        return stamm if punkt and stamm else name
+
+    # Kopfzeilen und der Abschnitt 'Obsoleting Packages' am Ende gehoeren
+    # nicht dazu. Der Abschnitt hat eine eigene Ueberschrift und danach
+    # Zeilen derselben Form - ohne die Abbruchbedingung landeten sie als
+    # Aktualisierungen im Bericht.
+    zeilen = []
+    offen = ""
+    for zeile in out.splitlines():
+        if not zeile.strip():
+            offen = ""
+            continue
+        if zeile.startswith(("Last metadata", "Obsoleting", "Security:",
+                             "Updating", "Available Upgrades")):
+            if zeile.startswith("Obsoleting"):
+                break
+            offen = ""
+            continue
+        teile = zeile.split()
+        if offen:
+            if len(teile) >= 2:
+                zeilen.append((ohne_arch(offen), teile[0]))
+            offen = ""
+            continue
+        if len(teile) == 1:
+            offen = teile[0]
+            continue
+        if len(teile) >= 3:
+            zeilen.append((ohne_arch(teile[0]), teile[1]))
+    return zeilen
+
+
+# Die Kopfzeile, hinter der die zu aktualisierenden Pakete stehen -
+# beide Woerter muessen darin vorkommen. Als Konstante und nicht als
+# Literal im Aufruf, damit die Pruefreihe genau diese Wahl pruefen kann
+# und nicht ihre eigene.
+#
+# "packages" allein traefe auch "The following 26 NEW packages are going
+# to be installed:", "upgraded" allein nichts Zusaetzliches - aber beides
+# ist gemessen und nicht geraten: openSUSE Leap 16.0 gibt in einem
+# einzigen Trockenlauf vier solche Bloecke aus, drei davon sind nicht
+# gemeint.
+ZYPPER_KOPF = ("packages", "upgraded")
+
+
+def _zypper_block(out: str, kopfzeile_enthaelt: tuple) -> set[str]:
+    """
+    Die Namen aus einem Aufzaehlungsblock von zypper.
+
+    zypper schreibt eine Kopfzeile, die mit einem Doppelpunkt endet, und
+    darunter die Namen eingerueckt und umgebrochen:
+
+        The following 5 packages are going to be upgraded:
+          bash  glibc  libxml2  systemd  zlib
+
+    Der Block endet an der ersten Zeile, die nicht eingerueckt ist.
+    """
+    namen = set()
+    im_block = False
+    for zeile in out.splitlines():
+        if not zeile.strip():
+            im_block = False
+            continue
+        if not zeile[0].isspace():
+            im_block = (zeile.rstrip().endswith(":")
+                        and all(w in zeile for w in kopfzeile_enthaelt))
+            continue
+        if im_block:
+            namen.update(zeile.split())
+    return namen
+
+
+def _zypper_sicherheitspakete() -> set[str]:
+    """
+    Welche Pakete ein reiner Sicherheitslauf anfassen wuerde.
+
+    Auf SUSE haengt die Einstufung "Sicherheit" an PATCHES, nicht an
+    Paketen - 'zypper list-updates' weiss davon nichts, und ueber
+    'list-patches' kaeme man nur an Patchnamen wie
+    'openSUSE-SLE-15.6-2026-1234'. Den Weg von dort zu den Paketen
+    muesste man je Patch einzeln gehen.
+
+    Der Trockenlauf nennt sie dagegen direkt. Dasselbe Vorgehen wie auf
+    der Debian-Seite, wo der Scan 'apt-get -s' simuliert - und aus
+    demselben Grund: gefragt ist, was der Patchlauf tatsaechlich taete.
+
+    --with-interactive ist nicht optional, sondern der Kern der Sache.
+    zypper haelt einen Patch fuer "interaktiv", wenn er einen Neustart
+    verlangt oder eine Lizenz bestaetigt werden will, und ueberspringt
+    ihn ohne diesen Schalter still ("is interactive, skipping").
+    Gemessen am 2026-09-09 auf openSUSE Leap 16.0:
+
+        --category security                      114 Pakete
+        --category security --with-interactive   119 Pakete,
+                                                 darunter kernel-default
+
+    Ohne den Schalter faellt also ausgerechnet der Kernel aus der
+    Sicherheitseinstufung - der Patch, auf den es am meisten ankommt.
+    """
+    code, out = run(["zypper", "--non-interactive", "patch", "--dry-run",
+                     "--category", "security", "--with-interactive"],
+                    timeout=900, env=C_UMGEBUNG)
+    # Rueckgabewert absichtlich nicht geprueft: zypper meldet mit 100 bis
+    # 106 lauter Hinweise, die keine Fehler sind ("Updates verfuegbar",
+    # "Neustart noetig"). Was zaehlt, steht in der Ausgabe.
+    return _zypper_block(out, ZYPPER_KOPF)
+
+
+def scan_zypper() -> list[dict]:
+    """
+    Die Aktualisierungen einer SUSE-Anlage.
+
+    'list-updates' liefert eine Tabelle mit sechs Spalten, durch '|'
+    getrennt; die Zustandsspalte 'v' heisst "es gibt eine neuere
+    Fassung". Ausgewertet wird sie mit LC_ALL=C, sonst stehen dort
+    uebersetzte Ueberschriften und der Auswerter faende nichts.
+    """
+    run(["zypper", "--non-interactive", "refresh"], timeout=900,
+        env=C_UMGEBUNG)
+    code, out = run(["zypper", "--non-interactive", "--quiet",
+                     "list-updates"], timeout=900, env=C_UMGEBUNG)
+    sicher = _zypper_sicherheitspakete()
+
+    updates = []
+    for zeile in out.splitlines():
+        teile = [t.strip() for t in zeile.split("|")]
+        if len(teile) != 6 or teile[0] != "v":
+            continue
+        name = teile[2]
+        updates.append({
+            "id": name,
+            "title": name,
+            "new_version": teile[4],
+            "is_security": name in sicher,
+            # kernel-default, kernel-firmware, kernel-default-base - auf
+            # SUSE heisst das Kernelpaket nicht 'linux-image'.
+            "requires_reboot": name.startswith("kernel"),
+        })
+    return updates
+
+
 def scan_linux() -> list[dict]:
     updates = []
+    mgr = paketmanager()
 
-    if Path("/usr/bin/apt-get").exists():
+    if mgr == "zypper":
+        return scan_zypper()
+
+    if mgr == "apt":
         run(["apt-get", "update", "-qq"], timeout=600)
         # Muss denselben Modus simulieren, den patch_linux spaeter ausfuehrt.
         # Sonst zeigt der Scan Pakete an, die der Patchlauf nicht anfasst.
@@ -685,23 +1023,20 @@ def scan_linux() -> list[dict]:
             })
         return updates
 
-    if Path("/usr/bin/dnf").exists() or Path("/usr/bin/yum").exists():
-        mgr = "dnf" if Path("/usr/bin/dnf").exists() else "yum"
-        code, out = run([mgr, "-q", "check-update"], timeout=900)
+    if mgr in ("dnf", "yum"):
+        code, out = run([mgr, "-q", "check-update"], timeout=900,
+                        env=C_UMGEBUNG)
         sec_code, sec_out = run(
-            [mgr, "-q", "check-update", "--security"], timeout=900
+            [mgr, "-q", "check-update", "--security"], timeout=900,
+            env=C_UMGEBUNG
         )
-        sec_names = {l.split()[0] for l in sec_out.splitlines() if len(l.split()) >= 3}
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) < 3 or line.startswith(("Last metadata", "Obsoleting")):
-                continue
-            name = parts[0]
+        sicher = {name for name, _ in _dnf_zeilen(sec_out)}
+        for name, version in _dnf_zeilen(out):
             updates.append({
                 "id": name,
                 "title": name,
-                "new_version": parts[1],
-                "is_security": name in sec_names,
+                "new_version": version,
+                "is_security": name in sicher,
                 "requires_reboot": name.startswith("kernel"),
             })
         return updates
@@ -809,8 +1144,49 @@ def patch_windows(sink: LogSink) -> bool:
     return "INSTALL_RESULT=2" in tail
 
 
+# zypper meldet mit Rueckgabewerten ab 100 Hinweise, keine Fehler:
+# 100 Updates verfuegbar, 101 Sicherheitsupdates verfuegbar,
+# 102 NEUSTART NOETIG, 103 zypper selbst wurde erneuert.
+#
+# Die 102 ist die wichtige: sie kommt bei jedem Kernelupdate. Wer nur
+# auf 0 prueft, meldet ausgerechnet den folgenreichsten Patchlauf als
+# fehlgeschlagen - und CO-37 wuerde ihn wiederholen, statt neu zu starten.
+ZYPPER_OK = (0, 100, 101, 102, 103)
+
+
 def patch_linux(sink: LogSink) -> bool:
-    if Path("/usr/bin/apt-get").exists():
+    mgr = paketmanager()
+
+    if mgr == "zypper":
+        if is_tumbleweed():
+            # Lieber gar nichts als das Falsche. Auf einer rollenden
+            # Anlage ist 'zypper update' der falsche Befehl - richtig
+            # waere 'zypper dup', und das ist ein anderer Vorgang mit
+            # anderen Folgen. CO-37 hat ihn nie auf einer Tumbleweed-
+            # Anlage gemessen; bis dahin wird hier nicht geraten.
+            sink.write("openSUSE Tumbleweed erkannt. CO-37 patcht rollende "
+                       "Anlagen nicht - dort gilt 'zypper dup', und das ist "
+                       "ein anderer Vorgang. Der Scan laeuft weiter.")
+            return False
+        sink.write("Aktualisiere Paketlisten...", progress="Paketlisten")
+        run_streaming(["zypper", "--non-interactive", "refresh"],
+                      sink, timeout=900)
+        sink.write("")
+        sink.write("Installiere Aktualisierungen (zypper)...",
+                   progress="Installiere Pakete")
+        # --auto-agree-with-licenses: ohne das bricht zypper bei jedem
+        # Paket mit eigener Lizenz ab und meldet einen Fehler, den
+        # niemand beantworten kann - der Agent laeuft ohne Konsole.
+        code = run_streaming(
+            ["zypper", "--non-interactive", "--auto-agree-with-licenses",
+             "update"],
+            sink, timeout=7200, progress_prefix="Installiere Pakete",
+        )
+        if code == 102:
+            sink.write("zypper meldet: Neustart erforderlich.")
+        return code in ZYPPER_OK
+
+    if mgr == "apt":
         sink.write("Aktualisiere Paketlisten...", progress="Paketlisten")
         run_streaming(["sh", "-c", "DEBIAN_FRONTEND=noninteractive apt-get update"],
                       sink, timeout=900)
@@ -828,12 +1204,12 @@ def patch_linux(sink: LogSink) -> bool:
         )
         return code == 0
 
-    if Path("/usr/bin/dnf").exists():
+    if mgr == "dnf":
         sink.write("Installiere Aktualisierungen (dnf)...", progress="Installiere Pakete")
         return run_streaming(["dnf", "-y", "upgrade"], sink, timeout=7200,
                              progress_prefix="Installiere Pakete") == 0
 
-    if Path("/usr/bin/yum").exists():
+    if mgr == "yum":
         sink.write("Installiere Aktualisierungen (yum)...", progress="Installiere Pakete")
         return run_streaming(["yum", "-y", "update"], sink, timeout=7200,
                              progress_prefix="Installiere Pakete") == 0

@@ -54,8 +54,25 @@ if [ -n "$OLD" ]; then
   echo "$OLD" | while read -r f; do echo "    $(basename "$f")"; rm -f "$f"; done
 fi
 
-echo ">>> Linux-Paket (Agent-Version $VERSION)"
+echo ">>> Linux-Paket, Debian/Ubuntu (Agent-Version $VERSION)"
 "$PY" packaging/build_deb.py --version "$VERSION" --out "$OUT"
+
+# RPM fuer Red Hat, Oracle, Rocky, Alma und SUSE.
+#
+# Fehlt rpmbuild, entsteht kein RPM - aber der Bau bricht deswegen NICHT
+# ab: das .deb und das MSI sind davon nicht betroffen, und ein Server,
+# der keine RPM-Anlagen verwaltet, braucht das Paket nicht. Der Hinweis
+# muss dafuer deutlich sein; ein stillschweigend fehlendes Paket waere
+# genau das, was die MSI-Saga gelehrt hat.
+echo ">>> Linux-Paket, RPM (Agent-Version $VERSION)"
+if ! command -v rpmbuild >/dev/null 2>&1; then
+  echo "!!! rpmbuild fehlt. Installieren mit:  apt install rpm"
+  echo "    Ueberspringe RPM. Debian- und Windows-Paket sind davon"
+  echo "    nicht betroffen."
+else
+  "$PY" packaging/build_rpm.py --version "$VERSION" --out "$OUT" || \
+    echo "!!! RPM-Bau fehlgeschlagen, die uebrigen Pakete sind trotzdem da."
+fi
 
 if [ "${1:-}" = "--deb-only" ]; then
   echo ">>> Windows uebersprungen"

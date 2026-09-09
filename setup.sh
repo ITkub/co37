@@ -47,7 +47,11 @@ apt-get update -qq
 # zurueckrollen koennen, wenn ein misslungenes Update das venv zerlegt
 # hat. Damit steht ihm aber auch nichts aus requirements.txt zur
 # Verfuegung, und die Signaturpruefung vor dem Auspacken braucht Ed25519.
-PKGS="python3 python3-venv python3-pip python3-cryptography openssl ca-certificates sqlite3 unzip curl"
+# rpm liefert rpmbuild - gebraucht fuer das Agentenpaket der
+# RPM-Anlagen (Red Hat, Oracle, Rocky, Alma, SUSE). Ohne das Paket
+# baut build_packages.sh die uebrigen Pakete weiter und sagt, dass
+# es das RPM auslaesst.
+PKGS="python3 python3-venv python3-pip python3-cryptography openssl ca-certificates sqlite3 unzip curl rpm"
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS
 
 # ---------------------------------------------------------------------
