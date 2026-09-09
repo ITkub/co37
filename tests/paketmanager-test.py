@@ -528,6 +528,7 @@ check("und der Patchlauf lehnt dort ab, statt das Falsche zu tun",
 # ======================================================================
 print()
 print("--- Das Agentenpaket fuer RPM-Anlagen ---")
+import re  # noqa: E402
 import subprocess  # noqa: E402
 
 rpm_quelle = (WURZEL / "packaging" / "build_rpm.py").read_text(encoding="utf-8")
@@ -550,6 +551,25 @@ check("ohne release_key.pub bricht der RPM-Bau ab",
 # der MSI-Saga.
 check("der Bau prueft das fertige Paket nach",
       "pruefe_paket(ziel, dateien, mit_schluessel)" in rpm_quelle)
+
+# Der Buildroot wird NICHT vorgegeben, sondern im %install-Abschnitt
+# gefuellt. Gemessen am 2026-09-09: mit rpm 4.18.2 lief beides, mit
+# 4.20.1 auf KK-OPS01 nur noch dieser Weg - ab 4.20 bestimmt rpmbuild
+# den Buildroot selbst und uebergeht ein --define.
+#
+# Diese Pruefung liest den Quelltext, weil sie den Unterschied sonst
+# nicht sehen koennte: auf einem Rechner mit rpm 4.18 laeuft auch der
+# falsche Weg durch. Genau daran ist es hier vorbeigekommen.
+check("der Bau gibt den Buildroot nicht mehr vor",
+      '"buildroot ' not in rpm_quelle,
+      [z.strip() for z in rpm_quelle.splitlines() if '"buildroot ' in z])
+# Am Zeilenanfang gesucht, nicht irgendwo im Text: der Kommentar zwei
+# Absaetze weiter oben nennt beides ebenfalls, und eine
+# Zeichenkettensuche findet die Begruendung statt der Sache. Sechster
+# Fall dieser Art in diesem Projekt.
+check("sondern fuellt ihn im %install-Abschnitt",
+      bool(re.search(r"^%install$", rpm_quelle, re.M))
+      and bool(re.search(r"^cp -a .*%\{\{buildroot\}\}", rpm_quelle, re.M)))
 
 if not shutil.which("rpmbuild"):
     # Kein stilles Ueberspringen: wenn hier nicht gebaut werden kann,

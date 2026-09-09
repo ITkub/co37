@@ -176,8 +176,22 @@ Meldet sich ausgehend beim CO-37-Backend, sucht nach Paketaktualisierungen
 und fuehrt sie auf Anforderung aus. Erkennt selbstaendig, ob ein Neustart
 aussteht.
 
-# Kein %%prep, %%build, %%install: der Buildroot wird von build_rpm.py
-# fertig hingestellt. rpmbuild soll das Paket schnueren, nicht bauen.
+# Der Baum liegt fertig in {quelle} und wird hier hineinkopiert.
+#
+# Warum nicht einfach --define buildroot auf dieses Verzeichnis zeigen
+# lassen: das galt bis rpm 4.19. Ab 4.20 bestimmt rpmbuild den Buildroot
+# selbst ({{_builddir}}/{{name}}-{{version}}-build/BUILDROOT) und
+# uebergeht die Vorgabe. Gemessen am 2026-09-09: der Bau lief im
+# Container mit rpm 4.18.2 durch und brach auf KK-OPS01 mit rpm 4.20.1
+# mit "File not found: .../BUILDROOT/usr/lib/co37/agent.py" ab - die
+# Dateien lagen da, nur woanders, als rpmbuild sie suchte.
+#
+# %%install faellt nicht unter diese Aenderung: dort steht %%{{buildroot}}
+# fuer das, was rpmbuild selbst gewaehlt hat, und das gilt in jeder
+# Fassung.
+%install
+mkdir -p %{{buildroot}}
+cp -a {quelle}/. %{{buildroot}}/
 
 %files
 %dir /usr/lib/co37
@@ -290,8 +304,12 @@ def build(version: str, out_dir: Path) -> Path:
         dateien.append(ZIEL_KEY)
 
     with tempfile.TemporaryDirectory(prefix="co37-rpm-") as tmp:
-        oben = Path(tmp)
-        wurzel = oben / "buildroot"
+        oben = Path(tmp) / "rpm"
+        oben.mkdir()
+        # Der fertige Baum liegt NEBEN _topdir, nicht darin: rpmbuild
+        # raeumt unterhalb von _topdir auf, und was es dort loescht,
+        # entscheidet es selbst.
+        wurzel = Path(tmp) / "baum"
 
         _lege_ab(wurzel, ZIEL_AGENT, AGENT_PY.read_bytes(), 0o755)
         _lege_ab(wurzel, ZIEL_CONNECT, ENROLL_CMD.encode(), 0o755)
@@ -301,6 +319,7 @@ def build(version: str, out_dir: Path) -> Path:
 
         spec = oben / "co37-agent.spec"
         spec.write_text(SPEC.format(
+            quelle=wurzel,
             version=version,
             # Verantwortlicher steht spaeter in den Paketeigenschaften.
             # Neutral als Vorgabe, damit ein weitergegebenes Paket nicht
@@ -317,7 +336,6 @@ def build(version: str, out_dir: Path) -> Path:
         ergebnis = subprocess.run(
             ["rpmbuild", "-bb",
              "--define", f"_topdir {oben}",
-             "--define", f"buildroot {wurzel}",
              # Ohne das haengt der Paketname an der Architektur des
              # Bauservers, obwohl BuildArch noarch dasteht.
              "--target", "noarch",
