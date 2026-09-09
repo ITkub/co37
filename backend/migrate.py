@@ -20,6 +20,7 @@ koennen.
 """
 import json
 import logging
+import re
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
@@ -164,7 +165,8 @@ def migrate(engine: Engine) -> dict:
     Gleicht das Schema ab. Gibt einen Bericht zurueck, damit das Ergebnis
     im Log und im Health-Endpunkt sichtbar ist.
     """
-    report = {"added": [], "migrated": [], "notes": [], "version": SCHEMA_VERSION}
+    report = {"added": [], "migrated": [], "notes": [], "problems": [],
+              "version": SCHEMA_VERSION}
     tables = _tables(engine)
 
     if "host" not in tables:
@@ -298,6 +300,20 @@ def migrate(engine: Engine) -> dict:
     return report
 
 
+
+def _problem(report: dict, text: str):
+    """
+    Eine Notiz, die niemand uebersehen darf.
+
+    Steht in notes wie bisher UND in problems. Der Unterschied: main.py
+    gibt problems bei jedem Start aus, notes nur, wenn ausserdem etwas
+    ergaenzt oder umgebaut wurde. Ein misslungener Umbau erzeugt aber
+    genau nichts davon - er stand deshalb bis 0.37.24 nur im Bericht,
+    den niemand abruft, und die Anlage schwieg dazu.
+    """
+    report["notes"].append(text)
+    report["problems"].append(text)
+
 def _hostname_index(engine: Engine, report: dict):
     """
     Eindeutiger Index auf den kleingeschriebenen Hostnamen (F-33 der
@@ -327,11 +343,10 @@ def _hostname_index(engine: Engine, report: dict):
                 "ON host (lower(hostname))"
             ))
     except Exception as exc:  # noqa: BLE001
-        report["notes"].append(
-            "Hostnamen sind nicht eindeutig (Gross-/Kleinschreibung): "
-            f"{exc}. Doppelte Eintraege im Dashboard entfernen, danach "
-            "greift der eindeutige Index beim naechsten Start."
-        )
+        _problem(report,
+                 "Hostnamen sind nicht eindeutig (Gross-/Kleinschreibung): "
+                 f"{exc}. Doppelte Eintraege im Dashboard entfernen, danach "
+                 "greift der eindeutige Index beim naechsten Start.")
 
 
 def _set_version(engine: Engine, version: int):
@@ -613,9 +628,10 @@ def _zeilen(cur, tabelle: str) -> int:
     return cur.fetchone()[0]
 
 
-def _indizes_von(conn, tabelle: str) -> list[str]:
+def _indizes_von(conn, tabelle: str) -> list[tuple[str, str]]:
     """
-    Die CREATE-INDEX-Anweisungen dieser Tabelle, wie sie dastehen.
+    Die CREATE-INDEX-Anweisungen dieser Tabelle, wie sie dastehen, je mit
+    ihrem Namen.
 
     Aus sqlite_master, nicht aus dem Modell: hier steht auch der Index
     ueber lower(hostname) aus F-33, den das Modell gar nicht kennt. Ginge
@@ -623,9 +639,29 @@ def _indizes_von(conn, tabelle: str) -> list[str]:
     Gross-/Kleinschreibung wieder moeglich - und niemandem fiele es auf.
     """
     rows = conn.execute(text(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=:t "
-        "AND sql IS NOT NULL"), {"t": tabelle}).fetchall()
-    return [r[0] for r in rows]
+        "SELECT name, sql FROM sqlite_master WHERE type='index' "
+        "AND tbl_name=:t AND sql IS NOT NULL"), {"t": tabelle}).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def _index_braucht(sql: str, spalten: set[str]) -> list[str]:
+    """
+    Welche der genannten Spalten dieser Index braucht.
+
+    Ueber den Anweisungstext und nicht ueber PRAGMA index_info: das
+    Pragma nennt die Spalten eines gewoehnlichen Index, laesst aber bei
+    einem Ausdruck wie lower(hostname) NULL stehen - und gerade solche
+    Indizes gibt es hier (F-33). Ein zweiter Weg, der nur die Haelfte der
+    Faelle abdeckt, waere schwerer zu pruefen als er wert ist.
+
+    Als ganzes Wort, sonst faenge 'customer' auch einen Index auf
+    'customer_id'. Ohne Beachtung der Gross- und Kleinschreibung, weil
+    SQLite Spaltennamen so vergleicht: wer den Index einmal auf
+    CHECKMK_HOST angelegt hat, hat denselben Index.
+    """
+    return sorted(s for s in spalten
+                  if re.search(rf"\b{re.escape(s)}\b", sql or "",
+                               re.IGNORECASE))
 
 
 def _tabelle_angleichen(engine: Engine, tabelle: str, report: dict) -> bool:
@@ -660,14 +696,76 @@ def _tabelle_angleichen(engine: Engine, tabelle: str, report: dict) -> bool:
             if n:
                 leer.append(f"{tabelle}.{spalte.name} ({n} Zeilen)")
         if leer:
-            report["notes"].append(
-                f"Tabelle {tabelle} nicht angeglichen: dort stehen NULL-Werte "
-                f"in Spalten, die das Modell als Pflicht fuehrt - "
-                f"{', '.join(leer)}. Die Anlage laeuft unveraendert weiter; "
-                f"die Werte muessen erst gesetzt werden.")
+            _problem(report,
+                     f"Tabelle {tabelle} nicht angeglichen: dort stehen "
+                     f"NULL-Werte in Spalten, die das Modell als Pflicht "
+                     f"fuehrt - {', '.join(leer)}. Die Anlage laeuft "
+                     f"unveraendert weiter; die Werte muessen erst gesetzt "
+                     f"werden.")
             return False
 
-        indizes = _indizes_von(conn, tabelle)
+        # Und die zweite Bedingung, an der ein Umbau scheitern kann:
+        # doppelte Werte dort, wo das Modell einen eindeutigen Index
+        # verlangt. Die alte Tabelle hat ihn nicht, also durfte es sie
+        # geben; beim Anlegen des Index scheitert es.
+        #
+        # Ohne diese Vorpruefung stuende im Bericht eine rohe
+        # IntegrityError. Damit weiss niemand, WELCHE Zeilen es sind und
+        # wie viele - und genau das ist die Frage, die als Naechstes
+        # gestellt wird.
+        #
+        # NULL zaehlt nicht als Dopplung: SQLite haelt NULLs in einem
+        # eindeutigen Index auseinander, mehrere Zeilen ohne Wert sind
+        # also erlaubt. Der WERT selbst steht bewusst nicht im Bericht -
+        # in einer solchen Spalte kann ein Geheimnis stehen.
+        doppelt = []
+        for index in ziel.indexes:
+            if not index.unique:
+                continue
+            spalten = [c.name for c in index.columns]
+            if any(s not in alt for s in spalten):
+                continue
+            liste = ", ".join(spalten)
+            bedingung = " AND ".join(f"{s} IS NOT NULL" for s in spalten)
+            n = conn.execute(text(
+                f"SELECT COUNT(*) FROM (SELECT {liste} FROM {tabelle} "
+                f"WHERE {bedingung} GROUP BY {liste} "
+                f"HAVING COUNT(*) > 1)")).scalar()
+            if n:
+                doppelt.append(f"{tabelle}.{liste} ({n} Wert(e) mehrfach)")
+        if doppelt:
+            _problem(report,
+                     f"Tabelle {tabelle} nicht angeglichen: das Modell "
+                     f"verlangt Eindeutigkeit, wo die Datenbank Dopplungen "
+                     f"enthaelt - {', '.join(doppelt)}. Die Anlage laeuft "
+                     f"unveraendert weiter; die doppelten Zeilen muessen "
+                     f"erst bereinigt werden.")
+            return False
+
+        # Indizes, die auf entfallene Spalten zeigen, koennen nicht
+        # mitgenommen werden - die Spalte gibt es in der neuen Tabelle
+        # nicht mehr.
+        #
+        # Genau daran ist der Umbau auf KK-OPS01 am 2026-09-08
+        # gescheitert: dort steht ein Index auf checkmk_host, einer der
+        # Altspalten aus OBSOLETE. Die Meldung war "no such column:
+        # checkmk_host" - richtig, aber ohne den Hinweis, dass es um
+        # einen INDEX geht und dass er entfaellt.
+        entfallen = alt - {c.name for c in ziel.columns}
+        indizes = []
+        verworfen = []
+        for name, sql in _indizes_von(conn, tabelle):
+            betroffen = _index_braucht(sql, entfallen)
+            if betroffen:
+                verworfen.append(f"{name} (auf {', '.join(betroffen)})")
+                continue
+            indizes.append(sql)
+        if verworfen:
+            _problem(report,
+                     f"Tabelle {tabelle}: Index/Indizes entfallen mit ihren "
+                     f"Spalten - {', '.join(verworfen)}. Diese Spalten fuehrt "
+                     f"das Modell nicht mehr; der Index kann deshalb nicht "
+                     f"uebernommen werden.")
 
     ddl = str(CreateTable(ziel).compile(engine)).strip()
     ddl_neu = ddl.replace(f"CREATE TABLE {tabelle}",
@@ -784,7 +882,7 @@ def angleichen(engine: Engine, report: dict):
     try:
         offen = _tabellen_mit_drift(engine)
     except Exception as exc:  # noqa: BLE001
-        report["notes"].append(f"Schema nicht vergleichbar: {exc}")
+        _problem(report, f"Schema nicht vergleichbar: {exc}")
         return
     if not offen:
         return
@@ -797,14 +895,14 @@ def angleichen(engine: Engine, report: dict):
             # Transaktion ist zurueckgerollt, die alte Tabelle steht
             # unveraendert da - es laeuft weiter wie bisher, und im
             # Bericht steht, was nicht ging.
-            report["notes"].append(
-                f"Tabelle {tabelle} liess sich nicht angleichen: {exc}. "
-                f"Die Tabelle ist unveraendert.")
+            _problem(report,
+                     f"Tabelle {tabelle} liess sich nicht angleichen: {exc}. "
+                     f"Die Tabelle ist unveraendert.")
 
     # Und nachsehen, ob es gewirkt hat. Ein Umbau, der sich selbst nicht
     # nachprueft, ist eine Behauptung.
     rest = [z for z in schema_abweichungen(engine) if _nullbarkeit_weicht_ab(z)]
     if rest:
-        report["notes"].append(
-            f"Nach dem Angleichen bleiben {len(rest)} Abweichung(en): "
-            + "; ".join(rest[:5]))
+        _problem(report,
+                 f"Nach dem Angleichen bleiben {len(rest)} Abweichung(en): "
+                 + "; ".join(rest[:5]))

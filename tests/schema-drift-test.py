@@ -280,8 +280,13 @@ motor_u = create_engine(f"sqlite:///{umbau}")
 SQLModel.metadata.create_all(motor_u)
 
 
-def _alt_machen(motor, tabelle, streng=(), locker=()):
-    """Baut eine Tabelle so um, wie eine aeltere Fassung sie angelegt hat."""
+def _alt_machen(motor, tabelle, streng=(), locker=(), zusatz=()):
+    """
+    Baut eine Tabelle so um, wie eine aeltere Fassung sie angelegt hat.
+
+    zusatz: Spalten, die es NUR in der alten Fassung gibt - die
+    Altspalten aus OBSOLETE. Als "name TYP" anzugeben.
+    """
     with motor.begin() as conn:
         spalten = conn.execute(text(f"PRAGMA table_info({tabelle})")).fetchall()
         namen = [r[1] for r in spalten]
@@ -293,12 +298,37 @@ def _alt_machen(motor, tabelle, streng=(), locker=()):
             elif r[1] in streng or (r[3] and r[1] not in locker):
                 stueck += " NOT NULL"
             teile.append(stueck)
+        teile.extend(zusatz)
         conn.execute(text(f"ALTER TABLE {tabelle} RENAME TO {tabelle}_x"))
         conn.execute(text(f"CREATE TABLE {tabelle} ({', '.join(teile)})"))
         conn.execute(text(
             f"INSERT INTO {tabelle} ({', '.join(namen)}) "
             f"SELECT {', '.join(namen)} FROM {tabelle}_x"))
         conn.execute(text(f"DROP TABLE {tabelle}_x"))
+
+
+def mit_falscher_zeilenzahl(arbeit):
+    """
+    Laesst den naechsten Umbau an der Zeilenzaehlung scheitern.
+
+    Der zweite Aufruf von _zeilen() ist das "nachher"; eine Zahl zu viel
+    loest den Ruecklauf aus. Anders ist die Stelle nicht zu erreichen:
+    eine echte Datenbank verliert beim INSERT ... SELECT keine Zeilen,
+    ohne vorher eine Ausnahme zu werfen.
+    """
+    echt = migrate._zeilen
+    aufrufe = {"n": 0}
+
+    def luegen(cur, tabelle):
+        aufrufe["n"] += 1
+        wert = echt(cur, tabelle)
+        return wert + 1 if aufrufe["n"] == 2 else wert
+
+    migrate._zeilen = luegen
+    try:
+        return arbeit()
+    finally:
+        migrate._zeilen = echt
 
 
 # Genau die Form von KK-OPS01: agent_token_hash strenger, eine Reihe
@@ -450,25 +480,155 @@ check("der Aufruf von Hand oeffnet die Datei mit mode=ro",
 # Wenn der Umbau schiefgeht, bleibt die alte Tabelle stehen
 # ======================================================================
 print()
+print("--- Ein Index auf einer entfallenen Spalte ---")
+# Der Fall von KK-OPS01 am 2026-09-08, und der Grund, warum der Umbau
+# dort NICHT lief: die Tabelle traegt einen Index auf checkmk_host, eine
+# der Altspalten aus OBSOLETE. Der Umbau laesst solche Spalten wegfallen
+# und legt danach die vorgefundenen Indizes wieder an - einer davon zeigt
+# dann ins Leere. Die Meldung lautete "no such column: checkmk_host":
+# richtig, aber ohne den Hinweis, dass es um einen Index geht.
+altspalte = TMP / "altspalte.db"
+motor_a = create_engine(f"sqlite:///{altspalte}")
+SQLModel.metadata.create_all(motor_a)
+_alt_machen(motor_a, "host", streng=("agent_token_hash",), locker=LOCKER,
+            zusatz=("checkmk_host VARCHAR",))
+with motor_a.begin() as conn:
+    host_einfuegen(conn, "KK-ALT-A", "hash-alt-a", 1)
+    host_einfuegen(conn, "KK-ALT-B", "hash-alt-b", 2)
+    conn.execute(text(
+        "CREATE INDEX ix_host_checkmk_host ON host (checkmk_host)"))
+    conn.execute(text(
+        "CREATE UNIQUE INDEX ux_host_hostname_nocase ON host (lower(hostname))"))
+
+check("die Altspalte steht wirklich da",
+      any(r[1] == "checkmk_host" for r in motor_a.connect().execute(
+          text("PRAGMA table_info(host)")).fetchall()))
+
+bericht_a = migrate.migrate(motor_a)
+check("der Umbau laeuft trotzdem durch",
+      any("angeglichen" in z for z in bericht_a["migrated"]),
+      bericht_a["migrated"] + bericht_a["problems"][:2])
+check("und der Abgleich meldet danach nichts mehr",
+      not migrate.schema_abweichungen(motor_a),
+      migrate.schema_abweichungen(motor_a)[:3])
+treffer_a = [z for z in bericht_a["problems"] if "ix_host_checkmk_host" in z]
+check("der entfallene Index steht im Bericht", bool(treffer_a),
+      bericht_a["problems"][:2])
+check("mit der Spalte, an der er hing",
+      bool(treffer_a) and "checkmk_host" in treffer_a[0], treffer_a[:1])
+
+with motor_a.connect() as conn:
+    namen_a = {r[0] for r in conn.execute(text(
+        "SELECT name FROM sqlite_master WHERE type='index'")).fetchall()}
+    check("der Index auf der Altspalte ist weg",
+          "ix_host_checkmk_host" not in namen_a, sorted(namen_a))
+    check("der Index ueber lower(hostname) ist geblieben",
+          "ux_host_hostname_nocase" in namen_a, sorted(namen_a))
+    check("und die Zeilen sind vollzaehlig",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 2)
+
+# Und die Erkennung selbst, Fall fuer Fall. Sie entscheidet darueber, ob
+# ein Index verschwindet - beide Richtungen kosten etwas: ein uebersehener
+# Index laesst den Umbau scheitern, ein zu Unrecht getroffener nimmt einer
+# Anlage eine Eindeutigkeit weg, die niemand aufgeben wollte.
+FAELLE = (
+    ("gewoehnlicher Index auf der entfallenen Spalte",
+     "CREATE INDEX ix ON host (checkmk_host)", ["checkmk_host"]),
+    ("Ausdruck statt Spalte - PRAGMA index_info schwiege hier",
+     "CREATE INDEX ix ON host (lower(checkmk_host))", ["checkmk_host"]),
+    ("andere Gross-/Kleinschreibung ist dieselbe Spalte",
+     "CREATE INDEX ix ON host (CHECKMK_HOST)", ["checkmk_host"]),
+    ("in Anfuehrungszeichen ebenso",
+     'CREATE INDEX ix ON host ("checkmk_host")', ["checkmk_host"]),
+    ("aber checkmk_host_id ist eine andere Spalte",
+     "CREATE INDEX ix ON host (checkmk_host_id)", []),
+    ("und ein Index auf hostname geht es nichts an",
+     "CREATE UNIQUE INDEX ix ON host (lower(hostname))", []),
+)
+for beschreibung, anweisung, erwartet in FAELLE:
+    ergebnis = migrate._index_braucht(anweisung, {"checkmk_host"})
+    check(beschreibung, ergebnis == erwartet, ergebnis)
+
+
+print()
+print("--- Doppelte Werte halten den Umbau an, bevor er anfaengt ---")
+# Auf KK-OPS01 am 2026-09-08: der Umbau lief nicht, der Abgleich meldete
+# weiter zehn Abweichungen, und im Bericht stand eine rohe
+# IntegrityError. Die sagt nicht, WELCHE Spalte und wie viele Zeilen -
+# also genau das, was als Naechstes gefragt wird.
+#
+# Das Modell verlangt Eindeutigkeit auf agent_token_hash. Die alte
+# Tabelle hat den Index nicht, dort durfte es Dopplungen geben.
+dopp = TMP / "doppelt.db"
+motor_d = create_engine(f"sqlite:///{dopp}")
+SQLModel.metadata.create_all(motor_d)
+_alt_machen(motor_d, "host", streng=("agent_token_hash",), locker=LOCKER)
+with motor_d.begin() as conn:
+    host_einfuegen(conn, "KK-D-A", "derselbe-wert", 1)
+    host_einfuegen(conn, "KK-D-B", "derselbe-wert", 2)
+
+bericht_d = migrate.migrate(motor_d)
+treffer_d = [z for z in bericht_d["problems"] if "Eindeutigkeit" in z]
+check("der Bericht nennt die Dopplung", bool(treffer_d),
+      bericht_d["problems"][:1])
+check("und nennt Spalte und Anzahl",
+      bool(treffer_d) and "host.agent_token_hash" in treffer_d[0]
+      and "1 Wert(e) mehrfach" in treffer_d[0], treffer_d[:1])
+# Der Wert selbst gehoert nicht ins Protokoll: in einer eindeutigen
+# Spalte kann ein Geheimnis stehen.
+check("aber nicht den Wert selbst",
+      not any("derselbe-wert" in z for z in bericht_d["notes"]),
+      [z for z in bericht_d["notes"] if "derselbe-wert" in z][:1])
+with motor_d.connect() as conn:
+    check("die Tabelle ist unangetastet",
+          conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 2)
+    check("und keine Zwischentabelle liegt herum",
+          not conn.execute(text(
+              "SELECT name FROM sqlite_master WHERE name='host_neu'"
+          )).fetchall())
+
+# Gegenprobe: mehrere Zeilen OHNE Wert sind keine Dopplung. SQLite haelt
+# NULLs in einem eindeutigen Index auseinander - wer das uebersieht,
+# haelt jede Anlage mit zwei nicht angemeldeten Hosts an.
+ohne = TMP / "ohne-wert.db"
+motor_n = create_engine(f"sqlite:///{ohne}")
+SQLModel.metadata.create_all(motor_n)
+_alt_machen(motor_n, "host", streng=("created_at",), locker=LOCKER)
+with motor_n.begin() as conn:
+    host_einfuegen(conn, "KK-N-A", "x", 1)
+    host_einfuegen(conn, "KK-N-B", "y", 2)
+    conn.execute(text("UPDATE host SET agent_token_hash = NULL"))
+
+bericht_n = migrate.migrate(motor_n)
+check("zwei Zeilen ohne Wert halten den Umbau nicht an",
+      any("angeglichen" in z for z in bericht_n["migrated"]),
+      bericht_n["migrated"] + bericht_n["problems"][:1])
+check("und danach meldet der Abgleich nichts mehr",
+      not migrate.schema_abweichungen(motor_n),
+      migrate.schema_abweichungen(motor_n)[:3])
+
+
+print()
 print("--- Ein misslungener Umbau darf nichts kosten ---")
 # Der gefaehrlichste Fall ueberhaupt: der Umbau bricht mittendrin ab,
 # nachdem die alte Tabelle schon geloescht ist. Dagegen steht die
 # Transaktion - aber "steht in einer Transaktion" ist eine Behauptung,
 # solange es niemand ausloest.
 #
-# Ausgeloest wird es hier mit Daten, die eine Bedingung des Modells
-# verletzen: zwei Hosts mit demselben agent_token_hash. Die alte Tabelle
-# hat dort keinen eindeutigen Index, das Modell verlangt einen - beim
-# Anlegen scheitert er.
+# Ausgeloest wird es ueber die Zeilenzaehlung: sie laeuft NACH dem
+# Loeschen und Umbenennen, also genau an der gefaehrlichen Stelle.
+# Doppelte Werte taugen dafuer seit 0.37.24 nicht mehr - die
+# Vorpruefung faengt sie ab, bevor die Tabelle angefasst wird, und das
+# ist ihr Zweck.
 kaputt = TMP / "kaputt.db"
 motor_k = create_engine(f"sqlite:///{kaputt}")
 SQLModel.metadata.create_all(motor_k)
 _alt_machen(motor_k, "host", streng=("agent_token_hash",), locker=LOCKER)
 with motor_k.begin() as conn:
-    host_einfuegen(conn, "KK-A", "gleicher-hash")
-    host_einfuegen(conn, "KK-B", "gleicher-hash")
+    host_einfuegen(conn, "KK-A", "hash-a")
+    host_einfuegen(conn, "KK-B", "hash-b")
 
-bericht_k = migrate.migrate(motor_k)
+bericht_k = mit_falscher_zeilenzahl(lambda: migrate.migrate(motor_k))
 with motor_k.connect() as conn:
     check("beide Zeilen sind noch da",
           conn.execute(text("SELECT COUNT(*) FROM host")).scalar() == 2)
@@ -481,6 +641,23 @@ with motor_k.connect() as conn:
 check("der Bericht sagt, dass es nicht ging",
       any("host" in z and "nicht" in z.lower() for z in bericht_k["notes"]),
       bericht_k["notes"][:2])
+
+# Und er sagt es an einer Stelle, die beim Start ausgegeben wird.
+#
+# Bis 0.37.24 stand ein misslungener Umbau nur in notes. main.py gab
+# notes aber nur aus, wenn ausserdem etwas ergaenzt oder umgebaut wurde -
+# und ein misslungener Umbau tut genau das nicht. Auf KK-OPS01 blieb der
+# Grund deshalb unsichtbar: der Abgleich meldete weiter zehn
+# Abweichungen, und das Protokoll schwieg dazu.
+check("und zwar in problems, nicht nur in notes",
+      any("angleichen" in z for z in bericht_k["problems"]),
+      bericht_k["problems"][:2])
+check("problems steht auch in notes",
+      set(bericht_k["problems"]) <= set(bericht_k["notes"]))
+
+_hauptquelle = (WURZEL / "backend" / "main.py").read_text(encoding="utf-8")
+check("main.py gibt problems ohne Bedingung aus",
+      'SCHEMA_REPORT.get("problems", [])' in _hauptquelle)
 
 # Und die zweite Sicherung: stimmt die Zeilenzahl nach dem Kopieren
 # nicht, wird zurueckgerollt. Ausloesen laesst sich das nur, indem man
@@ -577,12 +754,12 @@ motor_o = create_engine(f"sqlite:///{ohne_reset}", pool_reset_on_return=None)
 SQLModel.metadata.create_all(motor_o)
 _alt_machen(motor_o, "host", streng=("agent_token_hash",), locker=LOCKER)
 with motor_o.begin() as conn:
-    host_einfuegen(conn, "KK-O-A", "gleicher-hash")
-    host_einfuegen(conn, "KK-O-B", "gleicher-hash")
+    host_einfuegen(conn, "KK-O-A", "hash-o-a")
+    host_einfuegen(conn, "KK-O-B", "hash-o-b")
 
-bericht_o = migrate.migrate(motor_o)
+bericht_o = mit_falscher_zeilenzahl(lambda: migrate.migrate(motor_o))
 check("der Umbau ist misslungen, wie vorgesehen",
-      any("nicht angleichen" in z for z in bericht_o["notes"]),
+      any("Zeilen vorher" in z for z in bericht_o["notes"]),
       bericht_o["notes"][:1])
 
 # Eine frische Verbindung, damit nichts aus dem Pool die Antwort faerbt.

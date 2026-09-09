@@ -122,6 +122,13 @@ async def lifespan(app: FastAPI):
         SCHEMA_REPORT = migrate.migrate(engine)
         if SCHEMA_REPORT.get("added") or SCHEMA_REPORT.get("migrated"):
             print(f"Schema angepasst: {SCHEMA_REPORT}", flush=True)
+        # Getrennt und ohne Bedingung: ein misslungener Abgleich ergaenzt
+        # nichts und baut nichts um, faellt also durch die Zeile darueber.
+        # Auf KK-OPS01 stand der Grund deshalb am 2026-09-08 nur im
+        # Bericht, den niemand abruft - die Anlage schwieg, und der
+        # Umbau war trotzdem nicht passiert.
+        for satz in SCHEMA_REPORT.get("problems", []):
+            print(f"Schema-Abgleich unvollstaendig: {satz}", flush=True)
     except Exception as exc:  # noqa: BLE001
         SCHEMA_REPORT = {"error": str(exc)}
         print(f"Schema-Migration fehlgeschlagen: {exc}", flush=True)
