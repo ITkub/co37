@@ -2599,8 +2599,17 @@ def agent_enroll(
     if existing and existing.agent_token_hash:
         raise HTTPException(
             409,
+            # Der mildere der beiden Wege gehoert in die Meldung. Bis
+            # 0.37.29 stand hier "den Host zuerst im Dashboard
+            # entfernen" - das verwirft Zeitplan, Checkmk-Verknuepfung
+            # und Verlauf, obwohl "Token zurueckziehen" an der Hostzeile
+            # dasselbe Ziel erreicht und all das behaelt. Am 2026-09-09
+            # auf KK-LEAP gesehen: der Agent gibt diese Zeile woertlich
+            # ins Journal, und wer sie liest, tut was dort steht.
             f"'{hostname}' ist bereits angemeldet. Fuer eine "
-            f"Neuanmeldung den Host zuerst im Dashboard entfernen.",
+            f"Neuanmeldung im Dashboard das Token dieses Hosts "
+            f"zurueckziehen - Zeitplan, Checkmk-Verknuepfung und "
+            f"Verlauf bleiben dabei erhalten.",
         )
 
     if existing:
@@ -2682,8 +2691,17 @@ def agent_enroll(
         session.rollback()
         raise HTTPException(
             409,
+            # Der mildere der beiden Wege gehoert in die Meldung. Bis
+            # 0.37.29 stand hier "den Host zuerst im Dashboard
+            # entfernen" - das verwirft Zeitplan, Checkmk-Verknuepfung
+            # und Verlauf, obwohl "Token zurueckziehen" an der Hostzeile
+            # dasselbe Ziel erreicht und all das behaelt. Am 2026-09-09
+            # auf KK-LEAP gesehen: der Agent gibt diese Zeile woertlich
+            # ins Journal, und wer sie liest, tut was dort steht.
             f"'{hostname}' ist bereits angemeldet. Fuer eine "
-            f"Neuanmeldung den Host zuerst im Dashboard entfernen.",
+            f"Neuanmeldung im Dashboard das Token dieses Hosts "
+            f"zurueckziehen - Zeitplan, Checkmk-Verknuepfung und "
+            f"Verlauf bleiben dabei erhalten.",
         )
     note_enroll(quelle)
 

@@ -230,5 +230,37 @@ eintrag = ups[0] if isinstance(ups, list) and ups else {}
 check("normale Werte bleiben erhalten",
       eintrag.get("new_version") == "1.2.3", eintrag)
 
+# ======================================================================
+# Zweite Anmeldung desselben Namens
+# ======================================================================
+# Am 2026-09-09 auf KK-LEAP: der Agent starb beim Auspacken der Antwort,
+# serverseitig war die Anmeldung aber schon vollzogen. Jeder weitere
+# Versuch prallt seitdem an dieser Meldung ab - und der Agent gibt sie
+# WOERTLICH ins Journal. Wer sie liest, tut was dort steht. Sie muss
+# deshalb den milderen der beiden Wege nennen: "Token zurueckziehen"
+# behaelt Zeitplan, Checkmk-Verknuepfung und Verlauf, "Host entfernen"
+# verwirft alles davon.
+#
+# Dass die Anmeldung selbst abgewiesen wird, bleibt richtig: /enroll ist
+# absichtlich ohne Enrollment-Token, und diese Sperre ist der einzige
+# Schutz davor, dass sich ein fremdes Geraet unter dem Namen eines
+# freigegebenen Hosts meldet. Am 2026-09-09 bewusst so entschieden.
+print()
+_zweite = call("/api/v1/agent/enroll",
+               {"hostname": "TEST-WIN01", "os_type": "windows",
+                "os_version": "Windows 11", "ip_address": "192.0.2.50",
+                "agent_version": "0.18.0"})
+check("eine zweite Anmeldung wird abgewiesen", _zweite.get("HTTP") == 409,
+      _zweite)
+_text = str(_zweite.get("body", ""))
+check("die Meldung nennt das Zurueckziehen des Tokens",
+      "zur" in _text and "ckziehen" in _text, _text[:200])
+check("und nicht das Entfernen des Hosts",
+      "entfernen" not in _text.lower(), _text[:200])
+check("sie sagt dazu, dass der Zeitplan erhalten bleibt",
+      "Zeitplan" in _text, _text[:200])
+check("das Token der ersten Anmeldung gilt weiter",
+      "HTTP" not in hb(), hb())
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)
