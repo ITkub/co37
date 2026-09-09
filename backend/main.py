@@ -1142,6 +1142,29 @@ AUDIT_DETAIL_MAX = 1000
 # 0 schaltet die Bereinigung ab. Ausdruecklich, nicht als Vorgabe.
 AUDIT_DAYS = int(os.getenv("CO37_AUDIT_DAYS", "365"))
 
+# WOHIN DIE ENTFERNTEN EINTRAEGE VORHER GESCHRIEBEN WERDEN (OPS.1.1.5.A8)
+#
+# A5 verlangt einen festgelegten Loeschprozess, A8 die Archivierung. Die
+# beiden ziehen in verschiedene Richtungen, und das aufzuloesen ist eine
+# Entscheidung des Betreibers, nicht des Produkts. Was das Produkt
+# schuldet, ist die Moeglichkeit.
+#
+# Leer heisst: wie bisher, geloescht ist geloescht. Ist ein Verzeichnis
+# eingetragen, schreibt die Bereinigung die faelligen Eintraege vorher
+# als JSON-Lines dorthin, eine Datei je Jahr. Die Sicherung des Servers
+# nimmt sie dann mit.
+#
+# Steht wie AUDIT_DAYS in der Umgebung und nicht in der Oberflaeche -
+# derselbe Grund, OPS.1.1.5.A10: ein Administrator, der das Ziel im
+# Dashboard umbiegen koennte, koennte damit auch die Archivierung
+# abschalten und danach loeschen lassen.
+#
+# CO-37 wird damit KEIN Archivierungsprodukt. Es legt die Daten hin und
+# verwaltet sie nicht weiter; und das Archiv ist so vertrauenswuerdig wie
+# das Konto, das es schreibt. Wer mehr braucht, nimmt den Weg ueber
+# syslog auf eine andere Maschine (F-69).
+AUDIT_ARCHIVE = os.getenv("CO37_AUDIT_ARCHIVE", "").strip()
+
 # Nachgesehen wird hoechstens einmal am Tag, und zwar in audit() selbst.
 # Das ist kein Zufall: das Protokoll kann NUR ueber audit() wachsen. Wer
 # dort nachsieht, sieht genau dann nach, wenn etwas dazugekommen ist, und
@@ -1155,6 +1178,82 @@ AUDIT_PRUNE_INTERVAL = 24 * 3600
 # frisch gestarteten Server jahrelang nicht, auf einem seit Wochen
 # laufenden sofort. Die Pruefreihe ist genau darueber gestolpert.
 _letzte_bereinigung: Optional[float] = None
+
+
+def _archiv_zeile(eintrag: AuditEntry) -> str:
+    """
+    Ein Protokolleintrag als eine Zeile JSON.
+
+    JSON-Lines, nicht CSV: die Eintraege tragen freien Text, und ein
+    Zeilenumbruch oder ein Semikolon darin macht aus einer CSV-Datei
+    stillschweigend etwas anderes. json.dumps maskiert beides. Eine Zeile
+    je Eintrag heisst ausserdem, dass eine abgebrochene Datei bis zur
+    letzten vollstaendigen Zeile lesbar bleibt.
+    """
+    return json.dumps({
+        "id": eintrag.id,
+        "at": ensure_utc(eintrag.at).isoformat() if eintrag.at else None,
+        "actor": eintrag.actor,
+        "action": eintrag.action,
+        "detail": eintrag.detail,
+        "from_ip": eintrag.from_ip,
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def _protokoll_archivieren(session: Session, grenze: datetime) -> tuple[bool, str]:
+    """
+    Schreibt die faelligen Eintraege nach AUDIT_ARCHIVE, bevor sie
+    geloescht werden. Gibt (geglueckt, Grund) zurueck.
+
+    Eine Datei je Jahr, benannt nach dem Zeitpunkt des EINTRAGS, nicht
+    nach dem der Bereinigung - sonst landete beim ersten Lauf auf einer
+    lange laufenden Anlage der gesamte Ueberhang in einer Datei des
+    laufenden Jahres.
+
+    Angehaengt, nie ueberschrieben. Laeuft die Bereinigung zweimal, sind
+    die Eintraege beim zweiten Mal schon geloescht - es kann also nichts
+    doppelt hineinlaufen.
+
+    Fehler werden GEMELDET, nicht geworfen: der Aufrufer entscheidet
+    daraufhin, nicht zu loeschen. Eine Ausnahme, die aus audit()
+    herausfliegt, naehme dagegen den Eintrag mit, um den es gerade ging.
+    """
+    # Breit gefangen, nicht nur OSError: der Pfad kommt aus der Umgebung
+    # und ist damit Eingabe. Ein eingebettetes Nullbyte etwa laesst
+    # mkdir() mit ValueError abbrechen - beim Schreiben der Pruefreihe
+    # aufgefallen. Was hier fliegt, naehme den Protokolleintrag mit, um
+    # den es gerade geht.
+    try:
+        ziel = Path(AUDIT_ARCHIVE)
+        ziel.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+    faellig = session.exec(
+        select(AuditEntry).where(AuditEntry.at < grenze)
+        .order_by(AuditEntry.at)
+    ).all()
+    if not faellig:
+        return True, ""
+
+    # Nach Jahr buendeln und je Datei EINMAL oeffnen. Bei zweihundert-
+    # tausend Eintraegen waere ein open() je Zeile der teure Teil, nicht
+    # das Schreiben.
+    nach_jahr: dict[int, list[str]] = {}
+    for e in faellig:
+        jahr = ensure_utc(e.at).year if e.at else 0
+        nach_jahr.setdefault(jahr, []).append(_archiv_zeile(e))
+
+    try:
+        for jahr, zeilen in sorted(nach_jahr.items()):
+            pfad = ziel / f"audit-{jahr}.jsonl"
+            with open(pfad, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(zeilen) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+    return True, ""
 
 
 def pruefprotokoll_bereinigen(session: Session) -> int:
@@ -1199,6 +1298,25 @@ def pruefprotokoll_bereinigen(session: Session) -> int:
     if AUDIT_DAYS <= 0:
         return 0
     grenze = utcnow() - timedelta(days=AUDIT_DAYS)
+
+    # Archivieren, BEVOR geloescht wird - und nur loeschen, wenn das
+    # geklappt hat. Wer ein Archivziel eintraegt, sagt damit "nichts geht
+    # verloren"; ein Loeschen, das trotz misslungener Archivierung
+    # weiterlaeuft, waere genau die Zusage gebrochen. Der Preis ist, dass
+    # ein unbeschreibbares Ziel die Bereinigung anhaelt - das faellt auf
+    # (das Protokoll waechst weiter und der Grund steht darin), waehrend
+    # stiller Verlust nicht auffiele.
+    if AUDIT_ARCHIVE:
+        ok, grund = _protokoll_archivieren(session, grenze)
+        if not ok:
+            session.add(AuditEntry(
+                actor="system", action="audit.archive_failed",
+                detail=kurz(f"Archivierung nach {AUDIT_ARCHIVE} misslungen, "
+                            f"es wird nichts geloescht: {grund}",
+                            AUDIT_DETAIL_MAX),
+                from_ip=None))
+            return 0
+
     ergebnis = session.exec(
         delete(AuditEntry).where(AuditEntry.at < grenze)
         .execution_options(synchronize_session=False))
@@ -1245,6 +1363,7 @@ SYSLOG_SEVERITY = {
     "proxy.trusted-set": "critical",
     "update.trigger": "critical",
     "audit.pruned": "warning",
+    "audit.archive_failed": "error",
     "job.failed": "error",
     "host.unreachable": "error",
 }
@@ -3482,9 +3601,33 @@ ROLL_DEFAULTS = {
     "agent_roll_version": "",
     "agent_roll_started": "",
     "agent_roll_note": "",
+    # Wann der Pilot ZUERST als erfolgreich galt. Siehe
+    # PILOT_BESTAETIGUNG_MINUTEN.
+    "agent_roll_pilot_ok": "",
 }
 
 PILOT_TIMEOUT_MINUTES = 30
+
+# Wie lange der Pilot die neue Fassung gemeldet haben muss, bevor die
+# uebrigen Hosts folgen.
+#
+# Bis 0.37.31 gab der Pilot die Flotte beim ERSTEN Heartbeat frei, bei
+# dem beide Bedingungen zutrafen. Ein Host, der die neue Fassung meldet
+# und zwei Minuten spaeter stirbt, hatte damit alle anderen schon
+# losgeschickt. Die Staffelung soll beweisen, dass der neue Agent
+# LAEUFT - bewiesen war, dass er einmal gestartet ist.
+#
+# Der Heartbeat kommt alle paar Minuten; eine Viertelstunde heisst also
+# mehrere unabhaengige Meldungen ueber einen Zeitraum, in dem ein
+# kaputter Agent auffaellt. Es ist bewusst dieselbe Groessenordnung wie
+# PILOT_TIMEOUT_MINUTES (30) - die Bestaetigung muss deutlich darunter
+# liegen, sonst liefe jedes Ausrollen in den Zeitablauf.
+#
+# Was das NICHT leistet: gegen einen uebernommenen Piloten hilft es
+# nicht. Der bestimmt beide Angaben und kann sie beliebig lange
+# wiederholen. Siehe F-43 im Pruefdokument - ausgerollt wird ohnehin nur
+# signierter Servercode, es geht um Verfuegbarkeit.
+PILOT_BESTAETIGUNG_MINUTEN = 15
 
 
 def _set(session: Session, key: str, value: str):
@@ -3544,6 +3687,9 @@ def start_agent_rollout(session: Session, manual: bool = False) -> dict:
 
     _set(session, "agent_roll_version", version)
     _set(session, "agent_roll_started", utcnow().isoformat())
+    # Ein Merker aus einem frueheren Durchlauf wuerde die Flotte sofort
+    # freigeben - der neue Durchlauf hat seine Bestaetigung noch vor sich.
+    _set(session, "agent_roll_pilot_ok", "")
 
     pilot_id = cfg["agent_pilot_host"]
     pilot = None
@@ -3624,15 +3770,50 @@ def advance_agent_rollout(session: Session):
         ).first()
 
         if pilot.agent_version == version and fertig:
+            # Nicht sofort freigeben, sondern die Meldung stehen lassen.
+            # Erst wenn sie PILOT_BESTAETIGUNG_MINUTEN spaeter immer noch
+            # stimmt - also ueber mehrere Heartbeats hinweg -, folgen die
+            # uebrigen Hosts.
+            seit = _setting(session, "agent_roll_pilot_ok")
+            jetzt = utcnow()
+            erstmals = None
+            if seit:
+                try:
+                    erstmals = ensure_utc(datetime.fromisoformat(seit))
+                except ValueError:
+                    erstmals = None
+            if erstmals is None:
+                _set(session, "agent_roll_pilot_ok", jetzt.isoformat())
+                _set(session, "agent_roll_note",
+                     f"Pilot {pilot.hostname} meldet die neue Fassung, "
+                     f"Bestaetigung laeuft ({PILOT_BESTAETIGUNG_MINUTEN} Minuten)")
+                session.commit()
+                return
+            wartet = (jetzt - erstmals).total_seconds() / 60
+            if wartet < PILOT_BESTAETIGUNG_MINUTEN:
+                return
+
             targets = [h for h in stale_agents(session, version) if h.id != pilot.id]
             count = sum(_queue_selfupdate(session, h) for h in targets)
             _set(session, "agent_roll_state", "rest" if count else "done")
+            _set(session, "agent_roll_pilot_ok", "")
             _set(session, "agent_roll_note",
                  f"Pilot {pilot.hostname} erfolgreich, {count} weitere folgen"
                  if count else
                  f"Pilot {pilot.hostname} erfolgreich, keine weiteren offen")
             session.commit()
             return
+
+        # Der Pilot hat die neue Fassung schon einmal gemeldet, jetzt
+        # nicht mehr - genau der Fall, den die Bestaetigungszeit finden
+        # soll. Der Zaehler faengt von vorn an; bleibt es dabei, laeuft
+        # das Ausrollen in PILOT_TIMEOUT_MINUTES in den Zeitablauf.
+        if _setting(session, "agent_roll_pilot_ok"):
+            _set(session, "agent_roll_pilot_ok", "")
+            _set(session, "agent_roll_note",
+                 f"Pilot {pilot.hostname} meldete die neue Fassung, "
+                 f"jetzt nicht mehr - Bestaetigung beginnt von vorn")
+            session.commit()
 
         # Nur Fehlschlaege aus DIESEM Durchlauf zaehlen. Ohne den Zeitbezug
         # wuerde ein alter fehlgeschlagener Auftrag jedes spaetere Ausrollen
@@ -6229,6 +6410,29 @@ def health(request: Request, x_session: str = Header(default=""),
         antwort["version"] = update_manager.get_current_version()
         antwort["agent_version"] = agent_source_version()
         antwort["schema_version"] = migrate.get_version(engine)
+        # Laeuft gerade ein Systemupdate?
+        #
+        # Die Oberflaeche braucht das, um einen erwarteten Ausfall von
+        # einem echten zu unterscheiden: waehrend eines Updates startet
+        # das Backend neu, der Proxy antwortet mit 502, und die
+        # Offline-Leiste soll dann nicht nach zwanzig Sekunden Alarm
+        # schlagen. Bis 0.37.31 wusste sie es nur, wenn der Updatereiter
+        # vorher geladen war - wer die Oberflaeche geoeffnet hatte, ohne
+        # dort gewesen zu sein, oder wessen Kollege das Update in einem
+        # anderen Browser angestossen hatte, sah die Meldung trotzdem.
+        #
+        # Hier und nicht in einem eigenen Endpunkt, weil checkVersion()
+        # diese Route ohnehin bei jedem Durchlauf abfragt. Hinter
+        # derselben Schranke wie die Versionen (F-09): ein
+        # Unangemeldeter braucht die Auskunft nicht.
+        try:
+            antwort["update_running"] = update_manager.get_status().get(
+                "state") in ("triggered", "running")
+        except Exception:  # noqa: BLE001
+            # Eine Auskunft, die den Gesundheitscheck scheitern liesse,
+            # waere schlechter als keine - der Watcher entscheidet an
+            # dieser Route ueber Erfolg oder Ruecklauf eines Updates.
+            antwort["update_running"] = False
     return antwort
 
 

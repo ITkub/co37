@@ -223,6 +223,7 @@ REIHEN=(
   "paketmanager    $PY tests/paketmanager-test.py"
   "agent-selfheal  $PY tests/agent-selfheal-test.py"
   "reboot-report   $PY tests/reboot-report-test.py"
+  "rollout         $PY tests/rollout-test.py"
   "harness         $PY tests/harness-test.py"
   "archiv          $PY tests/archiv-test.py"
   "i18n            node tests/i18n-test.js frontend/index.html"

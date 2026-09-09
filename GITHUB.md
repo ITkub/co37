@@ -147,16 +147,18 @@ bleibt der Quellcode schlank und jede Version bekommt ihre eigenen,
 eindeutig zugeordneten Pakete. Noch nicht umgesetzt, muss vor der
 Veröffentlichung geklärt sein.
 
-## Noch offen: Pakete bauen
+## Erledigt: Pakete bauen
 
-`build_release.sh` braucht `zip` und `unzip`. **Beides bringt Git Bash
-nicht mit** — das Skript läuft dort also noch nicht.
+`build_release.sh` brauchte `zip` und `unzip`, die Git Bash nicht
+mitbringt — unter Windows lief das Bauen damit gar nicht.
 
-Drei Wege, wenn es soweit ist:
+**Abgelöst durch `build_release.py`**: Python kann ZIP-Dateien von Haus
+aus, signiert das Paket und `agent/agent.py` gleich mit und setzt die
+Ausführungsrechte der Shell-Skripte ausdrücklich (Pythons ZIP-Werkzeug
+überträgt sie sonst nicht). Aufruf:
 
-1. Die beiden Programme für Git Bash nachrüsten
-2. Das Bauen in Python umschreiben, das kann ZIP-Dateien von Haus aus
-3. Auf einem Linux-Rechner bauen — etwa KK-AG01
+```
+python build_release.py 0.37.31
+```
 
-Muss jetzt nicht entschieden werden. Zum Hochladen und Bearbeiten des
-Quellstands braucht es nichts davon.
+Das alte Skript liegt noch daneben, wird aber nicht mehr verwendet.

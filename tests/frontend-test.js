@@ -231,6 +231,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "spracheImDialogZeigen, setzeSprache, "
   + "setVorgabeSprache: (s) => { VORGABE_SPRACHE = s; }, "
   + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
+  + "getUpdateLaeuft: () => UPDATE_LAEUFT, "
   + "loadRollout, loadUsers, loadAudit, loadAccount, nuRechteAnzeigen, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
   + "renderLinuxCmd, "
@@ -801,6 +802,48 @@ global.setTimeout = origSetTimeout;
     DIALOGE_OFFEN.length = 0;
     api.setOfflineSeit(null); api.setUpdateLaeuft(false);
     bar.style.display = "none";
+  }
+
+  console.log("\n=== Weiss die Oberflaeche von einem laufenden Update? ===");
+  {
+    // Bis 0.37.31 setzte NUR renderUpdate() diese Angabe - also nur,
+    // wenn der Updatereiter vorher geladen war. Wer ihn nie geoeffnet
+    // hatte oder wessen Kollege das Update in einem anderen Browser
+    // anstiess, bekam nach zwanzig Sekunden die Offline-Leiste, obwohl
+    // der Ausfall erwartet war. Jetzt kommt es aus /api/health, das
+    // checkVersion() bei jedem Durchlauf ohnehin abfragt.
+    //
+    // Geprueft wird der Aufruf: checkVersion() gegen das echte Backend,
+    // und danach der Wert. Eine Suche im Quelltext bewiese nichts.
+    api.setUpdateLaeuft(true);
+    await api.checkVersion();
+    check("checkVersion holt den Zustand vom Server",
+          api.getUpdateLaeuft() === false, api.getUpdateLaeuft());
+
+    // Und zwar auch dann, wenn die Version unveraendert ist - der Fall,
+    // in dem checkVersion() frueh aussteigt. Genau dann wird die
+    // laengere Geduld gebraucht.
+    api.setUpdateLaeuft(true);
+    api.setPageVersion(null);          // frisch geladene Seite
+    await api.checkVersion();
+    check("auch beim allerersten Durchlauf",
+          api.getUpdateLaeuft() === false, api.getUpdateLaeuft());
+    api.setUpdateLaeuft(true);
+    await api.checkVersion();          // jetzt ist PAGE_VERSION gesetzt
+    check("und wenn die Version unveraendert bleibt",
+          api.getUpdateLaeuft() === false, api.getUpdateLaeuft());
+
+    // Gegenprobe: antwortet der Server gar nicht, bleibt der zuletzt
+    // bekannte Wert stehen. Genau dann wird er gebraucht - waehrend des
+    // Updates antwortet niemand mehr.
+    const echtesFetch2 = global.fetch;
+    global.fetch = async () => { throw new Error("weg"); };
+    api.setUpdateLaeuft(true);
+    await api.checkVersion();
+    check("faellt der Server aus, bleibt der letzte Stand stehen",
+          api.getUpdateLaeuft() === true, api.getUpdateLaeuft());
+    global.fetch = echtesFetch2;
+    api.setUpdateLaeuft(false);
   }
 
   console.log("\n=== Einstellungsdialog ===");

@@ -215,8 +215,25 @@ weiter. Ein pauschales `--nogpgcheck` oder `--no-gpg-checks` gehört hier
 ausdrücklich **nicht** hin: es gälte für die ganze Transaktion und ließe auch
 `python3-requests` und die übrigen Abhängigkeiten ungeprüft durch.
 
-Ein signiertes RPM wäre die bessere Lösung und setzt einen GPG-Schlüssel
-voraus, der auf jedem Zielsystem bekannt sein muss.
+**Warum das Paket nicht signiert ist.** Der Grund liegt nicht im
+Paketformat, sondern darin, wer baut: die Agentenpakete entstehen auf
+**deinem eigenen Server**, gebaut vom Update-Watcher nach jedem
+Systemupdate. Ein Signaturschlüssel müsste also dort liegen — entweder
+der Schlüssel des Herstellers auf jeder Kundenanlage, was schlechter
+wäre als gar keine Signatur, oder ein je Installation erzeugter, der
+dann genau das beweist, was die HTTPS-Verbindung und das
+Installations-Token schon beweisen: dass das Paket von diesem Server
+kommt.
+
+Das `.deb` hat dieselbe Eigenschaft — `apt-get` prüft eine lokale Datei
+ohnehin nicht signaturseitig. Ein echter Gewinn entstünde erst, wenn die
+Agentenpakete fertig signiert ausgeliefert statt beim Betreiber gebaut
+würden; für das MSI ginge das nicht, es lädt beim Bauen die
+Python-Embeddable nach.
+
+Was dabei **nicht** abgeschaltet wird: die Signaturprüfung der
+Distributionsquellen. Die Abhängigkeiten kommen aus den Repositories
+deiner Distribution und werden dort ganz normal geprüft.
 
 ### 3.3 Prüfen
 
@@ -909,6 +926,34 @@ Administratorenrolle.
 Die Länge der Felder ist begrenzt (Akteur 120, Aktion 80, Beschreibung
 1000 Zeichen). Ohne das ließ sich das Protokoll ohne Zugangsdaten mit
 einem überlangen Benutzernamen an der Anmeldung vollschreiben.
+
+### Archivieren statt verlieren
+
+Ab Werk ist gelöscht gelöscht. Wer die Einträge behalten will, trägt ein
+Verzeichnis ein — ebenfalls in `/etc/co37/backend.env`:
+
+```
+CO37_AUDIT_ARCHIVE=/var/lib/co37-archiv
+```
+
+Dann schreibt die Bereinigung die fälligen Einträge **vorher** dorthin,
+als JSON-Lines, eine Datei je Jahr (`audit-2025.jsonl`). Die Sicherung
+des Servers nimmt sie mit.
+
+**Misslingt das Schreiben, wird nichts gelöscht** — und der Grund steht
+als `audit.archive_failed` im Protokoll. Wer ein Archivziel einträgt,
+sagt damit „nichts geht verloren"; ein Löschen, das trotz misslungener
+Archivierung weiterläuft, hätte genau diese Zusage gebrochen. Der Preis
+ist, dass ein unbeschreibbares Ziel die Bereinigung anhält — das fällt
+auf, stiller Verlust nicht.
+
+Hintergrund: BSI OPS.1.1.5.**A5** verlangt einen festgelegten
+Löschprozess, **A8** die Archivierung. Die beiden ziehen in verschiedene
+Richtungen, und das aufzulösen ist eine Entscheidung des Betreibers.
+CO-37 wird damit kein Archivierungsprodukt — es legt die Daten hin und
+verwaltet sie nicht weiter. Das Archiv ist außerdem nur so
+vertrauenswürdig wie das Konto, das es schreibt; wer mehr braucht, nimmt
+den Weg über syslog auf eine andere Maschine.
 
 ---
 

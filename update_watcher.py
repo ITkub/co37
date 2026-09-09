@@ -149,7 +149,7 @@ POLL_SECONDS = 10
 # bleibt ein veralteter Watcher unbemerkt - und weil die Faehigkeit, sich
 # selbst zu erneuern, erst ab 0.4.3 vorhanden ist, kann er sich aus eigener
 # Kraft nie aktualisieren.
-WATCHER_VERSION = "0.37.31"
+WATCHER_VERSION = "0.37.32"
 WATCHER_INFO = STATE_DIR / "watcher.json"
 WATCHER_INFO_ALT = UPDATE_DIR / "watcher.json"
 WATCHER_FEATURES = ["managed_files", "self_update", "package_rebuild", "build_request"]
@@ -644,6 +644,56 @@ def write_build_status(data: dict):
         pass
 
 
+def pip_zeile_auswerten(ausgabe: str) -> list[dict]:
+    """
+    Macht aus der Ausgabe eines pip-Trockenlaufs Protokolleintraege.
+
+    pip schreibt bei --dry-run genau eine Zeile, die zaehlt:
+
+        Would install anyio-4.15.0 SQLAlchemy-2.0.52
+
+    Steht sie nicht da, aendert sich nichts. Getrennt von pip_vorschau(),
+    damit die Auswertung ohne pip pruefbar ist - eine Zeichenkettensuche
+    im Quelltext bewiese nur, dass jemand etwas hingeschrieben hat.
+    """
+    for zeile in ausgabe.splitlines():
+        zeile = zeile.strip()
+        if zeile.startswith("Would install "):
+            pakete = zeile[len("Would install "):].strip()
+            if pakete:
+                return [eintrag("upd.log.deps_plan", pakete=pakete)]
+    return [eintrag("upd.log.deps_none")]
+
+
+def pip_vorschau() -> list[dict]:
+    """
+    Sagt VOR dem Einspielen, welche Pakete sich tatsaechlich aendern.
+
+    Bis 0.37.31 lief 'pip install -r' bei jedem Update blind. Alle 29
+    Abhaengigkeiten sind gepinnt (F-59), also aendert sich normalerweise
+    nichts - aber ob das stimmt, war nur von Hand vor dem Ausrollen zu
+    sehen (0.37.17, 0.37.19) und danach nirgends festgehalten. Aendert
+    eine neue Fassung Pakete mit, steht es jetzt im Update-Protokoll.
+
+    Der Schritt ist eine AUSKUNFT, keine Schranke: was hier schiefgeht,
+    darf das Update nicht aufhalten. Das ist die Lehre aus F-48 - eine
+    Haertung, die den Betriebspfad bricht, richtet mehr Schaden an als
+    das, was sie abwehrt. Deshalb faengt der Aufruf alles ab und meldet
+    den Grund, statt zu werfen.
+    """
+    try:
+        res = run([str(VENV_PIP), "install", "--dry-run", "-r",
+                   str(BASE / "backend" / "requirements.txt")], timeout=600)
+    except Exception as exc:  # noqa: BLE001
+        return [eintrag("upd.log.deps_preview_failed", fehler=str(exc)[:200])]
+    if res.returncode != 0:
+        # Aeltere pip-Fassungen kennen --dry-run nicht. Kein Fehler,
+        # nur keine Auskunft.
+        grund = (res.stderr or res.stdout or "")[-200:]
+        return [eintrag("upd.log.deps_preview_failed", fehler=grund)]
+    return pip_zeile_auswerten(res.stdout or "")
+
+
 def build_packages(log_lines: list[dict] = None) -> tuple[bool, list[dict]]:
     """
     Baut die Agent-Pakete. Wird nach jedem Update aufgerufen und kann
@@ -920,6 +970,8 @@ def do_update():
             append_log(status, "upd.log.watcher_renewed")
 
         append_log(status, "upd.log.deps")
+        for eintrag_ in pip_vorschau():
+            append_eintrag(status, eintrag_)
         res = run([str(VENV_PIP), "install", "-q", "-r",
                    str(BASE / "backend" / "requirements.txt")], timeout=1200)
         if res.returncode != 0:

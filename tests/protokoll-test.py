@@ -323,5 +323,98 @@ check("es gibt keine Einstellung dafuer in der Datenbank",
       "CO37_AUDIT_DAYS" in quelle and "SET_AUDIT" not in quelle)
 
 
+# ======================================================================
+# Archivierung vor dem Loeschen (OPS.1.1.5.A8)
+# ======================================================================
+# A5 verlangt einen Loeschprozess, A8 die Archivierung. Beides zugleich
+# geht nur, wenn das Geloeschte vorher woanders steht. Ab Werk aus; ist
+# ein Ziel eingetragen, gilt: erst archivieren, dann loeschen - und wenn
+# das Archivieren misslingt, wird NICHT geloescht.
+print("\n--- Archivierung ---")
+import json as _json  # noqa: E402
+
+check("ab Werk ist kein Archiv eingetragen", main.AUDIT_ARCHIVE == "",
+      repr(main.AUDIT_ARCHIVE))
+check("und das Ziel kommt aus der Umgebung",
+      'os.getenv("CO37_AUDIT_ARCHIVE"' in (WURZEL / "backend" / "main.py")
+      .read_text(encoding="utf-8"))
+
+_archiv = TMP / "archiv"
+_echt_archive = main.AUDIT_ARCHIVE
+main.AUDIT_ARCHIVE = str(_archiv)
+try:
+    leeren()
+    # Zwei faellige Eintraege aus verschiedenen Jahren, einer aktuell.
+    eintrag(400, actor="alt-a", action="login.failed")
+    eintrag(800, actor="alt-b", action="host.approve")
+    eintrag(1, actor="neu", action="login.ok")
+    with Session(main.engine) as s:
+        entfernt = main.pruefprotokoll_bereinigen(s)
+        s.commit()
+
+    check("die faelligen Eintraege wurden entfernt", entfernt == 2, entfernt)
+    _dateien = sorted(p.name for p in _archiv.glob("audit-*.jsonl"))
+    check("es entstanden Archivdateien", len(_dateien) >= 1, _dateien)
+
+    _zeilen = []
+    for _p in _archiv.glob("audit-*.jsonl"):
+        for _z in _p.read_text(encoding="utf-8").splitlines():
+            if _z.strip():
+                _zeilen.append(_json.loads(_z))
+    _actors = sorted(z["actor"] for z in _zeilen)
+    check("beide entfernten Eintraege stehen im Archiv",
+          _actors == ["alt-a", "alt-b"], _actors)
+    check("der aktuelle Eintrag steht NICHT im Archiv",
+          "neu" not in _actors, _actors)
+    check("jede Zeile ist fuer sich lesbares JSON", len(_zeilen) == 2, _zeilen)
+    check("die Zeile traegt Zeitpunkt und Aktion",
+          all(z.get("at") and z.get("action") for z in _zeilen), _zeilen)
+    # Nach Jahr des EINTRAGS benannt, nicht nach dem der Bereinigung -
+    # sonst laege beim ersten Lauf auf einer alten Anlage der ganze
+    # Ueberhang in einer einzigen Datei des laufenden Jahres.
+    _jahre = {int(n[len("audit-"):-len(".jsonl")]) for n in _dateien}
+    _erwartet = {main.ensure_utc(main.utcnow()).year - j
+                 for j in (2, 3)} | {main.ensure_utc(main.utcnow()).year - 1}
+    check("die Dateien sind nach dem Jahr des Eintrags benannt",
+          len(_jahre) == 2 and _jahre <= _erwartet, sorted(_jahre))
+
+    # Zweiter Lauf: es ist nichts mehr faellig, also kommt auch nichts
+    # doppelt ins Archiv.
+    _vorher = sum(len(p.read_text(encoding="utf-8").splitlines())
+                  for p in _archiv.glob("audit-*.jsonl"))
+    with Session(main.engine) as s:
+        main.pruefprotokoll_bereinigen(s)
+        s.commit()
+    _nachher = sum(len(p.read_text(encoding="utf-8").splitlines())
+                   for p in _archiv.glob("audit-*.jsonl"))
+    check("ein zweiter Lauf schreibt nichts doppelt",
+          _vorher == _nachher, f"{_vorher} -> {_nachher}")
+
+    # Der Kern: laesst sich nicht archivieren, wird nicht geloescht.
+    leeren()
+    eintrag(400, actor="bleibt", action="login.failed")
+    main.AUDIT_ARCHIVE = str(TMP / "gibtsnicht" / "\0ungueltig")
+    with Session(main.engine) as s:
+        entfernt2 = main.pruefprotokoll_bereinigen(s)
+        s.commit()
+    check("bei misslungener Archivierung wird nichts geloescht",
+          entfernt2 == 0, entfernt2)
+    _rest = bestand()
+    check("der Eintrag steht noch da",
+          any(a == "bleibt" for a, _, _ in _rest), _rest)
+    check("und der Grund steht im Protokoll",
+          any(ak == "audit.archive_failed" for _, ak, _ in _rest), _rest)
+finally:
+    main.AUDIT_ARCHIVE = _echt_archive
+
+# Ohne eingetragenes Ziel bleibt es beim alten Verhalten.
+leeren()
+eintrag(400, actor="weg", action="login.failed")
+with Session(main.engine) as s:
+    entfernt3 = main.pruefprotokoll_bereinigen(s)
+    s.commit()
+check("ohne Archivziel wird wie bisher geloescht", entfernt3 == 1, entfernt3)
+
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

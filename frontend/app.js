@@ -226,6 +226,19 @@ async function checkVersion(){
   try { h = await (await fetch(API + "/api/health", {cache: "no-store"})).json(); }
   catch(e){ return; }
 
+  // Muss VOR den beiden Ausstiegen darunter stehen. Sonst erfaehrt eine
+  // Oberflaeche, die gerade erst geladen wurde oder deren Version
+  // unveraendert ist, nie von einem laufenden Update - und genau in
+  // diesen beiden Faellen wird die laengere Geduld gebraucht.
+  //
+  // Bis 0.37.31 setzte nur renderUpdate() diese Angabe, also nur, wenn
+  // der Updatereiter vorher geladen war. Wer ihn nie geoeffnet hatte
+  // oder wessen Kollege das Update in einem anderen Browser anstiess,
+  // bekam nach zwanzig Sekunden die Offline-Leiste zu sehen, obwohl der
+  // Ausfall erwartet war. Der Server weiss es; hier wird es geholt, wo
+  // ohnehin bei jedem Durchlauf gefragt wird.
+  if ("update_running" in h) UPDATE_LAEUFT = !!h.update_running;
+
   if (PAGE_VERSION === null){ PAGE_VERSION = h.version; return; }
   if (h.version === PAGE_VERSION) return;
 

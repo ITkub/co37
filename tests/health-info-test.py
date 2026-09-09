@@ -48,6 +48,11 @@ from models import LoginSession, Role, User  # noqa: E402
 SQLModel.metadata.create_all(main.engine)
 
 VERSIONSFELDER = ("version", "agent_version", "schema_version")
+# Seit 0.37.32 haengt eine vierte Auskunft an derselben Schranke: ob
+# gerade ein Systemupdate laeuft. Die Oberflaeche unterscheidet damit
+# einen erwarteten Ausfall von einem echten - ein Unangemeldeter braucht
+# sie nicht.
+GESCHUETZT = VERSIONSFELDER + ("update_running",)
 
 fails = 0
 
@@ -95,7 +100,7 @@ offen = hole("192.0.2.50")
 check("die Route antwortet auch unangemeldet aus dem Netz",
       offen.get("status") == "ok", offen)
 check("die Vorgabesprache bleibt drin", "default_language" in offen, offen)
-for feld in VERSIONSFELDER:
+for feld in GESCHUETZT:
     check(f"{feld} steht NICHT in der offenen Antwort", feld not in offen,
           offen.get(feld))
 
@@ -112,12 +117,13 @@ check("und die Version ist keine leere Angabe",
       bool(lokal.get("version")), lokal.get("version"))
 
 check("auch ueber ::1", "version" in hole("::1"))
+check("und update_running ebenfalls", "update_running" in lokal, lokal)
 
 
 # ======================================================================
 print("--- Was ein angemeldeter Benutzer sieht ---")
 mit_kopf = hole("192.0.2.50", sitzung=TOKEN)
-for feld in VERSIONSFELDER:
+for feld in GESCHUETZT:
     check(f"mit Sitzung (Kopfzeile) ist {feld} da", feld in mit_kopf,
           mit_kopf.get(feld))
 
@@ -129,6 +135,33 @@ check("und ebenso ueber das Sitzungscookie", "version" in mit_cookie,
 unbekannt = hole("192.0.2.50", sitzung="gibt-es-nicht")
 check("eine unbekannte Sitzung oeffnet nichts",
       "version" not in unbekannt, unbekannt)
+check("und auch update_running nicht",
+      "update_running" not in unbekannt, unbekannt)
+
+# Der Wert selbst, nicht nur seine Anwesenheit: ohne laufendes Update
+# muss er falsch sein, sonst hielte die Oberflaeche jeden Ausfall drei
+# Minuten lang fuer erwartet.
+check("ohne laufendes Update ist update_running falsch",
+      mit_kopf.get("update_running") is False, mit_kopf.get("update_running"))
+
+import json as _json  # noqa: E402
+_statusdatei = main.update_manager.UPDATE_DIR / "status.json"
+_statusdatei.parent.mkdir(parents=True, exist_ok=True)
+_gemerkt = _statusdatei.read_text() if _statusdatei.exists() else None
+try:
+    _statusdatei.write_text(_json.dumps({"state": "running", "log": []}))
+    _laeuft = hole("192.0.2.50", sitzung=TOKEN)
+    check("waehrend eines Updates ist update_running wahr",
+          _laeuft.get("update_running") is True, _laeuft.get("update_running"))
+    _statusdatei.write_text(_json.dumps({"state": "success", "log": []}))
+    _fertig = hole("192.0.2.50", sitzung=TOKEN)
+    check("nach dem Update wieder falsch",
+          _fertig.get("update_running") is False, _fertig.get("update_running"))
+finally:
+    if _gemerkt is None:
+        _statusdatei.unlink(missing_ok=True)
+    else:
+        _statusdatei.write_text(_gemerkt)
 
 # Eine abgelaufene Sitzung ebenfalls nicht.
 with Session(main.engine) as s:

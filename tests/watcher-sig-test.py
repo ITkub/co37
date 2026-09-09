@@ -818,6 +818,72 @@ else:
           "getattr(os," not in deb, "ein Rueckfall waere ein stiller Verzicht")
 
 # ======================================================================
+# Der Trockenlauf vor 'pip install'
+# ======================================================================
+# Bis 0.37.31 lief 'pip install -r' bei jedem Update blind. Alle 29
+# Abhaengigkeiten sind gepinnt (F-59), es sollte sich also nichts
+# aendern - nur war das nur von Hand vor dem Ausrollen zu sehen und
+# danach nirgends festgehalten.
+#
+# Geprueft wird die AUSWERTUNG, nicht der pip-Aufruf: pip_zeile_auswerten
+# ist genau dafuer eine eigene Funktion. Die Zeilen unten sind die echte
+# Ausgabeform von 'pip install --dry-run'.
+print()
+print("--- Trockenlauf vor pip install ---")
+
+_nichts = watcher.pip_zeile_auswerten(
+    "Requirement already satisfied: fastapi in ./venv (0.141.1)\n"
+    "Requirement already satisfied: anyio in ./venv (4.15.0)\n")
+check("ohne Aenderung genau ein Eintrag", len(_nichts) == 1, _nichts)
+check("und der sagt 'keine Aenderung'",
+      _nichts[0].get("k") == "upd.log.deps_none", _nichts)
+
+_plan = watcher.pip_zeile_auswerten(
+    "Collecting anyio==4.15.0\n"
+    "  Downloading anyio-4.15.0-py3-none-any.whl (90 kB)\n"
+    "Would install anyio-4.15.0 SQLAlchemy-2.0.52\n")
+check("mit Aenderung genau ein Eintrag", len(_plan) == 1, _plan)
+check("und der nennt den Schluessel",
+      _plan[0].get("k") == "upd.log.deps_plan", _plan)
+check("die Pakete stehen als Parameter dabei, nicht im Satz",
+      _plan[0].get("p", {}).get("pakete")
+      == "anyio-4.15.0 SQLAlchemy-2.0.52", _plan)
+
+# Gegenprobe: eine leere Ausgabe darf nicht als Aenderung durchgehen,
+# und eine Zeile, die nur zufaellig 'install' enthaelt, auch nicht.
+check("eine leere Ausgabe heisst 'keine Aenderung'",
+      watcher.pip_zeile_auswerten("")[0].get("k") == "upd.log.deps_none")
+check("'Would install' ohne Pakete zaehlt nicht als Plan",
+      watcher.pip_zeile_auswerten("Would install \n")[0].get("k")
+      == "upd.log.deps_none")
+check("eine beliebige Zeile mit 'install' zaehlt nicht als Plan",
+      watcher.pip_zeile_auswerten("Attempting uninstall: anyio\n")[0]
+      .get("k") == "upd.log.deps_none")
+
+# Und die Einbettung: der Trockenlauf steht VOR dem echten Aufruf, und
+# er darf das Update nicht aufhalten (F-48 - eine Haertung, die den
+# Betriebspfad bricht, richtet mehr Schaden an als sie abwehrt).
+_vorschau = next((k for k in _ast2.walk(_baum_w)
+                  if isinstance(k, _ast2.FunctionDef)
+                  and k.name == "pip_vorschau"), None)
+check("pip_vorschau() gibt es", _vorschau is not None)
+if _vorschau:
+    _rumpf = _ast2.get_source_segment(quelle, _vorschau) or ""
+    check("sie faengt jeden Fehler ab, statt zu werfen",
+          "except Exception" in _rumpf and "raise" not in _rumpf, _rumpf[:80])
+    check("und sie ruft pip mit --dry-run auf", '"--dry-run"' in _rumpf)
+
+check("do_update() ist weiterhin auffindbar", _do is not None)
+if _do:
+    _text = _ast2.get_source_segment(quelle, _do) or ""
+    _zeilen_do = _text.splitlines()
+    _i_vor = next((i for i, z in enumerate(_zeilen_do) if "pip_vorschau()" in z), -1)
+    _i_pip = next((i for i, z in enumerate(_zeilen_do)
+                   if 'VENV_PIP' in z and '"install"' in z), -1)
+    check("der Trockenlauf steht vor dem echten pip-Aufruf",
+          _i_vor >= 0 and _i_pip >= 0 and _i_vor < _i_pip,
+          f"Vorschau Zeile {_i_vor}, pip Zeile {_i_pip}")
+
 print()
 print(f"{'FEHLER: ' + str(fails) if fails else 'alle Pruefungen bestanden'}")
 shutil.rmtree(TMP, ignore_errors=True)
