@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- CO37_FRONTEND_VERSION: 0.37.27 -->
+<!-- CO37_FRONTEND_VERSION: 0.37.28 -->
 <title>CO-37</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2212%22%20fill%3D%22%23020817%22%2F%3E%3Cpath%20d%3D%22M32%209%2046%2016v13c0%2011-6%2018-14%2022-8-4-14-11-14-22V16z%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223.5%22%20stroke-linejoin%3D%22round%22%2F%3E%3Cpath%20d%3D%22M22%2027h20l-4%207H26z%22%20fill%3D%22%23ffffff%22%2F%3E%3Cpath%20d%3D%22M26%2038h12%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E">
 <style>
@@ -722,6 +722,11 @@ dialog#dlgSettings .hint{max-width:78ch}
             ><span style="color:var(--muted-2)" id="infoLinux">—</span></span>
           <button class="primary" id="dlLinux" data-i18n="settings.agents.download_deb">Download</button>
         </div>
+        <div class="vrow" id="rowRpm">
+          <span><span data-i18n-html="settings.agents.rpm_pkg"><b>Linux</b> · .rpm for Red Hat, Oracle, Rocky, AlmaLinux and SUSE<br></span
+            ><span style="color:var(--muted-2)" id="infoRpm">—</span></span>
+          <button class="primary" id="dlRpm" data-i18n="settings.agents.download_rpm">Download</button>
+        </div>
         <div class="vrow" id="rowWin">
           <span><span data-i18n-html="settings.agents.windows_pkg"><b>Windows</b> · .msi, Python included<br></span
             ><span style="color:var(--muted-2)" id="infoWin">—</span></span>
@@ -739,6 +744,15 @@ dialog#dlgSettings .hint{max-width:78ch}
         <div class="section-title" data-i18n="settings.agents.linux">Set up Linux</div>
         <div class="hint" data-i18n-html="settings.agents.linux_hint">Run on the target system as root. Downloads the package and sets the agent up.<br> The command carries a token that expires shortly — whatever is left behind in the shell history on the target system is worthless by then. Generate it only just before setting up.</div>
         <div id="agBase" class="hint"></div>
+        <div class="row">
+          <label data-i18n="settings.agents.distro">Distribution
+            <select id="linDistro">
+              <option value="deb" data-i18n="settings.agents.distro_deb">Debian, Ubuntu — .deb</option>
+              <option value="dnf" data-i18n="settings.agents.distro_dnf">Red Hat, Oracle, Rocky, AlmaLinux — .rpm</option>
+              <option value="zypper" data-i18n="settings.agents.distro_suse">SUSE, openSUSE — .rpm</option>
+            </select>
+          </label>
+        </div>
         <div class="token" id="cmdLinux"></div>
         <div id="tokenState" class="hint" style="margin-top:-4px"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">

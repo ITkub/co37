@@ -629,5 +629,77 @@ else:
               "rm -rf /etc/co37" not in _skripte)
 
 
+# ======================================================================
+# Versionsnummer aus dem Paketdateinamen
+# ======================================================================
+# Drei Formate, drei Schreibweisen derselben Version. Die Oberflaeche
+# vergleicht die ermittelte Version mit der der ausgelieferten agent.py
+# und warnt bei Abweichung - liest sie beim RPM "0.37.27-1.noarch",
+# warnt sie bei jedem Bau.
+print("\n=== Version aus dem Paketdateinamen ===")
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+try:
+    from main import paket_version as _pv  # noqa: E402
+except Exception as exc:  # noqa: BLE001
+    check("backend/main.py laesst sich laden", False, str(exc)[:120])
+else:
+    for _name, _soll in [
+            ("co37-agent_0.37.27_all.deb", "0.37.27"),
+            ("co37-agent-0.37.27-1.noarch.rpm", "0.37.27"),
+            ("co37-agent-0.37.27.msi", "0.37.27"),
+            # Zweistellige Release-Nummer und eine andere Architektur -
+            # beides erzeugt rpmbuild, sobald man einmal neu baut.
+            ("co37-agent-1.2.3-12.x86_64.rpm", "1.2.3"),
+            ("co37-agent_1.2.3_all.deb", "1.2.3")]:
+        check(f"{_name} -> {_soll}", _pv(_name) == _soll, _pv(_name))
+    # Gegenprobe: die Zerlegung darf nicht einfach immer beim ersten
+    # Bindestrich abschneiden. Beim .deb steht dort nichts zum
+    # Abschneiden, und ein MSI traegt gar kein Release.
+    check("beim .deb wird nicht am Bindestrich abgeschnitten",
+          _pv("co37-agent_0.37.27_all.deb") == "0.37.27")
+
+    # ------------------------------------------------------------------
+    # Alle drei Pakete werden auch gemeldet
+    # ------------------------------------------------------------------
+    # Im Testaufbau baut niemand Pakete - der Watcher ist ein eigener,
+    # privilegierter Prozess. Ohne diesen Abschnitt bliebe ungeprueft,
+    # ob das Backend ein vorhandenes RPM ueberhaupt findet: die
+    # Oberflaechenpruefung sieht dann nur "noch nicht gebaut" und ist
+    # damit gruen, egal was das Backend tut. Also hier ein Verzeichnis
+    # mit den drei Dateien unterschieben.
+    import main as _main  # noqa: E402
+    _echt = _main.paketverzeichnis
+    _v = _main.agent_source_version()
+    with tempfile.TemporaryDirectory() as _d:
+        _dir = Path(_d)
+        _namen = {
+            "linux":   f"co37-agent_{_v}_all.deb",
+            "rpm":     f"co37-agent-{_v}-1.noarch.rpm",
+            "windows": f"co37-agent-{_v}.msi",
+        }
+        for _n in _namen.values():
+            (_dir / _n).write_bytes(b"x")
+        _main.paketverzeichnis = lambda: _dir
+        try:
+            _antwort = _main.list_packages()
+        finally:
+            _main.paketverzeichnis = _echt
+    for _schluessel, _n in _namen.items():
+        _eintrag = _antwort.get(_schluessel)
+        check(f"{_schluessel} wird gemeldet", bool(_eintrag),
+              str(_antwort.get(_schluessel)))
+        if _eintrag:
+            check(f"{_schluessel} nennt {_n}", _eintrag["name"] == _n,
+                  _eintrag["name"])
+            # Der Grund fuer die ganze Zerlegung: passt die Version
+            # nicht, zeigt die Oberflaeche eine Abweichung an, die keine
+            # ist.
+            check(f"{_schluessel} gilt als passend",
+                  _eintrag["matches"] is True, _eintrag["version"])
+    check("keine falsche Abweichung gemeldet",
+          not _antwort.get("mismatch"), str(_antwort.get("mismatch")))
+
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

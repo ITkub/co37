@@ -1697,6 +1697,7 @@ function renderAgentsTab(data, loadError){
         : t("settings.agents.cmd_base_dynamic"));
 
   const debName = `co37-agent_${want}_all.deb`;
+  const rpmName = `co37-agent-${want}-1.noarch.rpm`;
   const msiName = `co37-agent-${want}.msi`;
 
   // Abweichende Benennung melden statt stillschweigend zu beheben
@@ -1720,6 +1721,19 @@ function renderAgentsTab(data, loadError){
   dlL.textContent = lin ? t("settings.agents.download_deb") : t("settings.agents.not_available");
   dlL.onclick = lin ? () => downloadPkg(lin.name) : null;
 
+  // ---- Linux, RPM ----
+  // Ein Paket fuer beide RPM-Familien: noarch, und die drei
+  // Abhaengigkeiten heissen auf Red Hat wie auf SUSE gleich.
+  const rpm = data?.rpm;
+  document.getElementById("infoRpm").textContent = rpm
+    ? `${rpm.name} · ${fmtSize(rpm.size)} · ${fmtTime(rpm.built_at)}`
+      + (rpm.matches ? "" : t("settings.agents.version_mismatch"))
+    : loadError ? t("msg.unavailable") : t("settings.agents.not_built");
+  const dlR = document.getElementById("dlRpm");
+  dlR.disabled = !rpm;
+  dlR.textContent = rpm ? t("settings.agents.download_rpm") : t("settings.agents.not_available");
+  dlR.onclick = rpm ? () => downloadPkg(rpm.name) : null;
+
   // ---- Windows ----
   const win = data?.windows;
   document.getElementById("infoWin").textContent = win
@@ -1735,6 +1749,7 @@ function renderAgentsTab(data, loadError){
   // gebaut. Namen des Pakets hier merken, damit das spaeter ohne erneuten
   // Abruf geht.
   LINUX_PKG = lin?.name || debName;
+  LINUX_PKG_RPM = rpm?.name || rpmName;
   LINUX_BASE = base;
   renderLinuxCmd();
 
@@ -1745,7 +1760,27 @@ function renderAgentsTab(data, loadError){
 /* ---------- Installations-Token ---------- */
 // Der Befehl steht nur im Browser, nie in der Datenbank: dort liegt vom
 // Token ausschliesslich der Hash.
-let LINUX_PKG = "", LINUX_BASE = "", INSTALL_TOKEN = null, TOKEN_TIMER = null;
+let LINUX_PKG = "", LINUX_PKG_RPM = "", LINUX_BASE = "",
+    INSTALL_TOKEN = null, TOKEN_TIMER = null;
+
+// Ein Paket, drei Aufrufe. Die Unterschiede sind nicht kosmetisch:
+// apt-get gibt es auf Red Hat und SUSE nicht, der Dateiname des Pakets
+// ist ein anderer, und beide RPM-Paketmanager weisen ein unsigniertes
+// Paket ab, wenn man es ihnen nicht ausdruecklich erlaubt. Unser RPM ist
+// unsigniert - genau wie das .deb, das apt-get bei einer lokalen Datei
+// ebenfalls nicht prueft. Der Schalter schaltet also keine Pruefung ab,
+// die sonst etwas faende, sondern macht das Verhalten ueber die
+// Distributionen hinweg gleich. Ein signiertes RPM waere die bessere
+// Loesung und braucht einen GPG-Schluessel, der auf jedem Zielsystem
+// bekannt sein muss - das ist eine eigene Entscheidung, keine Zugabe.
+const LINUX_INSTALL = {
+  deb:    { datei: "/tmp/co37-agent.deb", rpm: false,
+            befehl: "apt-get install -y --allow-downgrades" },
+  dnf:    { datei: "/tmp/co37-agent.rpm", rpm: true,
+            befehl: "dnf install -y --nogpgcheck" },
+  zypper: { datei: "/tmp/co37-agent.rpm", rpm: true,
+            befehl: "zypper --non-interactive install --allow-unsigned-rpm" },
+};
 // Aus den Einstellungen; leer bedeutet "Adresse des Aufrufs verwenden".
 let PUBLIC_URL = "";
 
@@ -1761,9 +1796,12 @@ function renderLinuxCmd(){
   // Mit && verkettet: schlaegt der Download fehl, laeuft apt gar nicht erst
   // an. Sonst kommt eine irrefuehrende Meldung ueber eine nicht
   // unterstuetzte Datei, obwohl in Wahrheit der Download scheiterte.
+  const art = LINUX_INSTALL[document.getElementById("linDistro").value]
+              || LINUX_INSTALL.deb;
+  const paket = art.rpm ? LINUX_PKG_RPM : LINUX_PKG;
   box.textContent =
-    `curl -fsSL -H "X-Install-Token: ${INSTALL_TOKEN.token}" ${LINUX_BASE}/api/v1/packages/${LINUX_PKG} -o /tmp/co37-agent.deb \\\n`
-  + `  && CO37_SERVER="${LINUX_BASE}" apt-get install -y --allow-downgrades /tmp/co37-agent.deb`;
+    `curl -fsSL -H "X-Install-Token: ${INSTALL_TOKEN.token}" ${LINUX_BASE}/api/v1/packages/${paket} -o ${art.datei} \\\n`
+  + `  && CO37_SERVER="${LINUX_BASE}" ${art.befehl} ${art.datei}`;
   copyBtn.disabled = false;
 }
 
@@ -1924,6 +1962,9 @@ async function rolloutStarten(){
 document.getElementById("roStart").onclick = async () => { await rolloutStarten(); };
 
 document.getElementById("btnMakeToken").onclick = makeInstallToken;
+// Die Wahl der Distribution aendert nur den angezeigten Befehl. Das
+// Token bleibt gueltig - es haengt am Server, nicht am Paketformat.
+document.getElementById("linDistro").onchange = renderLinuxCmd;
 document.getElementById("copyLinux").onclick = () =>
   copy(document.getElementById("cmdLinux").textContent, t("settings.agents.linux_cmd_label"));
 document.getElementById("copyWin").onclick = () =>

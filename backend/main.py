@@ -4610,10 +4610,42 @@ async def clear_downtime(host_id: Kennung, request: Request,
 # ======================================================================
 # Agent-Pakete
 # ======================================================================
+def paket_version(dateiname: str) -> str:
+    """
+    Zieht die Agent-Version aus einem Paketdateinamen.
+
+    Die drei Formate benennen dieselbe Version unterschiedlich:
+
+        co37-agent_0.37.27_all.deb          -> 0.37.27
+        co37-agent-0.37.27-1.noarch.rpm     -> 0.37.27
+        co37-agent-0.37.27.msi              -> 0.37.27
+
+    Beim RPM folgen hinter der Version noch Release und Architektur,
+    beide mit Bindestrich abgetrennt. Ohne diese Zerlegung meldete die
+    Oberflaeche "0.37.27-1.noarch", verglich das mit der Version der
+    ausgelieferten agent.py und zeigte bei jedem Bau eine Abweichung an,
+    die keine ist.
+
+    Eigene Funktion, damit sie ohne laufendes Backend geprueft werden
+    kann - eine Zeichenkettensuche im Quelltext beweist hier nichts.
+    """
+    stamm = Path(dateiname).stem.replace("_all", "")
+    ver = stamm.replace("co37-agent", "").strip("-_")
+    if dateiname.endswith(".rpm"):
+        ver = ver.split("-")[0]
+    return ver
+
+
 @app.get("/api/v1/packages", dependencies=[Depends(require_admin)])
 def list_packages():
     """
-    Zeigt je ein Linux- und ein Windows-Paket: das jeweils zuletzt gebaute.
+    Zeigt je ein .deb, ein .rpm und ein .msi: das jeweils zuletzt gebaute.
+
+    Das .rpm ist EIN Paket fuer beide RPM-Familien - Red Hat, Oracle,
+    Rocky, AlmaLinux und SUSE. Es ist noarch und haengt nur an python3,
+    python3-requests und python3-cryptography; diese drei Namen loesen
+    auf beiden Familien auf. Ein getrenntes Paket je Familie waere ein
+    zweites Produkt ohne Gegenwert.
 
     Es wird bewusst nichts geloescht. Eine frueherer Entwurf entfernte alle
     Pakete, deren Version nicht zur ausgelieferten agent.py passte. Weichen
@@ -4626,15 +4658,15 @@ def list_packages():
     statt stillschweigend behoben.
     """
     want = agent_source_version()
-    result = {"agent_version": want, "linux": None, "windows": None, "mismatch": []}
+    result = {"agent_version": want, "linux": None, "rpm": None,
+              "windows": None, "mismatch": []}
 
     pkg_dir = paketverzeichnis()
     if not pkg_dir.is_dir():
         return result
 
     def info(f):
-        stem = f.stem.replace("_all", "")
-        ver = stem.replace("co37-agent", "").strip("-_")
+        ver = paket_version(f.name)
         return {
             "name": f.name,
             "version": ver,
@@ -4643,7 +4675,7 @@ def list_packages():
             "built_at": ensure_utc(from_timestamp(f.stat().st_mtime)),
         }
 
-    for suffix, key in ((".deb", "linux"), (".msi", "windows")):
+    for suffix, key in ((".deb", "linux"), (".rpm", "rpm"), (".msi", "windows")):
         found = [f for f in pkg_dir.glob(f"co37-agent*{suffix}") if f.is_file()]
         if not found:
             continue

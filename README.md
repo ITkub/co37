@@ -151,7 +151,8 @@ Agents und warten dann auf Freigabe.
 
 ### 3.1 Befehl aus der Oberfläche holen
 
-**Einstellungen → Agents → Linux → Befehl kopieren.** Enthält Serveradresse und
+**Einstellungen → Agents → Linux einrichten → Distribution wählen → Befehl
+kopieren.** Enthält Serveradresse und
 ein frisch erzeugtes **Installations-Token** bereits eingesetzt. Das Token läuft
 nach 15 Minuten ab und gilt für wenige Abrufe — was davon in der Verlaufsdatei
 des Zielsystems zurückbleibt, ist dann wertlos. Deshalb erst kurz vor der
@@ -160,14 +161,37 @@ Einrichtung erzeugen.
 
 ### 3.2 Auf dem Zielsystem ausführen
 
-Als root, Beispiel:
+Als root. **Debian, Ubuntu:**
 
 ```
 curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent_VERSION_all.deb -o /tmp/co37-agent.deb && CO37_SERVER="http://192.168.1.10:8080" apt-get install -y --allow-downgrades /tmp/co37-agent.deb
 ```
 
-`apt-get install` statt `dpkg -i` — sonst wird `python3-requests` nicht
-mitaufgelöst.
+**Red Hat, Oracle, Rocky, AlmaLinux:**
+
+```
+curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent-VERSION-1.noarch.rpm -o /tmp/co37-agent.rpm && CO37_SERVER="http://192.168.1.10:8080" dnf install -y --nogpgcheck /tmp/co37-agent.rpm
+```
+
+**SUSE, openSUSE:**
+
+```
+curl -fsSL -H "X-Install-Token: DEIN-INSTALL-TOKEN" http://192.168.1.10:8080/api/v1/packages/co37-agent-VERSION-1.noarch.rpm -o /tmp/co37-agent.rpm && CO37_SERVER="http://192.168.1.10:8080" zypper --non-interactive install --allow-unsigned-rpm /tmp/co37-agent.rpm
+```
+
+Es ist **ein** RPM für beide Familien: `noarch`, und die drei Abhängigkeiten
+(`python3`, `python3-requests`, `python3-cryptography`) heißen auf Red Hat wie
+auf SUSE gleich.
+
+`apt-get install` statt `dpkg -i` und `dnf`/`zypper` statt `rpm -i` — sonst
+wird `python3-requests` nicht mitaufgelöst.
+
+Das Paket ist nicht signiert; deshalb steht `--nogpgcheck` beziehungsweise
+`--allow-unsigned-rpm` im Befehl. Das schaltet keine Prüfung ab, die sonst
+etwas fände — es macht das Verhalten über die Distributionen hinweg gleich.
+Beim `.deb` prüft `apt-get` eine lokale Datei ohnehin nicht. Ein signiertes
+RPM wäre die bessere Lösung und setzt einen GPG-Schlüssel voraus, der auf
+jedem Zielsystem bekannt sein muss.
 
 ### 3.3 Prüfen
 

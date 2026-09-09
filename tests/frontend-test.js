@@ -233,6 +233,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "setUpdateLaeuft: (b) => { UPDATE_LAEUFT = b; }, "
   + "loadRollout, loadUsers, loadAudit, loadAccount, nuRechteAnzeigen, "
   + "setMe: (m) => { ME = m; }, getMe: () => ME, renderRackHead, makeInstallToken, forgetInstallToken: () => { INSTALL_TOKEN = null; renderLinuxCmd(); }, "
+  + "renderLinuxCmd, "
   + "render, setAreas: (a) => { AREAS = a; }, applyDrop, "
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
@@ -326,6 +327,92 @@ global.setTimeout = origSetTimeout;
   }
   check("Warnhinweis bei Abweichung sichtbar",
         el("pkgWarn").innerHTML.length > 0 || !el("infoLinux").textContent.includes("⚠"));
+
+  console.log("\n=== Installationsbefehl je Distribution ===");
+  // Ein RPM fuer beide Familien, aber drei verschiedene Aufrufe. Der
+  // Fehler, den diese Pruefungen abfangen sollen, ist der naheliegende:
+  // den Debian-Befehl stehen lassen und nur den Dateinamen tauschen.
+  // apt-get gibt es auf Red Hat und SUSE nicht.
+  check("RPM-Zeile gefuellt", el("infoRpm").textContent.length > 0,
+        el("infoRpm").textContent);
+  // Unabhaengig davon, ob im Testaufbau ueberhaupt etwas gebaut wurde:
+  // der Schluessel muss da sein. Fehlt er, zeigt die Oberflaeche
+  // dauerhaft "noch nicht gebaut", auch wenn das Paket im Ordner liegt.
+  check("Backend meldet einen RPM-Schluessel",
+        !!pkgs && Object.prototype.hasOwnProperty.call(pkgs, "rpm"),
+        pkgs ? Object.keys(pkgs).join(",") : "kein Abruf");
+
+  const varianten = {
+    deb:    { paket: ".deb", werkzeug: "apt-get install",   datei: "/tmp/co37-agent.deb" },
+    dnf:    { paket: ".rpm", werkzeug: "dnf install",       datei: "/tmp/co37-agent.rpm" },
+    zypper: { paket: ".rpm", werkzeug: "zypper --non-interactive install",
+              datei: "/tmp/co37-agent.rpm" },
+  };
+  const gebaut = {};
+  for (const [wahl, soll] of Object.entries(varianten)) {
+    el("linDistro").value = wahl;
+    api.renderLinuxCmd();
+    const c = el("cmdLinux").textContent;
+    gebaut[wahl] = c;
+    // Auf den Namen HINTER der Paketroute pruefen, nicht irgendwo im
+    // Befehl: die Endung .rpm steht auch im Ablageziel -o /tmp/... Eine
+    // Pruefung auf c.includes(".rpm") blieb deshalb gruen, obwohl der
+    // Befehl das .deb herunterlud.
+    const geholt = (c.match(/\/api\/v1\/packages\/(\S+)/) || [])[1] || "";
+    check(`${wahl}: holt ein ${soll.paket} von der Paketroute`,
+          geholt.endsWith(soll.paket), geholt);
+    check(`${wahl}: ruft ${soll.werkzeug} auf`, c.includes(soll.werkzeug),
+          c.slice(-90));
+    // Der haeufigste Fehler bei einer solchen Tabelle: heruntergeladen
+    // wird nach X, installiert wird Y. Die Kette mit && verdeckt das
+    // nicht - curl war erfolgreich, der Paketmanager findet nichts.
+    const treffer = c.split(soll.datei).length - 1;
+    check(`${wahl}: Ablage und Installation nennen dieselbe Datei`,
+          treffer === 2, `${treffer}x ${soll.datei}`);
+    check(`${wahl}: laedt ueber die Paketroute`,
+          c.includes("/api/v1/packages/"));
+    check(`${wahl}: traegt ein Token`, /X-Install-Token: \S{20,}/.test(c));
+    // Die Adresse steht zweimal im Befehl: einmal als Downloadquelle,
+    // einmal als CO37_SERVER in der Konfiguration. Laufen die
+    // auseinander, laedt der Host sein Paket von hier und meldet sich
+    // danach woanders an.
+    const quelle = (c.match(/(https?:\/\/[^/\s]+)\/api\/v1\/packages\//) || [])[1];
+    const eingetragen = (c.match(/CO37_SERVER="([^"]+)"/) || [])[1];
+    check(`${wahl}: Downloadquelle und CO37_SERVER sind dieselbe Adresse`,
+          !!quelle && quelle === eingetragen, `${quelle} / ${eingetragen}`);
+  }
+  check("Debian und Red Hat holen nicht dasselbe Paket",
+        gebaut.deb !== gebaut.dnf);
+  check("Red Hat und SUSE holen dasselbe Paket",
+        gebaut.dnf.split(" -o ")[0] === gebaut.zypper.split(" -o ")[0]);
+  check("nur der Debian-Befehl nennt apt-get",
+        !gebaut.dnf.includes("apt-get") && !gebaut.zypper.includes("apt-get"));
+  check("SUSE erlaubt das unsignierte Paket ausdruecklich",
+        gebaut.zypper.includes("--allow-unsigned-rpm"));
+  check("Red Hat erlaubt das unsignierte Paket ausdruecklich",
+        gebaut.dnf.includes("--nogpgcheck"));
+  if (pkgs && pkgs.rpm) {
+    check("RPM-Befehl nutzt echten Dateinamen",
+          gebaut.dnf.includes(pkgs.rpm.name), pkgs.rpm.name);
+    check("Backend meldet die reine Version, nicht Release und Architektur",
+          /^\d+\.\d+\.\d+$/.test(pkgs.rpm.version), pkgs.rpm.version);
+  } else {
+    console.log("      (kein RPM gebaut, uebersprungen)");
+  }
+  // Eine unbekannte Auswahl darf nicht in einen leeren Befehl laufen.
+  el("linDistro").value = "gibtsnicht";
+  api.renderLinuxCmd();
+  check("unbekannte Auswahl faellt auf Debian zurueck",
+        el("cmdLinux").textContent === gebaut.deb);
+  el("linDistro").value = "deb";
+  api.renderLinuxCmd();
+  // Ohne diese Bindung waehlt man die Distribution aus und der Befehl
+  // darueber bleibt der alte - der auffaelligste denkbare Fehler, und
+  // von den Pruefungen oben keiner erfasst: die rufen renderLinuxCmd
+  // selbst auf.
+  check("die Auswahl zeichnet den Befehl neu",
+        typeof el("linDistro").onchange === "function",
+        typeof el("linDistro").onchange);
 
   console.log("\n=== Paket-Routen ===");
   // 409 ist bei build gueltig: eine noch unbearbeitete Anforderung liegt vor.
