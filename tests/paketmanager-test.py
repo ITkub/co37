@@ -701,5 +701,102 @@ else:
           not _antwort.get("mismatch"), str(_antwort.get("mismatch")))
 
 
+
+# ======================================================================
+# Reihenfolge der zypper-Optionen
+# ======================================================================
+# zypper trennt globale Optionen von denen des Befehls. --non-interactive
+# gilt global und darf vor dem Verb stehen, --auto-agree-with-licenses
+# gehoert dem Befehl 'update' und muss dahinter. Stand es davor, brach
+# der Patchlauf am 2026-09-09 auf KK-LEAP sofort ab:
+#
+#     Flag --auto-agree-with-licenses ist unbekannt.
+#
+# Gemeldet wurde das als Fehler des Systemupdates - der Scan davor und
+# danach lief normal weiter und zaehlte die offenen Pakete richtig. Eine
+# Reihe, die nur den Scan prueft, sieht davon nichts.
+print("\n=== Reihenfolge der zypper-Optionen ===")
+
+# Was zypper VOR dem Befehl annimmt. Alles andere, was dort steht, ist
+# eine Option des Befehls am falschen Platz.
+ZYPPER_GLOBAL = {"--non-interactive", "-n", "--quiet", "-q",
+                 "--no-refresh", "--xmlout", "--terse"}
+ZYPPER_VERBEN = {"refresh", "update", "patch", "install", "dup",
+                 "list-updates", "needs-rebooting", "ps", "search"}
+
+_baum = ast.parse(quelle_agent)
+_listen = []
+for _knoten in ast.walk(_baum):
+    if not isinstance(_knoten, ast.List) or not _knoten.elts:
+        continue
+    _teile = [e.value for e in _knoten.elts
+              if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    if len(_teile) == len(_knoten.elts) and _teile and _teile[0] == "zypper":
+        _listen.append(_teile)
+
+check("zypper-Aufrufe im Agenten gefunden", len(_listen) >= 4, len(_listen))
+for _cmd in _listen:
+    _verb = next((t for t in _cmd[1:] if t in ZYPPER_VERBEN), None)
+    check(f"{' '.join(_cmd)}: nennt einen bekannten Befehl",
+          _verb is not None, str(_cmd))
+    if _verb is None:
+        continue
+    _davor = _cmd[1:_cmd.index(_verb)]
+    _fremd = [t for t in _davor if t not in ZYPPER_GLOBAL]
+    check(f"{_verb}: vor dem Befehl steht nur Globales",
+          not _fremd, str(_fremd))
+
+# Und der Aufruf selbst, nicht nur seine Form: patch_linux() wirklich
+# ausfuehren und mitschreiben, was an zypper ginge.
+class _Sink:
+    def __init__(self):
+        self.zeilen = []
+
+    def write(self, line, progress=None):
+        self.zeilen.append(line)
+
+
+_aufrufe = []
+
+
+def _mitschreiben(cmd, sink, timeout=7200, progress_prefix=None):
+    _aufrufe.append(list(cmd))
+    return 0
+
+
+_echt = (agent.paketmanager, agent.is_tumbleweed, agent.run_streaming)
+agent.paketmanager = lambda: "zypper"
+agent.is_tumbleweed = lambda: False
+agent.run_streaming = _mitschreiben
+try:
+    agent.patch_linux(_Sink())
+finally:
+    agent.paketmanager, agent.is_tumbleweed, agent.run_streaming = _echt
+
+_update = [c for c in _aufrufe if "update" in c]
+check("patch_linux ruft zypper update auf", len(_update) == 1, str(_aufrufe))
+if _update:
+    _c = _update[0]
+    check("--auto-agree-with-licenses steht dabei",
+          "--auto-agree-with-licenses" in _c, str(_c))
+    if "--auto-agree-with-licenses" in _c:
+        check("und zwar HINTER dem Befehl",
+              _c.index("--auto-agree-with-licenses") > _c.index("update"),
+              str(_c))
+    check("--non-interactive steht davor",
+          _c.index("--non-interactive") < _c.index("update"), str(_c))
+# Gegenprobe zur Reihenfolgepruefung oben: eine rollende Anlage bekommt
+# gar keinen Patchlauf, dort waere 'update' der falsche Befehl.
+_aufrufe.clear()
+agent.paketmanager = lambda: "zypper"
+agent.is_tumbleweed = lambda: True
+agent.run_streaming = _mitschreiben
+try:
+    _ergebnis = agent.patch_linux(_Sink())
+finally:
+    agent.paketmanager, agent.is_tumbleweed, agent.run_streaming = _echt
+check("auf Tumbleweed wird nicht gepatcht",
+      _ergebnis is False and not _aufrufe, str(_aufrufe))
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

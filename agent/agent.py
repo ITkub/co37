@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.37.30"
+AGENT_VERSION = "0.37.31"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -1199,9 +1199,21 @@ def patch_linux(sink: LogSink) -> bool:
         # --auto-agree-with-licenses: ohne das bricht zypper bei jedem
         # Paket mit eigener Lizenz ab und meldet einen Fehler, den
         # niemand beantworten kann - der Agent laeuft ohne Konsole.
+        #
+        # Die REIHENFOLGE ist keine Geschmackssache. zypper trennt
+        # globale Optionen von denen des Befehls: --non-interactive gilt
+        # global und darf davor, --auto-agree-with-licenses gehoert dem
+        # Befehl 'update' und muss dahinter. Stand es davor, brach der
+        # Lauf sofort ab:
+        #
+        #     Flag --auto-agree-with-licenses ist unbekannt.
+        #     Installation fehlgeschlagen.
+        #
+        # Am 2026-09-09 auf KK-LEAP so gemessen; 'zypper update --help'
+        # fuehrt den Schalter unter den Optionen des Befehls.
         code = run_streaming(
-            ["zypper", "--non-interactive", "--auto-agree-with-licenses",
-             "update"],
+            ["zypper", "--non-interactive", "update",
+             "--auto-agree-with-licenses"],
             sink, timeout=7200, progress_prefix="Installiere Pakete",
         )
         if code == 102:
