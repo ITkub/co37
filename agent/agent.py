@@ -28,7 +28,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.38.3"
+AGENT_VERSION = "0.38.4"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -664,6 +664,21 @@ def reboot_reasons() -> list[str]:
     if Path("/var/run/reboot-required").exists():
         return ["package_manager"]
 
+    # Debian-Familie OHNE update-notifier-common (das ist Proxmox VE, und
+    # ein knappes Debian ohne dieses Paket): die Markierung oben wird dort
+    # nie geschrieben - nur deren apt-Hook legt sie an -, und kein
+    # zypper/dnf antwortet weiter unten. Ein frisch installierter Kernel
+    # bliebe damit unerkannt, bis der laufende aus /boot verschwindet
+    # (siehe _laufender_kernel_weg). Deshalb hier fuer die Debian-Familie:
+    # liegt in /boot ein neuerer Kernel als der laufende, steht ein
+    # Neustart aus. Am 2026-09-10 auf PVE01 gemessen: lief 7.0.14-15,
+    # installiert 7.0.14-16, /run/reboot-required fehlte, kein
+    # needs-restarting - "Neustart steht aus: nein" trotz Kernelwechsel.
+    if Path("/etc/debian_version").exists():
+        kernel_grund = _debian_neuerer_kernel_reason()
+        if kernel_grund:
+            return kernel_grund
+
     # SUSE - 'zypper needs-rebooting' gibt es seit zypper 1.14.28
     # (SLES 15 SP2, Leap 15.2). Rueckgabe 102 = Neustart noetig, 0 =
     # nicht noetig; alles andere heisst "kennt den Unterbefehl nicht",
@@ -797,6 +812,48 @@ def _kernel_verschwunden_reason() -> list[str]:
     if code != 0:
         return []
     if _laufender_kernel_weg(_kernel_namen(boot), laufend.strip()):
+        return ["kernel"]
+    return []
+
+
+def _kernel_version_tupel(name: str) -> tuple:
+    """
+    Die fuehrenden Zahlenfelder eines Kernelnamens als Tupel, fuer den
+    Groessenvergleich. '7.0.14-16-pve' -> (7, 0, 14, 16), '6.17.13-21-pve'
+    -> (6, 17, 13, 21). Das Flavor-Suffix (-pve, -default) traegt keine
+    Zahl und faellt von selbst weg. Ein Name ohne erkennbare Version
+    liefert ein kurzes Tupel und gilt damit nie als 'neuer' - ein
+    Rettungsabbild '0-rescue-<hex>' kann so keinen Neustart ausloesen.
+    """
+    return tuple(int(f) for f in re.findall(r"\d+", name))
+
+
+def _neuerer_kernel_installiert(namen: set, laufend: str) -> bool:
+    """
+    Liegt in /boot ein Kernel mit HOEHERER Version als der laufende?
+
+    Reiner Vergleich, ohne Dateizugriff - so mit einer festen Liste
+    pruefbar. Nur fuer die Debian-Familie gedacht, wo die Kernelnamen
+    sauber '<version>-<abi>-<flavor>' sind. Die Ausnahmen, an denen
+    'neuestes gegen laufendes' auf Oracle (Rescue-Abbild ohne Version) und
+    SUSE (zwei Varianten nebeneinander) scheiterte, gehoeren bewusst nicht
+    dazu - siehe _laufender_kernel_weg.
+    """
+    lauf = _kernel_version_tupel(laufend)
+    if len(lauf) < 2:
+        return False
+    return any(_kernel_version_tupel(n) > lauf for n in namen)
+
+
+def _debian_neuerer_kernel_reason() -> list[str]:
+    """['kernel'], wenn in /boot ein neuerer Kernel als der laufende liegt."""
+    boot = Path("/boot")
+    if not boot.is_dir():
+        return []
+    code, laufend = run(["uname", "-r"], timeout=30)
+    if code != 0:
+        return []
+    if _neuerer_kernel_installiert(_kernel_namen(boot), laufend.strip()):
         return ["kernel"]
     return []
 

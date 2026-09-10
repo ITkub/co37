@@ -495,6 +495,64 @@ check("die Kernelversionen werden aus /boot gelesen", _namen == ORACLE,
 check("initramfs ist kein Kernel",
       not any("initramfs" in n for n in _namen), sorted(_namen))
 
+# ----------------------------------------------------------------------
+# Debian/Proxmox: neuer Kernel NEBEN dem laufenden (0.38.4)
+# ----------------------------------------------------------------------
+# Auf Proxmox schreibt nichts /var/run/reboot-required (kein
+# update-notifier-common), und kein zypper/dnf antwortet. Der alte
+# Rueckfall _laufender_kernel_weg sieht einen frisch installierten Kernel
+# nicht, solange der laufende noch in /boot liegt - genau das war der
+# Befund vom 2026-09-10 auf PVE01: lief 7.0.14-15, installiert
+# 7.0.14-16, "Neustart steht aus: nein". Fuer die Debian-Familie gibt es
+# darum den Versionsvergleich.
+print()
+print("--- Debian/Proxmox: neuerer Kernel als der laufende ---")
+
+check("Zahlenfelder eines pve-Kernelnamens",
+      agent._kernel_version_tupel("7.0.14-16-pve") == (7, 0, 14, 16),
+      agent._kernel_version_tupel("7.0.14-16-pve"))
+check("das Flavor-Suffix traegt keine Zahl",
+      agent._kernel_version_tupel("6.17.13-21-pve") == (6, 17, 13, 21),
+      agent._kernel_version_tupel("6.17.13-21-pve"))
+
+# Genau die /boot-Liste von PVE01 am 2026-09-10.
+PVE_BOOT = {
+    "6.14.8-2-pve", "6.14.11-3-pve", "6.14.11-4-pve", "6.14.11-5-pve",
+    "6.14.11-6-pve", "6.14.11-9-pve", "6.17.2-2-pve", "6.17.9-1-pve",
+    "6.17.13-3-pve", "6.17.13-13-pve", "6.17.13-18-pve", "6.17.13-21-pve",
+    "7.0.6-2-pve", "7.0.14-5-pve", "7.0.14-11-pve", "7.0.14-12-pve",
+    "7.0.14-14-pve", "7.0.14-15-pve", "7.0.14-16-pve",
+}
+check("PVE01-Lage: laufend 7.0.14-15, 7.0.14-16 liegt daneben -> Neustart",
+      agent._neuerer_kernel_installiert(PVE_BOOT, "7.0.14-15-pve") is True)
+check("nach dem Reboot: laufend 7.0.14-16 ist der neueste -> kein Grund",
+      agent._neuerer_kernel_installiert(PVE_BOOT, "7.0.14-16-pve") is False)
+# Serienuebergreifend richtig: 6.x ist nicht neuer als ein laufendes 7.x.
+check("6.17.x gilt nicht als neuer, wenn 7.0.x laeuft",
+      agent._neuerer_kernel_installiert(
+          {"6.17.13-21-pve", "7.0.14-16-pve"}, "7.0.14-16-pve") is False)
+# Ein Rescue-Abbild ohne Version loest keinen Neustart aus.
+check("ein Name ohne Version zaehlt nicht als neuer",
+      agent._neuerer_kernel_installiert(
+          {"0-rescue-05ac793a16c54e71bdbbbb87ebd265d6"}, "7.0.14-16-pve")
+      is False)
+check("ohne laufenden Kernel wird nichts behauptet",
+      agent._neuerer_kernel_installiert(PVE_BOOT, "") is False)
+
+# Und die Verdrahtung in reboot_reasons(): fuer die Debian-Familie steht
+# der neue Vergleich NACH /var/run/reboot-required und VOR zypper/dnf,
+# sonst griffe er auf Proxmox nie oder zu spaet.
+_rr = rumpf("reboot_reasons")
+check("reboot_reasons nutzt den Debian-Kernelvergleich",
+      "_debian_neuerer_kernel_reason()" in _rr)
+check("er haengt an /etc/debian_version", "/etc/debian_version" in _rr)
+check("Reihenfolge: reboot-required -> Debian-Kernel -> zypper",
+      _rr.index("reboot-required") < _rr.index("_debian_neuerer_kernel_reason")
+      < _rr.index("needs-rebooting"),
+      (_rr.index("reboot-required"),
+       _rr.index("_debian_neuerer_kernel_reason"),
+       _rr.index("needs-rebooting")))
+
 # Und der tote Aufruf ist weg.
 check("der tote 'zypper ps'-Aufruf ist entfernt",
       'run(["zypper", "ps"' not in quelle)
