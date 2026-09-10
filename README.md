@@ -1398,3 +1398,16 @@ Germany
 - Fehler und Vorschläge: über die Issues dieses Repositories
 
 CO-37 wird von einer Person entwickelt. Antwortzeiten richten sich danach.
+
+---
+
+# Marken
+
+Checkmk ist eine Marke der Checkmk GmbH, München. CO-37 steht in keiner
+Verbindung zur Checkmk GmbH und wird von ihr weder herausgegeben noch
+unterstützt. Die Anbindung erfolgt ausschließlich über die offizielle
+REST-API von Checkmk; der Name wird nur zur Bezeichnung dieser
+Schnittstelle verwendet.
+
+Alle weiteren genannten Produkt- und Firmennamen sind Marken oder
+eingetragene Marken ihrer jeweiligen Inhaber.
