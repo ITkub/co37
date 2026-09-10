@@ -308,6 +308,19 @@ def _aelter(paket: str, installiert: str) -> bool:
     return _version_tupel(paket) < _version_tupel(installiert)
 
 
+def ist_neuer(entfernt: str, installiert: str) -> bool:
+    """
+    Ist die entfernte Fassung neuer als die installierte?
+
+    Eine Stelle fuer diese Frage, damit der GitHub-Check und /api/health
+    nicht zweimal dasselbe rechnen - dieselbe Falle wie F-12/F-14. Ein
+    leerer oder unlesbarer Wert ist nie neuer.
+    """
+    if not entfernt or not installiert:
+        return False
+    return _version_tupel(entfernt) > _version_tupel(installiert)
+
+
 def trigger_update() -> dict:
     status = get_status()
     if status.get("state") != "uploaded":

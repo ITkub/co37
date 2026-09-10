@@ -42,6 +42,7 @@ import totp
 import license
 import migrate
 import update_manager
+import github_update
 from checkmk import CheckmkClient, CheckmkError
 from crypto import CryptoNotConfigured, decrypt, encrypt, hash_token, is_configured
 from utctime import (
@@ -712,6 +713,18 @@ SET_SYSLOG_VERIFY = "syslog_verify"
 # erfuellt das nicht. Der Schalter ist da, damit aus "nicht vorhanden"
 # ein "vorhanden und abgeschaltet" wird - das laesst sich begruenden.
 SET_MFA_ADMIN = "mfa_required_admin"
+
+# Update-Bezug aus GitHub Releases. Key-Value, kein Schemaschritt.
+#   _AUTO       "1"/"" - taeglich automatisch suchen (Haken in der Oberflaeche)
+#   _LAST_CHECK ISO-Zeit des letzten Suchlaufs - die 24-Stunden-Sperre
+#   _AVAILABLE  gefundene Version, oder leer. /api/health meldet sie nur,
+#               solange sie wirklich neuer ist als die installierte.
+SET_UPDATE_AUTO = "update_auto_check"
+SET_UPDATE_LAST_CHECK = "update_last_check"
+SET_UPDATE_AVAILABLE = "update_available"
+# Nicht oefter als einmal am Tag von selbst nach draussen - fuenf offene
+# Browser sollen nicht fuenf Abrufe ausloesen. Der Knopf umgeht das (force).
+UPDATE_CHECK_SPERRE_STUNDEN = 24
 
 # Wie lange der Zwischenschritt gilt. Fuenf Minuten sind reichlich, um
 # ein Telefon aus der Tasche zu holen, und kurz genug, dass ein
@@ -6456,6 +6469,21 @@ def health(request: Request, x_session: str = Header(default=""),
             # waere schlechter als keine - der Watcher entscheidet an
             # dieser Route ueber Erfolg oder Ruecklauf eines Updates.
             antwort["update_running"] = False
+        # Steht auf GitHub eine neuere Fassung bereit? Der Wert stammt aus
+        # dem letzten Suchlauf (SET_UPDATE_AVAILABLE); hier wird NICHT ins
+        # Netz gegriffen - /api/health laeuft bei jedem Durchlauf und muss
+        # schnell bleiben. Gemeldet wird er nur, solange er wirklich neuer
+        # ist als die installierte Fassung: nach einem Update verschwindet
+        # das Band so von selbst, noch vor dem naechsten Suchlauf. Dieselbe
+        # F-09-Schranke wie die Versionen; das Band ist ausserdem in der
+        # Oberflaeche auf Administratoren beschraenkt.
+        try:
+            av = _setting(session, SET_UPDATE_AVAILABLE, "").strip()
+            if av and update_manager.ist_neuer(
+                    av, update_manager.get_current_version()):
+                antwort["update_available"] = av
+        except Exception:  # noqa: BLE001
+            pass
     return antwort
 
 
@@ -6533,6 +6561,124 @@ def update_acknowledge():
         return update_manager.acknowledge()
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ----------------------------------------------------------------------
+# Update-Bezug aus GitHub Releases
+# ----------------------------------------------------------------------
+# Kein zweiter Update-Weg: 'check' sieht nur nach, 'fetch' holt die Bytes
+# und uebergibt sie derselben Pruefkette wie ein Upload
+# (validate_and_store_update). Nach dem Holen steht der Zustand auf
+# 'uploaded' - das Ausloesen bleibt der zweite, ausdrueckliche Schritt.
+class RemoteConfig(BaseModel):
+    auto: bool
+
+
+def _remote_config(session: Session) -> dict:
+    return {
+        "auto": _setting(session, SET_UPDATE_AUTO, "") == "1",
+        "available": _setting(session, SET_UPDATE_AVAILABLE, "") or None,
+        "last_check": _setting(session, SET_UPDATE_LAST_CHECK, "") or None,
+    }
+
+
+@app.get("/api/v1/update/remote-config",
+         dependencies=[Depends(require_admin)])
+def update_remote_config(session: Session = Depends(get_session)):
+    return _remote_config(session)
+
+
+@app.put("/api/v1/update/remote-config")
+def update_remote_config_set(payload: RemoteConfig, request: Request,
+                             who: Principal = Depends(require_admin),
+                             session: Session = Depends(get_session)):
+    set_setting(session, SET_UPDATE_AUTO, "1" if payload.auto else "")
+    audit(session, who.name, "update.remote.auto",
+          "an" if payload.auto else "aus", request)
+    session.commit()
+    return _remote_config(session)
+
+
+def _update_available_speichern(session: Session, version: str):
+    """Den gefundenen Stand und den Zeitpunkt festhalten. Eine Stelle."""
+    set_setting(session, SET_UPDATE_AVAILABLE, version or "")
+    set_setting(session, SET_UPDATE_LAST_CHECK, utcnow().isoformat())
+
+
+@app.post("/api/v1/update/check")
+def update_check(request: Request,
+                 force: bool = Query(default=False),
+                 who: Principal = Depends(require_admin),
+                 session: Session = Depends(get_session)):
+    """
+    Sieht auf GitHub nach, ob eine neuere Fassung bereitliegt.
+
+    Ohne 'force' greift die 24-Stunden-Sperre: der automatische Lauf beim
+    Oeffnen der Oberflaeche soll nicht bei jedem Aufruf ins Netz. Der Knopf
+    schickt force=true und sucht immer.
+    """
+    if not force:
+        letzte = _setting(session, SET_UPDATE_LAST_CHECK, "")
+        if letzte:
+            try:
+                alter = utcnow() - ensure_utc(datetime.fromisoformat(letzte))
+                if alter.total_seconds() < UPDATE_CHECK_SPERRE_STUNDEN * 3600:
+                    cfg = _remote_config(session)
+                    cfg["checked"] = False
+                    return cfg
+            except Exception:  # noqa: BLE001
+                pass
+
+    aktuell = update_manager.get_current_version()
+    try:
+        rel = github_update.neuestes_release()
+    except github_update.GithubUpdateError as exc:
+        raise HTTPException(502, str(exc))
+
+    neuer = update_manager.ist_neuer(rel["version"], aktuell)
+    _update_available_speichern(session, rel["version"] if neuer else "")
+    audit(session, who.name, "update.remote.check",
+          f"{rel['version']} ({'neuer' if neuer else 'aktuell'})", request)
+    session.commit()
+    return {
+        "checked": True,
+        "current": aktuell,
+        "latest": rel["version"],
+        "available": rel["version"] if neuer else None,
+    }
+
+
+@app.post("/api/v1/update/fetch")
+def update_fetch(request: Request,
+                 who: Principal = Depends(require_admin),
+                 session: Session = Depends(get_session)):
+    """
+    Holt das signierte Paket von GitHub und uebergibt es der Pruefkette.
+
+    Danach steht der Zustand auf 'uploaded' wie nach einem Upload - das
+    Einspielen loest der Administrator getrennt aus.
+    """
+    if update_manager.get_status().get("state") in ("triggered", "running"):
+        raise HTTPException(400, "Es laeuft bereits ein Update. Bitte abwarten.")
+    try:
+        rel = github_update.neuestes_release()
+        zip_bytes, name, sig = github_update.paket_holen(rel)
+    except github_update.GithubUpdateError as exc:
+        audit(session, who.name, "update.remote.fetch.failed", str(exc), request)
+        session.commit()
+        raise HTTPException(502, str(exc))
+    try:
+        res = update_manager.validate_and_store_update(zip_bytes, name, sig)
+    except ValueError as exc:
+        audit(session, who.name, "update.remote.fetch.failed",
+              f"{name}: {exc}", request)
+        session.commit()
+        raise HTTPException(400, str(exc))
+    # Der Fund ist eingespielt worden - das Band darf weg.
+    _update_available_speichern(session, "")
+    audit(session, who.name, "update.remote.fetch", name, request)
+    session.commit()
+    return res
 
 
 # ======================================================================

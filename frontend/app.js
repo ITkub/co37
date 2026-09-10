@@ -239,6 +239,23 @@ async function checkVersion(){
   // ohnehin bei jedem Durchlauf gefragt wird.
   if ("update_running" in h) UPDATE_LAEUFT = !!h.update_running;
 
+  // Update-Band: steht auf GitHub eine neuere Fassung bereit? h.update_-
+  // available kommt aus dem letzten Suchlauf und steht hinter derselben
+  // F-09-Schranke wie die Versionen. Sichtbar nur fuer Administratoren -
+  // ein Benutzer koennte am Band ohnehin nichts ausloesen. Vor den beiden
+  // Ausstiegen darunter, wie update_running, damit es auch bei
+  // unveraenderter Version erscheint.
+  const uBar = document.getElementById("updateBar");
+  if (uBar){
+    if (h.update_available && ME && ME.is_admin){
+      document.getElementById("updateBarText").textContent =
+        t("app.update_available", { version: h.update_available });
+      uBar.style.display = "flex";
+    } else {
+      uBar.style.display = "none";
+    }
+  }
+
   if (PAGE_VERSION === null){ PAGE_VERSION = h.version; return; }
   if (h.version === PAGE_VERSION) return;
 
@@ -248,6 +265,22 @@ async function checkVersion(){
   bar.style.display = "flex";
 }
 document.getElementById("reloadNow").onclick = () => location.reload();
+
+// Das Update-Band verlinkt nur - es installiert nichts. Ein Klick oeffnet
+// Einstellungen -> Update, den gewohnten Weg (suchen, holen, ausloesen).
+function oeffneUpdateReiter(){
+  if (!(ME && ME.is_admin)) return;
+  document.querySelectorAll("#sTabs button").forEach(x =>
+    x.classList.toggle("on", x.dataset.tab === "tabUpd"));
+  STABS.forEach(id =>
+    document.getElementById(id).classList.toggle("on", id === "tabUpd"));
+  document.getElementById("dlgSettings").showModal();
+  loadUpdate();
+}
+{
+  const b = document.getElementById("updateBarBtn");
+  if (b) b.onclick = oeffneUpdateReiter;
+}
 
 /* ---------- Erreichbarkeit ---------- */
 /*
@@ -2360,6 +2393,33 @@ async function loadUpdate(){
   }
   if (busy && !UPD_TIMER) UPD_TIMER = setInterval(loadUpdate, 3000);
   if (!busy && UPD_TIMER){ clearInterval(UPD_TIMER); UPD_TIMER = null; }
+
+  await loadRemoteUpdate(pending || busy);
+}
+
+/*
+ * Der GitHub-Bezug: Haken, letzter Suchlauf, gefundene Version. Kein
+ * Netzaufruf hier - nur der gespeicherte Stand aus der Oberflaeche. Der
+ * "Holen"-Knopf erscheint nur, wenn etwas Neueres gefunden wurde und
+ * gerade kein Paket schon wartet oder laeuft.
+ */
+async function loadRemoteUpdate(schonBeschaeftigt){
+  let cfg;
+  try { cfg = await api("GET", "/api/v1/update/remote-config"); }
+  catch(e){ return; }
+  document.getElementById("uAuto").checked = !!cfg.auto;
+  const zeile = document.getElementById("uRemoteState");
+  if (cfg.last_check){
+    const wann = new Date(cfg.last_check).toLocaleString();
+    zeile.textContent = cfg.available
+      ? t("settings.update.remote_found", { version: cfg.available })
+      : t("settings.update.remote_current", { wann });
+  } else {
+    zeile.textContent = t("settings.update.remote_never");
+  }
+  const zeigeHolen = !!cfg.available && !schonBeschaeftigt;
+  document.getElementById("uFetchRow").style.display = zeigeHolen ? "block" : "none";
+  if (zeigeHolen) document.getElementById("uAvail").textContent = cfg.available;
 }
 /*
  * Nimmt eine Auswahl entgegen und sortiert sie selbst: das Paket und die
@@ -2410,6 +2470,40 @@ document.getElementById("uCancel").onclick = async () => {
 };
 document.getElementById("uAck").onclick = async () => {
   await api("POST", "/api/v1/update/acknowledge"); await loadUpdate();
+};
+
+document.getElementById("uCheck").onclick = async () => {
+  const btn = document.getElementById("uCheck");
+  btn.disabled = true;
+  try {
+    // force=true: der Knopf sucht immer, die 24-Stunden-Sperre gilt nur
+    // fuer den automatischen Lauf. Fehler meldet api() selbst mit dem
+    // Grund vom Server (z. B. "GitHub nicht erreichbar").
+    const r = await api("POST", "/api/v1/update/check?force=true");
+    toast(r.available
+      ? t("msg.update_found", { version: r.available })
+      : t("msg.update_none"));
+  } catch(e){ /* api() hat den Grund bereits gemeldet */ }
+  finally { btn.disabled = false; }
+  await loadUpdate();
+  await checkVersion();
+};
+
+document.getElementById("uAuto").onchange = async (e) => {
+  try { await api("PUT", "/api/v1/update/remote-config", { auto: e.target.checked }); }
+  catch(err){ e.target.checked = !e.target.checked; }
+};
+
+document.getElementById("uFetch").onclick = async () => {
+  const btn = document.getElementById("uFetch");
+  btn.disabled = true;
+  toast(t("msg.update_fetching"));
+  try {
+    await api("POST", "/api/v1/update/fetch");
+    await loadUpdate();
+    toast(t("msg.package_staged"));
+  } catch(e){ /* api() hat den Grund bereits gemeldet */ }
+  finally { btn.disabled = false; }
 };
 
 /* ---------- Start ---------- */
@@ -2926,6 +3020,25 @@ document.getElementById("btnLogout").onclick = doLogout;
   });
 });
 
+// Stoesst den taeglichen Suchlauf an, wenn der Haken sitzt. Ohne 'force',
+// also mit der 24-Stunden-Sperre im Backend. Fehler bleiben stumm - ein
+// nicht erreichbares GitHub ist hier kein Anwendungsfehler, nur kein Fund.
+async function pruefeAutoUpdate(){
+  // Bewusst rohes fetch statt api(): api() zeigt bei jedem Fehler eine
+  // Meldung, und ein Server ohne Internet-Zugang bekaeme sonst bei jedem
+  // Start eine Fehlermeldung fuer etwas, das er gar nicht tun soll. Hier
+  // ist ein nicht erreichbares GitHub kein Fund, kein Fehler - stumm.
+  try {
+    const r = await fetch(API + "/api/v1/update/remote-config",
+                          { credentials: "same-origin" });
+    if (!r.ok) return;
+    const cfg = await r.json();
+    if (!cfg.auto) return;
+    await fetch(API + "/api/v1/update/check",
+                { method: "POST", credentials: "same-origin" });
+  } catch(e){ /* stumm */ }
+}
+
 async function startApp(){
   try { ME = await api("GET", "/api/v1/me"); } catch(e){ return; }
 
@@ -2950,6 +3063,14 @@ async function startApp(){
   document.querySelectorAll(".admin-only").forEach(el => {
     el.style.display = ME.is_admin ? "" : "none";
   });
+
+  // Automatischer Update-Suchlauf: nur fuer Administratoren, nur wenn der
+  // Haken sitzt. Der Server drosselt auf einmal je 24 Stunden - fuenf
+  // offene Browser loesen also nicht fuenf Abrufe aus. Bewusst nicht
+  // abgewartet: ein langsames oder abgeschaltetes GitHub darf den Start
+  // der Oberflaeche nicht aufhalten. Das Ergebnis holt checkVersion() aus
+  // /api/health beim naechsten Durchlauf.
+  if (ME.is_admin) pruefeAutoUpdate();
 
   try {
     const h = await (await fetch(API + "/api/health", {cache: "no-store"})).json();

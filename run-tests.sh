@@ -209,6 +209,7 @@ REIHEN=(
   "license        $PY tests/license-test.py"
   "release-sig    $PY tests/release-sig-test.py"
   "watcher-sig    $PY tests/watcher-sig-test.py"
+  "github-update   $PY tests/github-update-test.py"
   "keyguard       $PY tests/keyguard-test.py"
   "schluessel     $PY tests/schluessel-test.py"
   "patchdue        $PY tests/patchdue-test.py"
