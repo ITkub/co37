@@ -643,14 +643,27 @@ function render(){
   // ersten Bereich. Mit mindestens einem bereichslosen Host oben ist sie
   // ueberfluessig, der oberste Host uebernimmt dieselbe Rolle.
   if (!rest.length && AREAS.length) html += `<div class="areadrop-top"></div>`;
-  for (const area of AREAS){
+  // Erst die obersten Bereiche, darunter je ihre direkten Hosts und dann
+  // ihre Unterbereiche (eine Stufe tiefer eingerueckt). Nur eine Ebene tief,
+  // wie das Backend sie zulaesst.
+  for (const area of AREAS.filter(a => !a.parent_id)){
     const inArea = byArea.get(area.id) || [];
+    const kinder = AREAS.filter(a => a.parent_id === area.id);
+    const kindHatHosts = kinder.some(k => (byArea.get(k.id) || []).length);
     // Ein leerer Bereich bleibt nur sichtbar (als Ablageziel zum
     // Hineinziehen), solange nichts herausgefiltert ist - sonst taucht
-    // beim Suchen ein Bereich auf, zu dem gerade kein Treffer gehoert.
-    if (!inArea.length && !SORTABLE) continue;
-    html += renderAreaHead(area, inArea.length, admin);
-    html += inArea.map((h, idx) => renderUnit(h, idx, admin)).join("");
+    // beim Suchen ein Bereich auf, zu dem gerade kein Treffer gehoert. Ein
+    // oberster Bereich bleibt aber sichtbar, solange irgendein Unterbereich
+    // Hosts zeigt, sonst haengen dessen Zeilen ohne Kopf in der Luft.
+    if (!inArea.length && !kindHatHosts && !SORTABLE) continue;
+    html += renderAreaHead(area, inArea.length, admin, 1);
+    html += inArea.map((h, idx) => renderUnit(h, idx, admin, 1)).join("");
+    for (const kind of kinder){
+      const kindHosts = byArea.get(kind.id) || [];
+      if (!kindHosts.length && !SORTABLE) continue;
+      html += renderAreaHead(kind, kindHosts.length, admin, 2);
+      html += kindHosts.map((h, idx) => renderUnit(h, idx, admin, 2)).join("");
+    }
   }
   box.innerHTML = html;
 }
@@ -680,12 +693,13 @@ function darfNeustart(){
 }
 
 
-function renderAreaHead(area, count, admin){
+function renderAreaHead(area, count, admin, level = 1){
   // Dieselben Knoepfe wie eine Host-Zeile (Check/Patch/Restart), nur ohne
   // History - die gibt es nur pro einzelnem Host. "..." oeffnet denselben
   // Bearbeiten-Dialog, den auch Settings -> Bereiche benutzt (editArea()),
   // jetzt direkt von hier aus statt nur aus den Einstellungen.
-  return `<div class="areahead" data-area-id="${area.id}">
+  // level 2 = Unterbereich, wird per CSS eine Stufe tiefer eingerueckt.
+  return `<div class="areahead" data-area-id="${area.id}" data-area-level="${level}">
     <div class="areahead-info">
       <span class="areahead-name">${esc(area.name)}</span>
       <span class="areahead-count">${t("area.host_count", { anzahl: count })}</span>
@@ -699,7 +713,7 @@ function renderAreaHead(area, count, admin){
   </div>`;
 }
 
-function renderUnit(h, i, admin){
+function renderUnit(h, i, admin, level = 0){
   const s = stateOf(h);
   const upd = h.updates_available||0, sec = h.security_updates||0;
   const waiting = h.approval_state === "pending";
@@ -770,7 +784,10 @@ function renderUnit(h, i, admin){
     if (schluessel) letzteAktion = t(schluessel, { zeit });
   }
 
-  return `<div class="unit"${hostAreaGiltig(h) ? ` data-in-area="1"` : ""} data-id="${h.id}">
+  // level 0 = bereichslos (kein Einzug), 1 = in einem obersten Bereich,
+  // 2 = in einem Unterbereich (doppelter Einzug). Die Hoehe kommt vom
+  // Aufrufer, der die Schachtelung kennt - nicht mehr aus hostAreaGiltig().
+  return `<div class="unit"${level ? ` data-area-level="${level}"` : ""} data-id="${h.id}">
       <div class="slot${SORTABLE ? " grab" : ""}"${SORTABLE ? ` draggable="true" title="${esc(t("list.drag"))}"` : ` title="${esc(t("list.drag_blocked"))}"`}>${String(i+1).padStart(2,"0")}</div>
       <div class="led ${LED[s]}"></div>
       <div class="hostcell">
@@ -1034,6 +1051,7 @@ const ACTIONS = {
   areapatch:  (d) => patchArea(+d.id),
   areareboot: (d) => rebootArea(+d.id),
   arearemove: (d) => removeArea(+d.id, false),
+  areasubadd: (d) => addSubArea(+d.id),
 };
 
 document.addEventListener("click", (e) => {
@@ -2782,27 +2800,78 @@ async function loadAreasTab(){
   renderAreaList();
 }
 
+// Eine Zeile in der Bereichsliste. i/anzahl gelten INNERHALB der eigenen
+// Gruppe (oberste untereinander, Unterbereiche je Elter) - so bewegen die
+// Pfeile einen Bereich nie ueber seine Gruppengrenze hinaus.
+function areaRow(a, i, anzahl, unterbereich){
+  return `<div class="vrow" style="margin-bottom:5px${unterbereich ? ";margin-left:24px" : ""}">
+    <span>${esc(a.name)}<br>
+      <span style="color:var(--muted-2)">${t("area.host_count", { anzahl: a.host_count })}</span></span>
+    <span style="display:flex;gap:6px">
+      <button data-act="areaup" data-id="${a.id}" ${i===0?"disabled":""} title="${esc(t("area.move_up"))}">↑</button>
+      <button data-act="areadown" data-id="${a.id}" ${i===anzahl-1?"disabled":""} title="${esc(t("area.move_down"))}">↓</button>
+      <button class="danger" data-act="arearemove" data-id="${a.id}">${t("area.remove")}</button>
+    </span></div>`;
+}
+
 function renderAreaList(){
   const box = document.getElementById("areaList");
-  box.innerHTML = AREAS.length
-    ? AREAS.map((a,i) => `
-      <div class="vrow" style="margin-bottom:5px">
-        <span>${esc(a.name)}<br>
-          <span style="color:var(--muted-2)">${t("area.host_count", { anzahl: a.host_count })}</span></span>
-        <span style="display:flex;gap:6px">
-          <button data-act="areaup" data-id="${a.id}" ${i===0?"disabled":""} title="${esc(t("area.move_up"))}">↑</button>
-          <button data-act="areadown" data-id="${a.id}" ${i===AREAS.length-1?"disabled":""} title="${esc(t("area.move_down"))}">↓</button>
-          <button class="danger" data-act="arearemove" data-id="${a.id}">${t("area.remove")}</button>
-        </span></div>`).join("")
-    : `<span style="color:var(--muted-2)">${t("area.none")}</span>`;
+  const tops = AREAS.filter(a => !a.parent_id);
+  if (!tops.length){
+    box.innerHTML = `<span style="color:var(--muted-2)">${t("area.none")}</span>`;
+    return;
+  }
+  let html = "";
+  tops.forEach((a, i) => {
+    html += areaRow(a, i, tops.length, false);
+    const kinder = AREAS.filter(k => k.parent_id === a.id);
+    kinder.forEach((k, j) => { html += areaRow(k, j, kinder.length, true); });
+    // Direkt unter jedem obersten Bereich: ein Feld zum Anlegen eines
+    // Unterbereichs darin. Nur eine Ebene - Unterbereiche bekommen kein
+    // solches Feld.
+    html += `<div class="vrow" style="margin:0 0 10px 24px">
+      <input data-sub-name="${a.id}" placeholder="${esc(t("area.sub_name_example"))}"
+             style="flex:1;min-width:0">
+      <button data-act="areasubadd" data-id="${a.id}">${t("area.add_sub")}</button>
+    </div>`;
+  });
+  box.innerHTML = html;
+}
+
+async function addSubArea(parentId){
+  const feld = document.querySelector(`input[data-sub-name="${parentId}"]`);
+  const name = feld ? feld.value.trim() : "";
+  if (!name){ toast(t("msg.need_area_name"), true); return; }
+  try { await api("POST", "/api/v1/areas", { name, parent_id: parentId }); }
+  catch(e){ return; }
+  toast(t("msg.created", { name }));
+  await loadAreasTab();
+  render();
 }
 
 async function moveArea(id, richtung){
-  const idx = AREAS.findIndex(a => a.id === id);
-  if (idx < 0) return;
+  const a = AREAS.find(x => x.id === id);
+  if (!a) return;
+  const pid = a.parent_id || null;
+  // Nur innerhalb der eigenen Geschwister tauschen.
+  const gruppe = AREAS.filter(x => (x.parent_id || null) === pid);
+  const idx = gruppe.findIndex(x => x.id === id);
   const ziel = idx + richtung;
-  if (ziel < 0 || ziel >= AREAS.length) return;
-  [AREAS[idx], AREAS[ziel]] = [AREAS[ziel], AREAS[idx]];
+  if (ziel < 0 || ziel >= gruppe.length) return;
+  [gruppe[idx], gruppe[ziel]] = [gruppe[ziel], gruppe[idx]];
+  // AREAS gruppiert neu zusammensetzen (oberster Bereich, dann seine Kinder)
+  // - nur die getauschte Gruppe aendert sich, die anderen bleiben, wie sie
+  // waren. Die Reihenfolge-Route vergibt sort_order fortlaufend ueber diese
+  // Liste; gezeichnet wird je Gruppe nach sort_order, das genuegt.
+  const tops = pid === null ? gruppe : AREAS.filter(x => !x.parent_id);
+  const neu = [];
+  for (const top of tops){
+    neu.push(top);
+    const kinder = (pid !== null && pid === top.id)
+      ? gruppe : AREAS.filter(x => x.parent_id === top.id);
+    neu.push(...kinder);
+  }
+  AREAS = neu;
   renderAreaList();
   try {
     await api("POST", "/api/v1/areas/order", { ids: AREAS.map(a => a.id) });

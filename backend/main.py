@@ -2053,6 +2053,10 @@ class HostArea(BaseModel):
 
 class AreaCreate(BaseModel):
     name: Text
+    # Leer = oberster Bereich; gesetzt = Unterbereich unter diesem Elter.
+    # Der Elter muss selbst ein oberster Bereich sein (nur eine Ebene tief) -
+    # das prueft create_area(), nicht das Schema.
+    parent_id: Optional[KennungFeld] = None
 
 
 class AreaPatch(BaseModel):
@@ -2074,6 +2078,7 @@ class AreaOrder(BaseModel):
 class AreaRead(BaseModel):
     id: int
     name: str
+    parent_id: Optional[int] = None
     sort_order: int = 0
     checkmk_hosts: list[str] = []
     checkmk_downtime_all: bool = False
@@ -4160,13 +4165,25 @@ def create_area(payload: AreaCreate, request: Request,
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Name fehlt")
-    # Neuer Bereich ans Ende, wie ein neu angemeldeter Host.
+    parent_id = payload.parent_id
+    if parent_id is not None:
+        parent = session.get(Area, parent_id)
+        if not parent:
+            raise HTTPException(404, "Uebergeordneter Bereich nicht gefunden")
+        # Nur eine Ebene: ein Unterbereich kann nicht selbst Elter sein.
+        if parent.parent_id is not None:
+            raise HTTPException(
+                409, "Ein Unterbereich kann keine weiteren Unterbereiche haben")
+    # Neuer Bereich ans Ende. sort_order ist global fortlaufend; fuer die
+    # Anzeige zaehlt nur die Reihenfolge INNERHALB der Gruppe, und ein global
+    # groesster Wert landet dort hinten - genau wie ein neu angemeldeter Host.
     last = session.exec(
         select(Area.sort_order).order_by(Area.sort_order.desc()).limit(1)
     ).first()
-    area = Area(name=name, sort_order=(last or 0) + 1)
+    area = Area(name=name, parent_id=parent_id, sort_order=(last or 0) + 1)
     session.add(area)
-    audit(session, who.name, "area.create", name, request)
+    audit(session, who.name, "area.create",
+          f"{name}{f' (unter #{parent_id})' if parent_id else ''}", request)
     session.commit()
     session.refresh(area)
     data = AreaRead.model_validate(area)
@@ -4213,6 +4230,14 @@ def delete_area(area_id: Kennung, request: Request,
     area = session.get(Area, area_id)
     if not area:
         raise HTTPException(404, "Bereich nicht gefunden")
+    # Unterbereiche zuerst: sonst haengt ein Kind an einem verschwundenen
+    # Elter. Loeschen erst, wenn der Bereich keine Unterbereiche mehr hat.
+    child = session.exec(
+        select(Area.id).where(Area.parent_id == area_id)
+    ).first()
+    if child:
+        raise HTTPException(
+            409, "Bereich enthaelt noch Unterbereiche - diese zuerst loeschen")
     in_use = session.exec(
         select(Host.id).where(Host.area_id == area_id)
     ).first()

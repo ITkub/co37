@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 #    Ein Rueckschritt auf 21 ist unkritisch: die aeltere Fassung schreibt
 #    in dieselben Spalten immer Listen, sie sind danach nur strenger als
 #    sie es erwartet.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -156,6 +156,15 @@ EXPECTED_COLUMNS = {
         "totp_confirmed_at": "DATETIME",
         "totp_last_step": "INTEGER",
         "totp_recovery": "TEXT",
+    },
+    # Schema 23: Unterbereiche. parent_id kam nach der Bereichs-Tabelle
+    # dazu, also fehlt die Spalte jeder Anlage, die Bereiche schon vor 0.38.3
+    # kannte - create_all() aendert bestehende Tabellen nicht. Fehlt die
+    # Tabelle 'area' ganz (Anlage von vor den Bereichen), legt create_all()
+    # sie beim Start mit parent_id an, bevor migrate() hier laeuft; der
+    # "table not in tables"-Zweig in migrate() ueberspringt sie dann.
+    "area": {
+        "parent_id": "INTEGER",
     },
 }
 

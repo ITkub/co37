@@ -202,6 +202,65 @@ check("Umbenennen auf Leerraum abgewiesen", code == 400, code)
 code, res = call("/api/v1/areas/999999", {"name": "x"}, method="PATCH", hdr=ADM)
 check("Bearbeiten eines unbekannten Bereichs meldet 404", code == 404, code)
 
+# --------------------------------------------------- Unterbereiche (0.38.3)
+# Genau eine Ebene: ein Bereich unter einem obersten Bereich. Ein
+# Unterbereich darf selbst keine Kinder haben, und ein Elter mit Kindern
+# ist nicht loeschbar, solange die Kinder da sind.
+code, res = call("/api/v1/areas", {"name": "PVE01"}, hdr=ADM)
+check("oberster Bereich fuer Unterbereiche angelegt", code == 200, (code, res))
+pve01 = res["id"]
+check("oberster Bereich hat keinen Elter", res.get("parent_id") is None, res)
+
+code, res = call("/api/v1/areas", {"name": "Windows", "parent_id": pve01}, hdr=ADM)
+check("Unterbereich anlegbar", code == 200, (code, res))
+win = res["id"]
+check("Unterbereich traegt den Elter", res.get("parent_id") == pve01, res)
+
+code, res = call("/api/v1/areas", {"name": "Linux", "parent_id": pve01}, hdr=ADM)
+check("zweiter Unterbereich anlegbar", code == 200, (code, res))
+lin = res["id"]
+
+code, areas = call("/api/v1/areas", hdr=ADM)
+byid = {a["id"]: a for a in areas}
+check("Unterbereich steht mit parent_id in der Liste",
+      byid.get(win, {}).get("parent_id") == pve01, byid.get(win))
+
+# Eine zweite Ebene ist nicht erlaubt: ein Unterbereich kann nicht Elter sein.
+code, res = call("/api/v1/areas", {"name": "zu tief", "parent_id": win}, hdr=ADM)
+check("Unterbereich unter einem Unterbereich abgewiesen (nur eine Ebene)",
+      code == 409, (code, res))
+
+# Unbekannter Elter.
+code, res = call("/api/v1/areas", {"name": "waise", "parent_id": 999999}, hdr=ADM)
+check("unbekannter Elter abgewiesen", code == 404, code)
+
+# Ein Host kommt in den Unterbereich (die VMs sollen in Windows/Linux).
+# Bewusst der schon angemeldete h1 (gerade ohne Bereich), kein neuer Host:
+# das Backend teilt sich alle Testreihen, und ein zusaetzlich genehmigter
+# Host wuerde den Freibetrag von 10 fuer spaetere Reihen aufzehren.
+hvm = h1
+code, res = call(f"/api/v1/hosts/{hvm}/area", {"area_id": win}, hdr=ADM)
+check("Host in einen Unterbereich verschiebbar",
+      code == 200 and res.get("area_id") == win, (code, res))
+
+# Elter mit Unterbereichen ist nicht loeschbar - erst die Kinder.
+code, res = call(f"/api/v1/areas/{pve01}", method="DELETE", hdr=ADM)
+check("Elter mit Unterbereichen nicht loeschbar", code == 409, (code, res))
+
+# Unterbereich mit Host ist nicht loeschbar (bestehende Regel gilt weiter).
+code, res = call(f"/api/v1/areas/{win}", method="DELETE", hdr=ADM)
+check("Unterbereich mit Host nicht loeschbar", code == 409, (code, res))
+
+# Host heraus, dann Unterbereich weg, dann der andere - erst jetzt der Elter.
+call(f"/api/v1/hosts/{hvm}/area", {"area_id": None}, hdr=ADM)
+code, res = call(f"/api/v1/areas/{win}", method="DELETE", hdr=ADM)
+check("leerer Unterbereich loeschbar", code == 200, (code, res))
+call(f"/api/v1/areas/{lin}", method="DELETE", hdr=ADM)
+code, res = call(f"/api/v1/areas/{pve01}", method="DELETE", hdr=ADM)
+check("Elter loeschbar, sobald keine Unterbereiche mehr da sind",
+      code == 200, (code, res))
+
+
 # --------------------------------------- Zeitplan des Bereichs im Heartbeat
 # Ab hier ueber die echte Route /api/v1/agent/heartbeat statt nur gegen
 # area_patch_due() direkt (das deckt schon tests/area-schedule-test.py ab).

@@ -1056,10 +1056,10 @@ global.setTimeout = origSetTimeout;
     check("Bereichs-Kopf steht vor seinen eigenen Hosts",
           posArea >= 0 && posArea < posH1 && posH1 < posH2, { posArea, posH1, posH2 });
     check("beide Hosts im Bereich sind als solche markiert",
-          out.slice(Math.max(0, posH1 - 40), posH1).includes('data-in-area="1"')
-          && out.slice(Math.max(0, posH2 - 40), posH2).includes('data-in-area="1"'));
+          out.slice(Math.max(0, posH1 - 60), posH1).includes('data-area-level="1"')
+          && out.slice(Math.max(0, posH2 - 60), posH2).includes('data-area-level="1"'));
     check("Host ohne Bereich bleibt unmarkiert",
-          !out.slice(Math.max(0, posH3 - 40), posH3).includes('data-in-area="1"'));
+          !out.slice(Math.max(0, posH3 - 60), posH3).includes('data-area-level="1"'));
     // Seit der Rueckmeldung zu Schritt 5: bereichslose Hosts stehen ganz
     // oben, vor jedem Bereichs-Kopf - nicht mehr danach.
     check("Host ohne Bereich steht VOR dem ersten Bereichs-Kopf",
@@ -1090,7 +1090,33 @@ global.setTimeout = origSetTimeout;
     const outOhne = el("units").innerHTML;
     check("ohne Bereiche: keine Kopfzeile im Markup", !outOhne.includes("areahead"));
     check("ohne Bereiche: kein Host als eingerueckt markiert",
-          !outOhne.includes("data-in-area"));
+          !outOhne.includes("data-area-level"));
+
+    // --- Unterbereiche (0.38.3): eine Ebene tief, doppelt eingerueckt ---
+    // Ein oberster Bereich PVE01 mit einem Unterbereich Windows. Die VM
+    // haengt am Unterbereich (area_id = Windows), nicht am obersten.
+    const pve = { id: 90601, name: "PVE01", parent_id: null, sort_order: 1, host_count: 0 };
+    const subWin = { id: 90602, name: "Windows", parent_id: 90601, sort_order: 2, host_count: 0 };
+    const vm = mkHost(90701, { area_id: subWin.id });
+    api.setAreas([pve, subWin]);
+    api.setHosts([vm]);
+    api.render();
+    const outN = el("units").innerHTML;
+    const posPve = outN.indexOf(`data-area-id="${pve.id}"`);
+    const posSub = outN.indexOf(`data-area-id="${subWin.id}"`);
+    const posVm = outN.indexOf(`data-id="${vm.id}"`);
+    check("oberster Bereich steht vor seinem Unterbereich",
+          posPve >= 0 && posSub > posPve, { posPve, posSub });
+    check("Unterbereichs-Kopf ist als Ebene 2 markiert",
+          outN.slice(posSub - 30, posSub + 60).includes('data-area-level="2"')
+          || outN.slice(posSub, posSub + 120).includes('data-area-level="2"'),
+          outN.slice(Math.max(0, posSub - 30), posSub + 120));
+    check("Host im Unterbereich steht nach dem Unterbereichs-Kopf",
+          posVm > posSub, { posSub, posVm });
+    check("Host im Unterbereich ist doppelt eingerueckt (Ebene 2)",
+          outN.slice(Math.max(0, posVm - 60), posVm).includes('data-area-level="2"'));
+    check("der oberste Bereich bleibt sichtbar, obwohl er nur ueber den "
+          + "Unterbereich Hosts hat", posPve >= 0);
   }
 
   console.log("\n=== Bereiche: Ablegen berechnen (applyDrop) ===");

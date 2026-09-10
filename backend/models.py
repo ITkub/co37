@@ -184,7 +184,15 @@ class Area(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
 
-    # Eigene Reihenfolge der Bereiche, getrennt von Host.sort_order.
+    # Uebergeordneter Bereich oder None (oberste Ebene). Genau eine Ebene
+    # tief: ein Unterbereich darf selbst keine Kinder haben - durchgesetzt
+    # in create_area()/update_area(), nicht im Schema. None heisst "oberste
+    # Ebene", genau wie area_id=None beim Host "ohne Bereich" heisst.
+    parent_id: Optional[int] = Field(default=None, foreign_key="area.id", index=True)
+
+    # Eigene Reihenfolge der Bereiche, getrennt von Host.sort_order. Zaehlt
+    # je Gruppe: oberste Bereiche untereinander, Unterbereiche innerhalb
+    # ihres Elters.
     sort_order: int = Field(default=0, index=True)
 
     checkmk_hosts: list[str] = Field(default_factory=list,

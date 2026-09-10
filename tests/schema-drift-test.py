@@ -899,8 +899,12 @@ check("der Abgleich meldet host.tags", bool(_treffer22), _abw22[:5])
 bericht22 = migrate.migrate(motor22)
 check("die Migration meldet keine Probleme",
       not bericht22["problems"], bericht22["problems"])
-check("und sie meldet Schema 22", bericht22["version"] == 22,
-      bericht22["version"])
+# Gegen die Konstante, nicht gegen eine abgetippte Zahl: der Umbau der
+# NULL-Spalten kam mit Schema 22, die gemeldete Version ist aber immer die
+# aktuelle des Codes. Eine feste 22 hier bräche bei jeder Schemaerhöhung
+# einen Test, der mit der Version nichts zu tun hat.
+check("und sie meldet die aktuelle Schemaversion",
+      bericht22["version"] == migrate.SCHEMA_VERSION, bericht22["version"])
 
 with motor22.connect() as conn:
     _nachher = conn.execute(text(

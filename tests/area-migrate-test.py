@@ -96,5 +96,36 @@ conn.close()
 ok, missing = migrate.verify(engine)
 check("verify() meldet vollstaendiges Schema", ok, missing)
 
+
+# ------------------------------------------- Bestehende area-Tabelle ohne
+# parent_id (Anlage, die Bereiche schon vor 0.38.3 kannte). create_all()
+# aendert die vorhandene Tabelle NICHT - erst migrate() ergaenzt die Spalte.
+# Genau der Fall, der den Aufstieg auf 0.4.0 mit host.area_id gebrochen hat,
+# nur eine Ebene tiefer.
+DB2 = TMP / "sub.db"
+conn = sqlite3.connect(DB2)
+conn.execute("CREATE TABLE host (id INTEGER PRIMARY KEY, hostname VARCHAR, sort_order INTEGER DEFAULT 0)")
+# area-Tabelle wie vor 0.38.3: mit name und sort_order, aber ohne parent_id.
+conn.execute("CREATE TABLE area (id INTEGER PRIMARY KEY, name VARCHAR, sort_order INTEGER DEFAULT 0)")
+conn.execute("INSERT INTO area (id, name, sort_order) VALUES (1, 'Bestandsbereich', 1)")
+conn.execute("CREATE TABLE setting (key VARCHAR PRIMARY KEY, value VARCHAR)")
+conn.execute("INSERT INTO setting (key, value) VALUES ('schema_version', '22')")
+conn.commit()
+conn.close()
+
+engine2 = create_engine(f"sqlite:///{DB2}")
+SQLModel.metadata.create_all(engine2)   # aendert die bestehende area-Tabelle nicht
+migrate.migrate(engine2)
+
+conn = sqlite3.connect(DB2)
+acols = {r[1] for r in conn.execute("PRAGMA table_info(area)").fetchall()}
+check("area.parent_id in bestehender Tabelle ergaenzt", "parent_id" in acols, acols)
+row = conn.execute("SELECT name, parent_id FROM area WHERE id=1").fetchone()
+check("Bestandsbereich bleibt erhalten und wird kein Unterbereich",
+      row is not None and row[0] == "Bestandsbereich" and row[1] is None, row)
+conn.close()
+ok2, missing2 = migrate.verify(engine2)
+check("verify() nach dem Aufstieg vollstaendig", ok2, missing2)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
