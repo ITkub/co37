@@ -1367,7 +1367,7 @@ kann CO-37 in Ruhe ausprobieren.
 Ab 11 Hosts. Der Schlüssel legt fest, wie viele Hosts freigeschaltet sind und
 wie lange er gilt — wahlweise ein, zwei oder drei Jahre.
 
-Anfragen an **sales@itkub.de**.
+Anfragen an **michael.kuban@itkub.de**.
 
 Der Schlüssel wird unter *Einstellungen → Lizenz* eingetragen. Er enthält
 Kunde, Hostzahl und Laufzeit im Klartext und ist signiert — verändern
@@ -1394,7 +1394,7 @@ Aichacher Str. 9
 86573 Obergriesbach
 Germany
 
-- Lizenzen und Vertrieb: sales@itkub.de
+- Lizenzen und Vertrieb: michael.kuban@itkub.de
 - Fehler und Vorschläge: über die Issues dieses Repositories
 
 CO-37 wird von einer Person entwickelt. Antwortzeiten richten sich danach.

@@ -783,16 +783,16 @@ def check_host_limit(session: Session):
     if _LIZENZ.vorhanden and not _LIZENZ.abgelaufen:
         text = (f"Der Lizenzschluessel umfasst {grenze} Hosts, es sind "
                 f"bereits {belegt} freigegeben. Fuer weitere Hosts wird ein "
-                f"groesserer Schluessel benoetigt: sales@itkub.de")
+                f"groesserer Schluessel benoetigt: michael.kuban@itkub.de")
     elif _LIZENZ.abgelaufen:
         text = (f"Der Lizenzschluessel ist abgelaufen. Ohne gueltigen "
                 f"Schluessel sind {grenze} Hosts moeglich, es sind bereits "
                 f"{belegt} freigegeben. Bereits freigegebene Hosts werden "
-                f"weiter gepatcht. Verlaengerung: sales@itkub.de")
+                f"weiter gepatcht. Verlaengerung: michael.kuban@itkub.de")
     else:
         text = (f"Ohne Lizenzschluessel sind {grenze} Hosts moeglich, es "
                 f"sind bereits {belegt} freigegeben. Fuer mehr Hosts: "
-                f"sales@itkub.de")
+                f"michael.kuban@itkub.de")
     raise HTTPException(403, text)
 
 # Frist, innerhalb derer nach dem Einschalten eine Anmeldung ueber HTTPS
