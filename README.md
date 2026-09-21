@@ -6,7 +6,7 @@ Selbst gehostet, agentenbasiert, ohne Cloud-Anbindung.
 Vorgesehen für den Betrieb **im lokalen Netz**. Ein Server je Netz. TLS über
 einen vorgeschalteten Reverse Proxy — siehe `REVERSE-PROXY.md`.
 
-**Bis zu 10 Hosts kostenlos**, auch geschäftlich. Darüber hinaus wird eine
+**Bis zu 15 Hosts kostenlos**, auch geschäftlich. Darüber hinaus wird eine
 kommerzielle Lizenz benötigt: siehe [Lizenz](#lizenz).
 
 ---
@@ -1355,7 +1355,7 @@ einsehbar und veränderbar, die produktive Nutzung aber begrenzt.
 
 ## Kostenlos
 
-Bis zu **10 Hosts je Installation**, ohne zeitliche Begrenzung, auch
+Bis zu **15 Hosts je Installation**, ohne zeitliche Begrenzung, auch
 geschäftlich. Gezählt werden freigegebene Hosts; wartende, abgelehnte und
 gelöschte zählen nicht.
 
@@ -1364,7 +1364,7 @@ kann CO-37 in Ruhe ausprobieren.
 
 ## Kommerzielle Lizenz
 
-Ab 11 Hosts. Der Schlüssel legt fest, wie viele Hosts freigeschaltet sind und
+Ab 16 Hosts. Der Schlüssel legt fest, wie viele Hosts freigeschaltet sind und
 wie lange er gilt — wahlweise ein, zwei oder drei Jahre.
 
 Anfragen an **michael.kuban@itkub.de**.

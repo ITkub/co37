@@ -256,6 +256,12 @@ async function checkVersion(){
     }
   }
 
+  // Ohne Versionsauskunft nichts behaupten. Seit der F-09-Schranke gibt
+  // /api/health die Version nur an Angemeldete heraus; laeuft die Sitzung
+  // ab, kommt h.version als undefined zurueck - der Vergleich darunter
+  // schluege dann als "aktualisiert auf undefined" an, obwohl gar kein
+  // Update lief (2026-09-21). Also erst gar nicht vergleichen.
+  if (!h.version) return;
   if (PAGE_VERSION === null){ PAGE_VERSION = h.version; return; }
   if (h.version === PAGE_VERSION) return;
 
@@ -3144,7 +3150,10 @@ async function startApp(){
   try {
     const h = await (await fetch(API + "/api/health", {cache: "no-store"})).json();
     AGENT_VER = h.agent_version || "";
-    PAGE_VERSION = h.version;
+    // Nur mit echter Auskunft merken - sonst stuende PAGE_VERSION auf
+    // undefined und der naechste checkVersion() meldete faelschlich ein
+    // Update, sobald die Version wieder da ist.
+    if (h.version) PAGE_VERSION = h.version;
     // Nur die Versionszeile ersetzen - textContent auf dem footer wuerde
     // die Zeile mit dem Urheberhinweis mit loeschen.
     if (h.version) document.getElementById("footVersion").textContent = `CO-37 v${h.version}`;

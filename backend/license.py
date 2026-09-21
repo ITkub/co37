@@ -45,8 +45,9 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 # Hosts, die ohne Schluessel freigegeben werden duerfen. Deckt Homelabs
-# ab und laesst groessere Umgebungen ausprobieren.
-FREIE_HOSTS = 10
+# ab und laesst groessere Umgebungen ausprobieren. Muss mit dem Additional
+# Use Grant in LICENSE uebereinstimmen.
+FREIE_HOSTS = 15
 
 # Ab wann in der Oberflaeche auf den bevorstehenden Ablauf hingewiesen
 # wird.

@@ -70,7 +70,7 @@ def schluessel(kunde="Testkunde", hosts=100, exp=None, nr=1, v=1,
 leer = license.Lizenz()
 check("ohne Schluessel gilt der Freibetrag",
       leer.erlaubte_hosts == license.FREIE_HOSTS, leer.erlaubte_hosts)
-check("Freibetrag ist 10", license.FREIE_HOSTS == 10, license.FREIE_HOSTS)
+check("Freibetrag ist 15", license.FREIE_HOSTS == 15, license.FREIE_HOSTS)
 check("ohne Schluessel kein Hinweis", leer.hinweis == "", leer.hinweis)
 
 # -------------------------------------------------------------- gueltiger Fall

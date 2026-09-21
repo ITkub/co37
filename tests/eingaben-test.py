@@ -723,7 +723,7 @@ check("ein Zeilenumbruch im Namen erzeugt keine zweite Protokollzeile",
 # ======================================================================
 # Diese Reihe legt Hosts an - einen freigegebenen und zwei, die bei den
 # Groessenproben entstehen. Sie teilt sich das Backend mit allen anderen,
-# und der Freibetrag der Lizenz sind zehn freigegebene Hosts: ohne
+# und der Freibetrag der Lizenz sind fuenfzehn freigegebene Hosts: ohne
 # Aufraeumen fiel 'roles' hier durch ("Freigabe bis zum Freibetrag
 # moeglich"), und 'frontend' kam mit der Hostliste durcheinander.
 #

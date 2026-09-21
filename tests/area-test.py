@@ -237,7 +237,7 @@ check("unbekannter Elter abgewiesen", code == 404, code)
 # Ein Host kommt in den Unterbereich (die VMs sollen in Windows/Linux).
 # Bewusst der schon angemeldete h1 (gerade ohne Bereich), kein neuer Host:
 # das Backend teilt sich alle Testreihen, und ein zusaetzlich genehmigter
-# Host wuerde den Freibetrag von 10 fuer spaetere Reihen aufzehren.
+# Host wuerde den Freibetrag von 15 fuer spaetere Reihen aufzehren.
 hvm = h1
 code, res = call(f"/api/v1/hosts/{hvm}/area", {"area_id": win}, hdr=ADM)
 check("Host in einen Unterbereich verschiebbar",

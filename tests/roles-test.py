@@ -310,8 +310,8 @@ check("Lizenzstand abrufbar", code == 200, code)
 check("ohne Schluessel gilt der Freibetrag",
       res.get("erlaubte_hosts") == res.get("frei_ohne_schluessel"),
       res.get("erlaubte_hosts"))
-frei = res.get("frei_ohne_schluessel", 10)
-check("Freibetrag ist 10", frei == 10, frei)
+frei = res.get("frei_ohne_schluessel", 15)
+check("Freibetrag ist 15", frei == 15, frei)
 
 # Auch fuer einen Benutzer lesbar: wer am Limit scheitert, soll den Grund
 # nachvollziehen koennen.

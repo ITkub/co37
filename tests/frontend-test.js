@@ -1206,6 +1206,18 @@ global.setTimeout = origSetTimeout;
     await api.checkVersion();
     check("Hinweis bei Versionswechsel", el("reloadBar").style.display === "flex",
           el("reloadText").textContent.slice(0, 60));
+
+    // Darf NICHT ausloesen: liefert /api/health keine Version (abgelaufene
+    // Sitzung, F-09-Schranke), war der Balken frueher "aktualisiert auf
+    // undefined" - obwohl gar kein Update lief (2026-09-21).
+    const echtesFetch3 = global.fetch;
+    el("reloadBar").style.display = "none";
+    api.setPageVersion("0.38.4");
+    global.fetch = async () => ({ json: async () => ({ status: "ok" }) });
+    await api.checkVersion();
+    check("ohne Versionsauskunft kein Reload-Hinweis (nicht 'undefined')",
+          el("reloadBar").style.display !== "flex", el("reloadBar").style.display);
+    global.fetch = echtesFetch3;
   } catch(e){ check("checkVersion laeuft durch", false, e.message); }
 
   console.log("\n=== Checkmk-Formular ===");
@@ -1706,7 +1718,7 @@ global.setTimeout = origSetTimeout;
     // Aufraeumen: dieser Testhost wird nicht mehr gebraucht. Wichtig fuer
     // den vollstaendigen Lauf (alle Reihen zusammen) - roles-test.py laeuft
     // bewusst als letzte Reihe gegen denselben Bestand und prueft die
-    // Freigabe bis zum Freibetrag (10 Hosts). Ein hier liegen gelassener,
+    // Freigabe bis zum Freibetrag (15 Hosts). Ein hier liegen gelassener,
     // freigegebener Host wuerde diesen Spielraum unbemerkt verkleinern.
     await adminCall(`/api/v1/hosts/${hid6}`, { method: "DELETE" });
 
