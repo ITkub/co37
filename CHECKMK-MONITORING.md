@@ -14,7 +14,8 @@ Drei Bausteine, unabhängig voneinander nutzbar:
    (Kontakt, Updates, Neustart), automatisch über die in CO-37
    hinterlegte Checkmk-Verknüpfung.
 
-Alle Skripte liegen im Release unter `checkmk/`.
+Alle Skripte liegen im Release unter `packaging/checkmk/` und werden mit
+jedem Update mitgeliefert (siehe Hinweis unter Abschnitt 1).
 
 ---
 
@@ -49,8 +50,7 @@ Checkmk-Zuordnung, Versionen und die Lizenz-Eckdaten.
 Auf dem CO-37-Server (dort läuft schon der Checkmk-Agent):
 
 ```
-install -m 0755 /opt/co37/checkmk/co37_monitoring \
-  /usr/lib/check_mk_agent/local/co37_monitoring
+install -m 0755 /opt/co37/packaging/checkmk/co37_monitoring /usr/lib/check_mk_agent/local/co37_monitoring
 ```
 
 Testen:
@@ -78,10 +78,12 @@ Läuft das Backend hinter einem Port ≠ 8080 oder liegt `data/` woanders,
 lässt sich das über Umgebungsvariablen setzen (`CO37_URL`,
 `CO37_MONITOR_TOKEN_FILE`) — siehe Kopf des Skripts.
 
-> Hinweis: Ein CO-37-Systemupdate tauscht nur `backend`, `frontend`,
-> `agent` und `packaging` aus. Das Skript im Checkmk-Ordner bleibt also
-> stehen. Ändert sich der Check in einer neuen Fassung, die Datei aus
-> `/opt/co37/checkmk/` erneut hineinkopieren.
+> Hinweis: Die Skripte liegen unter `packaging/` und werden von jedem
+> CO-37-Update mitgeliefert — `/opt/co37/packaging/checkmk/` ist also
+> immer aktuell. Der laufende Check ist aber die **Kopie** unter
+> `/usr/lib/check_mk_agent/local/`. Ändert sich ein Check in einer neuen
+> Fassung, den `install`-Befehl von oben erneut ausführen, damit die
+> Kopie nachgezogen wird.
 
 ---
 
@@ -101,8 +103,7 @@ der Discovery aufnehmen).
 **b) Mit Local-Check** (überall gleich, robuster):
 
 ```
-install -m 0755 /opt/co37/checkmk/co37_agent \
-  /usr/lib/check_mk_agent/local/co37_agent
+install -m 0755 /opt/co37/packaging/checkmk/co37_agent /usr/lib/check_mk_agent/local/co37_agent
 ```
 
 Ergebnis: Dienst `CO-37 Agent` — OK wenn `active`, sonst CRIT.
@@ -115,8 +116,7 @@ laufenden Python-Prozess startet. Checkmk überwacht so etwas nicht von
 allein — deshalb den mitgelieferten Local-Check verwenden:
 
 ```
-copy \opt\co37\checkmk\co37_agent.ps1 ^
-  "C:\ProgramData\checkmk\agent\local\co37_agent.ps1"
+copy co37_agent.ps1 "C:\ProgramData\checkmk\agent\local\co37_agent.ps1"
 ```
 
 (Die `.ps1` liegt im Release; auf den Windows-Host kopieren, z. B. per
