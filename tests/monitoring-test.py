@@ -145,5 +145,36 @@ check("web01 traegt die Checkmk-Verknuepfung",
 check("die Hostliste enthaelt kein agent_token_hash",
       "agent_token_hash" not in json.dumps(d2["hosts"]))
 
+# ------------------------------------------------ HTTPS-Zwang-Ausnahme
+# Der Local-Check spricht das Backend unverschluesselt ueber Loopback an.
+# Ist HTTPS-Zwang an, muss die Middleware /api/v1/monitoring ueber Loopback
+# trotzdem durchlassen - sonst kaeme der Check nie an den Endpunkt (403).
+print("--- HTTPS-Zwang: Loopback-Ausnahme ---")
+
+
+def route(pfad, ip):
+    return Request({
+        "type": "http", "http_version": "1.1", "method": "GET",
+        "path": pfad, "raw_path": pfad.encode(), "query_string": b"",
+        "root_path": "", "scheme": "http", "server": ("test", 80),
+        "client": (ip, 40000) if ip else None, "headers": [],
+    })
+
+
+alt = main._PROXY_CFG["https_only"]
+main._PROXY_CFG["https_only"] = True
+try:
+    check("monitoring ueber Loopback trotz HTTPS-Zwang durchgelassen",
+          main.https_only_check(route("/api/v1/monitoring", "127.0.0.1")) is None)
+    check("health ueber Loopback weiterhin frei",
+          main.https_only_check(route("/api/health", "127.0.0.1")) is None)
+    check("monitoring von aussen unter HTTPS-Zwang abgewiesen",
+          main.https_only_check(route("/api/v1/monitoring", "192.0.2.50")) is not None)
+    check("andere Route ueber Loopback bleibt gesperrt",
+          main.https_only_check(route("/api/v1/schema", "127.0.0.1")) is not None)
+finally:
+    main._PROXY_CFG["https_only"] = alt
+
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)
