@@ -38,8 +38,7 @@ HIER = Path(__file__).resolve().parent
 # Der Watcher fasst tools/ ohnehin nicht an: MANAGED_DIRS kennt nur
 # backend, frontend, agent und packaging. Ein bereits installiertes
 # tools/ bleibt also stehen und muss von Hand weg.
-VERZEICHNISSE = ["backend", "frontend", "agent", "packaging", "tests",
-                 "checkmk"]
+VERZEICHNISSE = ["backend", "frontend", "agent", "packaging", "tests"]
 DATEIEN = [
     "update_watcher.py", "setup.sh", "build_packages.sh",
     "build_release.sh", "build_release.py", "migrate_to_co37.sh",
@@ -226,7 +225,8 @@ def packe(ziel: Path, dateien: list):
             # es dieses Recht gar nicht, es kann also nicht uebernommen
             # werden.
             ausfuehrbar = name.endswith(AUSFUEHRBAR) or name in (
-                "checkmk/co37_monitoring", "checkmk/co37_agent")
+                "packaging/checkmk/co37_monitoring",
+                "packaging/checkmk/co37_agent")
             rechte = 0o755 if ausfuehrbar else 0o644
             info.external_attr = (stat.S_IFREG | rechte) << 16
             zf.writestr(info, pfad.read_bytes())
