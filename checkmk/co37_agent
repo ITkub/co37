@@ -1,0 +1,31 @@
+#!/bin/sh
+# CO-37 - Checkmk-Local-Check fuer den AGENT-Host (Linux).
+#
+# Liegt auf dem ueberwachten Host in /usr/lib/check_mk_agent/local/ und
+# prueft direkt, ob der CO-37-Agent laeuft - unabhaengig vom CO-37-Server.
+# Das schlaegt auch dann an, wenn der Server selbst gerade aus ist.
+#
+# Der Agent laeuft als systemd-Dienst co37-agent.service. Ohne systemd
+# faellt der Check auf eine Prozesssuche zurueck.
+
+NAME="CO-37 Agent"
+
+if command -v systemctl >/dev/null 2>&1; then
+    STATE=$(systemctl is-active co37-agent.service 2>/dev/null)
+    if [ "$STATE" = "active" ]; then
+        echo "0 \"$NAME\" - laeuft (co37-agent.service active)"
+    elif [ "$STATE" = "activating" ] || [ "$STATE" = "reloading" ]; then
+        echo "1 \"$NAME\" - startet gerade (co37-agent.service $STATE)"
+    else
+        [ -z "$STATE" ] && STATE="unbekannt"
+        echo "2 \"$NAME\" - laeuft NICHT (co37-agent.service: $STATE)"
+    fi
+else
+    # Kein systemd - Prozess suchen (agent.py)
+    if pgrep -f "co37/agent.py" >/dev/null 2>&1 \
+        || pgrep -f "/usr/lib/co37/agent.py" >/dev/null 2>&1; then
+        echo "0 \"$NAME\" - laeuft (Prozess aktiv, kein systemd)"
+    else
+        echo "2 \"$NAME\" - laeuft NICHT (kein Prozess gefunden)"
+    fi
+fi
