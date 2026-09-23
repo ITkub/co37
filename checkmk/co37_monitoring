@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+CO-37 - Checkmk-Local-Check fuer den CO-37-Server.
+
+Liegt auf dem CO-37-Server in /usr/lib/check_mk_agent/local/ und wird vom
+dortigen Checkmk-Agent bei jedem Lauf ausgefuehrt. Er fragt den lokalen
+Endpunkt /api/v1/monitoring ab (nur ueber 127.0.0.1, mit dem lokalen
+Token aus data/monitor.token) und gibt daraus:
+
+  * Dienste FUER DEN CO-37-HOST selbst (Backend, Agents online, Updates,
+    Neustart, Lizenz, eigenes Update, Freigaben),
+  * optional Piggyback-Dienste je verwaltetem Host - die Zusatzsicht aus
+    CO-37 (Kontakt, Updates, Neustart), zugeordnet ueber die in CO-37
+    hinterlegte Checkmk-Verknuepfung.
+
+Braucht nur die Python-Standardbibliothek. Ist der Endpunkt nicht
+erreichbar, meldet der Check das als CRIT, statt still zu schweigen.
+
+Einstellbar ueber Umgebung (sonst Standard):
+  CO37_URL                Basis-URL      (Standard http://127.0.0.1:8080)
+  CO37_MONITOR_TOKEN      Token direkt   (sonst aus Datei)
+  CO37_MONITOR_TOKEN_FILE Tokendatei     (Standard /opt/co37/data/monitor.token)
+"""
+
+import json
+import os
+import sys
+import urllib.request
+
+URL = os.environ.get("CO37_URL", "http://127.0.0.1:8080").rstrip("/")
+TOKEN_FILE = os.environ.get("CO37_MONITOR_TOKEN_FILE",
+                            "/opt/co37/data/monitor.token")
+TIMEOUT = 8
+
+
+def token() -> str:
+    t = os.environ.get("CO37_MONITOR_TOKEN")
+    if t:
+        return t.strip()
+    try:
+        with open(TOKEN_FILE, "r", encoding="ascii") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def line(status, name, text, perf=None):
+    """Eine Checkmk-Local-Check-Zeile. name in Anfuehrungszeichen, damit
+    Leerzeichen erlaubt sind; perf ist '-' wenn leer."""
+    p = " ".join(perf) if perf else "-"
+    print(f'{status} "{name}" {p} {text}')
+
+
+def hole():
+    req = urllib.request.Request(URL + "/api/v1/monitoring",
+                                 headers={"X-Monitor-Token": token()})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def main():
+    try:
+        d = hole()
+    except Exception as exc:  # Endpunkt nicht erreichbar o. Token falsch
+        line(2, "CO-37 Backend", f"nicht erreichbar: {exc}")
+        return
+
+    co = d.get("co37", {})
+    fl = d.get("fleet", {})
+    li = d.get("license", {})
+
+    # --- Backend ---
+    if co.get("backend_ok"):
+        line(0, "CO-37 Backend",
+             f"laeuft - Version {co.get('version','?')}, "
+             f"Schema {co.get('schema_version','?')}")
+    else:
+        line(2, "CO-37 Backend", "Backend meldet Schema-/Datenfehler")
+
+    # --- Agents online ---
+    appr = fl.get("approved", 0)
+    onl = fl.get("online", 0)
+    off = fl.get("offline", 0)
+    st = 0 if off == 0 else (2 if onl == 0 and appr > 0 else 1)
+    line(st, "CO-37 Agents online",
+         f"{onl} von {appr} online, {off} offline",
+         [f"online={onl}", f"offline={off}", f"approved={appr}"])
+
+    # --- Wartet auf Freigabe ---
+    pend = fl.get("pending_approval", 0)
+    line(1 if pend > 0 else 0, "CO-37 Wartet auf Freigabe",
+         f"{pend} Host(s) warten auf Freigabe", [f"pending={pend}"])
+
+    # --- Updates offen ---
+    upd = fl.get("updates_total", 0)
+    sec = fl.get("security_total", 0)
+    uh = fl.get("updates_hosts", 0)
+    st = 2 if sec > 0 else (1 if upd > 0 else 0)
+    line(st, "CO-37 Updates offen",
+         f"{upd} Updates offen ({sec} sicherheitsrelevant) auf {uh} Host(s)",
+         [f"updates={upd}", f"security={sec}", f"hosts={uh}"])
+
+    # --- Neustart noetig ---
+    rb = fl.get("reboot_required", 0)
+    line(1 if rb > 0 else 0, "CO-37 Neustart noetig",
+         f"{rb} Host(s) brauchen einen Neustart", [f"reboot={rb}"])
+
+    # --- Agents veraltet ---
+    od = fl.get("agents_outdated", 0)
+    line(1 if od > 0 else 0, "CO-37 Agents veraltet",
+         f"{od} Host(s) mit veralteter Agent-Version", [f"outdated={od}"])
+
+    # --- Lizenz ---
+    used = li.get("used", 0)
+    allowed = li.get("allowed")
+    days = li.get("days_left")
+    if li.get("expired"):
+        st, txt = 2, "Lizenz abgelaufen - faellt auf den Freibetrag zurueck"
+    elif days is not None and days < 14:
+        st, txt = 2, f"Lizenz laeuft in {days} Tagen ab"
+    elif days is not None and days < 30:
+        st, txt = 1, f"Lizenz laeuft in {days} Tagen ab"
+    elif allowed is not None and used >= allowed:
+        st, txt = 1, f"Hostzahl am Limit ({used}/{allowed})"
+    else:
+        grenze = "unbegrenzt" if allowed is None else str(allowed)
+        txt = f"{used} von {grenze} Hosts genutzt"
+        st = 0
+    perf = [f"used={used}"]
+    if allowed is not None:
+        perf.append(f"allowed={allowed}")
+    if days is not None:
+        perf.append(f"days_left={days}")
+    line(st, "CO-37 Lizenz", txt, perf)
+
+    # --- Eigenes Update ---
+    av = co.get("update_available")
+    if av:
+        line(1, "CO-37 Eigenes Update",
+             f"neue CO-37-Version {av} verfuegbar (installiert "
+             f"{co.get('version','?')})")
+    else:
+        line(0, "CO-37 Eigenes Update",
+             f"aktuell ({co.get('version','?')})")
+
+    # --- Piggyback: Zusatzsicht je Host ---
+    for h in d.get("hosts", []):
+        ziele = h.get("checkmk_hosts") or []
+        if not ziele:
+            continue  # ohne Checkmk-Verknuepfung kein Ziel
+        for ziel in ziele:
+            print(f"<<<<{ziel}>>>>")
+            print("<<<local>>>")
+            if h.get("online"):
+                age = h.get("last_seen_age")
+                line(0, "CO-37 Kontakt",
+                     f"Agent gemeldet vor {age}s" if age is not None
+                     else "Agent gemeldet")
+            else:
+                line(2, "CO-37 Kontakt",
+                     "Agent meldet sich nicht (Server-Sicht)")
+            hu = h.get("updates_available", 0)
+            hs = h.get("security_updates", 0)
+            st = 2 if hs > 0 else (1 if hu > 0 else 0)
+            line(st, "CO-37 Updates",
+                 f"{hu} Updates ({hs} sicherheitsrelevant)",
+                 [f"updates={hu}", f"security={hs}"])
+            line(1 if h.get("reboot_required") else 0, "CO-37 Neustart",
+                 "Neustart noetig" if h.get("reboot_required")
+                 else "kein Neustart noetig")
+            if h.get("outdated"):
+                line(1, "CO-37 Agent-Version",
+                     f"veraltet ({h.get('agent_version','?')})")
+            print("<<<<>>>>")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        # Ein Check, der selbst abstuerzt, darf nicht den ganzen
+        # Agent-Lauf mitreissen - eine CRIT-Zeile ist die sichere Antwort.
+        print(f'2 "CO-37 Backend" - Local-Check-Fehler: {exc}')
+        sys.exit(0)

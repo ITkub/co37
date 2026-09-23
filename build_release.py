@@ -38,12 +38,13 @@ HIER = Path(__file__).resolve().parent
 # Der Watcher fasst tools/ ohnehin nicht an: MANAGED_DIRS kennt nur
 # backend, frontend, agent und packaging. Ein bereits installiertes
 # tools/ bleibt also stehen und muss von Hand weg.
-VERZEICHNISSE = ["backend", "frontend", "agent", "packaging", "tests"]
+VERZEICHNISSE = ["backend", "frontend", "agent", "packaging", "tests",
+                 "checkmk"]
 DATEIEN = [
     "update_watcher.py", "setup.sh", "build_packages.sh",
     "build_release.sh", "build_release.py", "migrate_to_co37.sh",
-    "README.md", "REVERSE-PROXY.md", "GITHUB.md", "LICENSE",
-    "run-tests.sh", ".gitignore", ".gitattributes",
+    "README.md", "REVERSE-PROXY.md", "CHECKMK-MONITORING.md", "GITHUB.md",
+    "LICENSE", "run-tests.sh", ".gitignore", ".gitattributes",
 ]
 
 # .log/.log.1: der Agent schreibt sein Protokoll neben agent.py. Wer ihn
@@ -224,7 +225,9 @@ def packe(ziel: Path, dateien: list):
             # ohne Ausfuehrungsrecht beim Kunden an - unter Windows gibt
             # es dieses Recht gar nicht, es kann also nicht uebernommen
             # werden.
-            rechte = 0o755 if name.endswith(AUSFUEHRBAR) else 0o644
+            ausfuehrbar = name.endswith(AUSFUEHRBAR) or name in (
+                "checkmk/co37_monitoring", "checkmk/co37_agent")
+            rechte = 0o755 if ausfuehrbar else 0o644
             info.external_attr = (stat.S_IFREG | rechte) << 16
             zf.writestr(info, pfad.read_bytes())
 

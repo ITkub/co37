@@ -84,6 +84,55 @@ PKG_DIR_ALT = DATA_DIR / "packages"
 
 AGENT_SRC = Path(__file__).resolve().parent.parent / "agent" / "agent.py"
 
+# Lokales Geheimnis fuer den Ueberwachungs-Endpunkt (/api/v1/monitoring,
+# seit 0.40.0). Liegt unter data/, gehoert damit co37 und ist mit 0600
+# nur fuer diesen Benutzer lesbar - der als root laufende Checkmk-Agent
+# liest es ebenfalls, root umgeht die Rechte.
+#
+# WARUM ein Token UND Loopback (siehe monitoring()): "loopback" bestimmt
+# CO-37 ueber die echte TCP-Gegenstelle (peer_ip, uvicorn laeuft mit
+# --no-proxy-headers). Steht der Reverse Proxy auf DEMSELBEN Host
+# (proxy_pass 127.0.0.1:8080), ist die Gegenstelle 127.0.0.1 - eine reine
+# Loopback-Schranke waere ueber so einen Proxy von aussen erreichbar. Das
+# Token schliesst das: von aussen kommt keiner an die lokale Datei.
+MONITOR_TOKEN_FILE = DATA_DIR / "monitor.token"
+
+
+def monitor_token() -> str:
+    """
+    Gibt das lokale Ueberwachungs-Token zurueck und legt es beim ersten
+    Aufruf an. O_NOFOLLOW und O_EXCL an der Schreibstelle: ein
+    untergeschobener Symlink oder eine bereits bestehende Datei bricht das
+    Anlegen ab, statt woandershin zu schreiben.
+    """
+    try:
+        roh = MONITOR_TOKEN_FILE.read_text(encoding="ascii").strip()
+        if roh:
+            return roh
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001
+        return ""
+    token = secrets.token_urlsafe(32)
+    try:
+        MONITOR_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            MONITOR_TOKEN_FILE,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(token + "\n")
+        return token
+    except FileExistsError:
+        # Ein zweiter Prozess war schneller - dessen Wert gilt.
+        try:
+            return MONITOR_TOKEN_FILE.read_text(encoding="ascii").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
 
 def paketverzeichnis() -> Path:
     """
@@ -144,6 +193,10 @@ async def lifespan(app: FastAPI):
             load_proxy_config(session)
             load_syslog_config(session)
             load_license(session)
+        # Ueberwachungs-Token beim Start anlegen, damit die Datei mit den
+        # richtigen Rechten (0600, co37) existiert, bevor der erste
+        # Checkmk-Lauf sie liest.
+        monitor_token()
     except Exception as exc:  # noqa: BLE001
         print(f"Startbenutzer konnte nicht angelegt werden: {exc}", flush=True)
 
@@ -6510,6 +6563,103 @@ def health(request: Request, x_session: str = Header(default=""),
         except Exception:  # noqa: BLE001
             pass
     return antwort
+
+
+@app.get("/api/v1/monitoring")
+def monitoring(request: Request, x_monitor_token: str = Header(default="")):
+    """
+    Read-only-Auskunft fuer die Ueberwachung (Checkmk), seit 0.40.0.
+
+    NUR LOKAL: verlangt beides - die TCP-Gegenstelle ist loopback UND das
+    lokale Token (X-Monitor-Token) stimmt. Damit ist der Endpunkt auch
+    hinter einem Reverse Proxy auf DEMSELBEN Host nicht von aussen
+    erreichbar: von dort fehlt das Token, und ueber einen Proxy auf einem
+    anderen Host ist die Gegenstelle ohnehin nicht loopback.
+
+    Ein Fehlschlag antwortet mit 404, nicht 401/403: nach aussen soll die
+    Route nicht einmal existieren.
+
+    In der Antwort steht KEIN Geheimnis - keine Agent-Tokens, kein
+    Lizenzschluessel, kein Kundenname. Nur Zaehler, Hostnamen, die
+    Checkmk-Zuordnung, Versionen und die Lizenz-Eckdaten.
+    """
+    erwartet = monitor_token()
+    if (not is_loopback(request) or not erwartet
+            or not secrets.compare_digest(x_monitor_token, erwartet)):
+        raise HTTPException(404)
+
+    now = utcnow()
+    cur_agent = agent_source_version()
+    with Session(engine) as session:
+        ok, _ = migrate.verify(engine)
+        hosts = session.exec(select(Host)).all()
+
+        def _online(h) -> bool:
+            if h.approval_state != ApprovalState.approved or not h.last_seen:
+                return False
+            return (now - ensure_utc(h.last_seen)).total_seconds() <= AGENT_OFFLINE_AFTER
+
+        def _age(h):
+            return int((now - ensure_utc(h.last_seen)).total_seconds()) if h.last_seen else None
+
+        approved = [h for h in hosts if h.approval_state == ApprovalState.approved]
+        pending = [h for h in hosts if h.approval_state == ApprovalState.pending]
+        online = [h for h in approved if _online(h)]
+        outdated = [h for h in approved
+                    if h.agent_version and cur_agent and h.agent_version != cur_agent]
+        updates_hosts = [h for h in approved if (h.updates_available or 0) > 0]
+        reboot_hosts = [h for h in approved if h.reboot_required]
+
+        lic = _LIZENZ.als_dict()
+        try:
+            av = _setting(session, SET_UPDATE_AVAILABLE, "").strip()
+            update_available = av if (av and update_manager.ist_neuer(
+                av, update_manager.get_current_version())) else None
+        except Exception:  # noqa: BLE001
+            update_available = None
+
+        per_host = [{
+            "hostname": h.hostname,
+            "checkmk_hosts": list(h.checkmk_hosts or []),
+            "online": _online(h),
+            "last_seen_age": _age(h),
+            "updates_available": h.updates_available or 0,
+            "security_updates": h.security_updates or 0,
+            "reboot_required": bool(h.reboot_required),
+            "agent_version": h.agent_version or "",
+            "outdated": bool(h.agent_version and cur_agent
+                             and h.agent_version != cur_agent),
+        } for h in approved]
+
+        return {
+            "co37": {
+                "backend_ok": ok,
+                "version": update_manager.get_current_version(),
+                "agent_version": cur_agent,
+                "schema_version": migrate.get_version(engine),
+                "update_available": update_available,
+            },
+            "fleet": {
+                "hosts_total": len(hosts),
+                "approved": len(approved),
+                "pending_approval": len(pending),
+                "online": len(online),
+                "offline": len(approved) - len(online),
+                "updates_hosts": len(updates_hosts),
+                "updates_total": sum(h.updates_available or 0 for h in approved),
+                "security_total": sum(h.security_updates or 0 for h in approved),
+                "reboot_required": len(reboot_hosts),
+                "agents_outdated": len(outdated),
+            },
+            "license": {
+                "present": lic["vorhanden"],
+                "allowed": lic["erlaubte_hosts"],
+                "used": len(approved),
+                "days_left": lic["tage_uebrig"],
+                "expired": lic["abgelaufen"],
+            },
+            "hosts": per_host,
+        }
 
 
 @app.get("/api/v1/schema", dependencies=[Depends(require_admin)])

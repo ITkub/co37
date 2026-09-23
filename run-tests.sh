@@ -204,6 +204,7 @@ REIHEN=(
   "apikey          $PY tests/apikey-test.py"
   "enroll          $PY tests/enroll-test.py"
   "health-info     $PY tests/health-info-test.py"
+  "monitoring      $PY tests/monitoring-test.py"
   "agent-haertung  $PY tests/agent-haertung-test.py"
   "proxy-fallback  $PY tests/proxy-fallback-test.py"
   "license        $PY tests/license-test.py"
