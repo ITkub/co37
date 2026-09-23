@@ -404,15 +404,24 @@ def https_only_check(request: Request):
             f"HTTPS - zurueck auf unverschluesselten Zugang"
         )
 
-    # Die Gesundheitspruefung bleibt ueber Loopback frei. Der Watcher
-    # ruft sie nach einem Update ueber 127.0.0.1 auf; bekaeme er hier 403,
-    # hielte er das eingespielte Update fuer fehlgeschlagen und spielte
-    # die Sicherung zurueck.
+    # Zwei rein lokale Routen bleiben ueber Loopback frei:
     #
-    # Bewusst nur diese eine Route und nicht Loopback insgesamt: sonst
+    #   /api/health      - der Watcher ruft sie nach einem Update ueber
+    #                      127.0.0.1 auf; bekaeme er hier 403, hielte er
+    #                      das Update fuer fehlgeschlagen und spielte die
+    #                      Sicherung zurueck.
+    #   /api/v1/monitoring - der Checkmk-Local-Check spricht das Backend
+    #                      ueber 127.0.0.1 an. CO-37 nimmt selbst kein TLS
+    #                      entgegen, der Check kann also nur unverschluesselt
+    #                      auf Loopback zugreifen. Ohne die Ausnahme lieferte
+    #                      der Check unter HTTPS-Zwang dauerhaft 403.
+    #
+    # Bewusst nur diese beiden Routen und nicht Loopback insgesamt: sonst
     # stuende die gesamte Schnittstelle jedem offen, der auf dem Rechner
-    # eine Shell hat.
-    if request.url.path == "/api/health" and is_loopback(request):
+    # eine Shell hat. Beide sind fuer sich abgesichert - /api/v1/monitoring
+    # verlangt zusaetzlich das lokale Token, sonst 404.
+    if request.url.path in ("/api/health", "/api/v1/monitoring") \
+            and is_loopback(request):
         return None
 
     # Regel 1
