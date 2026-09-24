@@ -179,23 +179,23 @@ def main():
         print("<<<local>>>")
         if h.get("online"):
             age = h.get("last_seen_age")
-            line(0, "CO-37 Kontakt",
+            line(0, "CO-37 Agent Kontakt",
                  f"Agent gemeldet vor {age}s" if age is not None
                  else "Agent gemeldet")
         else:
-            line(2, "CO-37 Kontakt",
+            line(2, "CO-37 Agent Kontakt",
                  "Agent meldet sich nicht (Server-Sicht)")
         hu = h.get("updates_available", 0)
         hs = h.get("security_updates", 0)
         st = 2 if hs > 0 else (1 if hu > 0 else 0)
-        line(st, "CO-37 Updates",
+        line(st, "CO-37 Agent Updates",
              f"{hu} Updates ({hs} sicherheitsrelevant)",
              [f"updates={hu}", f"security={hs}"])
-        line(1 if h.get("reboot_required") else 0, "CO-37 Neustart",
+        line(1 if h.get("reboot_required") else 0, "CO-37 Agent Neustart",
              "Neustart noetig" if h.get("reboot_required")
              else "kein Neustart noetig")
         if h.get("outdated"):
-            line(1, "CO-37 Agent-Version",
+            line(1, "CO-37 Agent Version",
                  f"veraltet ({h.get('agent_version','?')})")
         print("<<<<>>>>")
 

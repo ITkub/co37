@@ -131,19 +131,29 @@ Danach auf dem jeweiligen Host eine Service-Discovery.
 
 Der Server-Check aus Abschnitt 1 hängt für jeden Host, der in CO-37 mit
 einem Checkmk-Host **verknüpft** ist (Host-Dialog → Reiter Checkmk),
-zusätzliche Dienste an **genau diesen** Checkmk-Host:
+zusätzliche Dienste an **genau diesen** Checkmk-Host. Alle mit dem Präfix
+`CO-37 Agent`, damit sie sich am Checkmk-Host von den Server-Diensten
+abheben (relevant, wenn der CO-37-Server selbst ein überwachter Host ist):
 
-- `CO-37 Kontakt` — hat der Agent sich zuletzt gemeldet (Server-Sicht)
-- `CO-37 Updates` — offene/sicherheitsrelevante Updates laut CO-37
-- `CO-37 Neustart` — Neustart nötig
-- `CO-37 Agent-Version` — veraltet
+- `CO-37 Agent Kontakt` — hat der Agent sich zuletzt gemeldet (Server-Sicht)
+- `CO-37 Agent Updates` — offene/sicherheitsrelevante Updates laut CO-37
+- `CO-37 Agent Neustart` — Neustart nötig
+- `CO-37 Agent Version` — veraltet
+
+Ist ein CO-37-Host mit **mehreren** Checkmk-Hosts verknüpft (z. B. ein
+Hypervisor, der beim Patchen seine VMs mit in Downtime setzt), geht das
+Piggyback nur an den Checkmk-Host, der dem CO-37-Host **selbst** entspricht
+(namensgleicher Eintrag, sonst der einzige). Bleibt es mehrdeutig, meldet
+der Server-Check das als `CO-37 Piggyback mehrdeutig` und lässt das
+Piggyback für den Host aus — sonst kollidierten die Dienste auf einem
+fremden Host.
 
 Das braucht keine weitere Installation auf den Zielhosts — es kommt über
 den Server-Check. Ohne Checkmk-Verknüpfung entfällt es für den Host
 einfach.
 
-> `CO-37 Kontakt` (Server-Sicht) und der direkte `CO-37 Agent`-Check aus
-> Abschnitt 2 ergänzen sich: der eine sieht „hat sich beim Server
+> `CO-37 Agent Kontakt` (Server-Sicht) und der direkte `CO-37 Agent`-Check
+> aus Abschnitt 2 ergänzen sich: der eine sieht „hat sich beim Server
 > gemeldet", der andere „läuft wirklich auf dem Host". Fällt nur der
 > Kontakt aus, ist eher das Netz oder der Server dran; fällt der direkte
 > Check aus, ist der Agent selbst weg.
