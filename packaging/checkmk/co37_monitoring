@@ -197,6 +197,9 @@ def main():
         if h.get("outdated"):
             line(1, "CO-37 Agent Version",
                  f"veraltet ({h.get('agent_version','?')})")
+        else:
+            line(0, "CO-37 Agent Version",
+                 f"aktuell ({h.get('agent_version','?')})")
         print("<<<<>>>>")
 
 
