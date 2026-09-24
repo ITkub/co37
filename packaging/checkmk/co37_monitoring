@@ -152,13 +152,21 @@ def main():
     # dessen Sicht auf fremden Hosts und kollidiert mit deren eigenen Agenten.
     # Regel je Host: der namensgleiche Eintrag; sonst der einzige; sonst
     # mehrdeutig -> kein Piggyback, dafuer ein WARN am CO-37-Host.
+    #
+    # Sonderfall "Downtime auf alle Checkmk-Hosts" (checkmk_downtime_all):
+    # dann ist die Host-Liste bewusst leer - "alle" ist ein Downtime-Begriff
+    # und liefert kein Piggyback-Ziel. Als Fallback nimmt das Piggyback dann
+    # den eigenen Hostnamen (Annahme: Checkmk-Host = CO-37-Hostname, wie bei
+    # den namensgleich verknuepften Hosts).
     pb = []
     mehrdeutig = []
     for h in d.get("hosts", []):
         ziele = h.get("checkmk_hosts") or []
-        if not ziele:
-            continue  # ohne Checkmk-Verknuepfung kein Ziel
         name = h.get("hostname")
+        if not ziele:
+            if h.get("checkmk_downtime_all") and name:
+                pb.append((name, h))
+            continue  # sonst ohne Checkmk-Verknuepfung kein Ziel
         if name in ziele:
             pb.append((name, h))
         elif len(ziele) == 1:
