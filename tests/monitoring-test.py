@@ -123,7 +123,7 @@ with Session(main.engine) as s:
                approval_state=ApprovalState.approved, status=HostStatus.online,
                last_seen=now, agent_version="0.0.1",  # veraltet
                updates_available=0, security_updates=0, reboot_required=False,
-               agent_token_hash="y"))
+               checkmk_downtime_all=True, agent_token_hash="y"))
     s.add(Host(hostname="neu01", os_type=OSType.windows,
                approval_state=ApprovalState.pending, agent_token_hash="z"))
     s.commit()
@@ -144,6 +144,11 @@ check("web01 traegt die Checkmk-Verknuepfung",
       web and web["checkmk_hosts"] == ["web01.lan"], web)
 check("die Hostliste enthaelt kein agent_token_hash",
       "agent_token_hash" not in json.dumps(d2["hosts"]))
+
+alt = next((h for h in d2["hosts"] if h["hostname"] == "alt01"), None)
+check("checkmk_downtime_all wird ausgegeben", alt is not None and "checkmk_downtime_all" in alt, alt)
+check("alt01 hat checkmk_downtime_all=True", alt and alt["checkmk_downtime_all"] is True, alt)
+check("web01 hat checkmk_downtime_all=False", web and web["checkmk_downtime_all"] is False, web)
 
 # ------------------------------------------------ HTTPS-Zwang-Ausnahme
 # Der Local-Check spricht das Backend unverschluesselt ueber Loopback an.

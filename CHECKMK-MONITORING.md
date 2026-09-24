@@ -148,9 +148,14 @@ der Server-Check das als `CO-37 Piggyback mehrdeutig` und lässt das
 Piggyback für den Host aus — sonst kollidierten die Dienste auf einem
 fremden Host.
 
+Ist am Host **„Downtime auf alle Checkmk-Hosts"** gesetzt, bleibt die
+Host-Liste bewusst leer (das ist ein reiner Downtime-Schalter). Fürs
+Piggyback nimmt der Check dann den **eigenen Hostnamen** des CO-37-Hosts
+als Ziel — vorausgesetzt, der Checkmk-Host heißt genauso.
+
 Das braucht keine weitere Installation auf den Zielhosts — es kommt über
-den Server-Check. Ohne Checkmk-Verknüpfung entfällt es für den Host
-einfach.
+den Server-Check. Ohne Checkmk-Verknüpfung (und ohne „Downtime auf alle")
+entfällt es für den Host einfach.
 
 > `CO-37 Agent Kontakt` (Server-Sicht) und der direkte `CO-37 Agent`-Check
 > aus Abschnitt 2 ergänzen sich: der eine sieht „hat sich beim Server

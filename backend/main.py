@@ -6630,6 +6630,7 @@ def monitoring(request: Request, x_monitor_token: str = Header(default="")):
         per_host = [{
             "hostname": h.hostname,
             "checkmk_hosts": list(h.checkmk_hosts or []),
+            "checkmk_downtime_all": bool(h.checkmk_downtime_all),
             "online": _online(h),
             "last_seen_age": _age(h),
             "updates_available": h.updates_available or 0,
