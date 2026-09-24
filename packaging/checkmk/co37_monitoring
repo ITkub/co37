@@ -145,34 +145,59 @@ def main():
              f"aktuell ({co.get('version','?')})")
 
     # --- Piggyback: Zusatzsicht je Host ---
+    # checkmk_hosts ist die Downtime-Liste - ein CO-37-Host kann mehrere
+    # Checkmk-Hosts betreffen (z. B. ein Hypervisor seine VMs, die beim
+    # Patchen des Hosts mit in Downtime sollen). Fuers Piggyback zaehlt aber
+    # nur der Checkmk-Host, der den CO-37-Host SELBST abbildet - sonst landet
+    # dessen Sicht auf fremden Hosts und kollidiert mit deren eigenen Agenten.
+    # Regel je Host: der namensgleiche Eintrag; sonst der einzige; sonst
+    # mehrdeutig -> kein Piggyback, dafuer ein WARN am CO-37-Host.
+    pb = []
+    mehrdeutig = []
     for h in d.get("hosts", []):
         ziele = h.get("checkmk_hosts") or []
         if not ziele:
             continue  # ohne Checkmk-Verknuepfung kein Ziel
-        for ziel in ziele:
-            print(f"<<<<{ziel}>>>>")
-            print("<<<local>>>")
-            if h.get("online"):
-                age = h.get("last_seen_age")
-                line(0, "CO-37 Kontakt",
-                     f"Agent gemeldet vor {age}s" if age is not None
-                     else "Agent gemeldet")
-            else:
-                line(2, "CO-37 Kontakt",
-                     "Agent meldet sich nicht (Server-Sicht)")
-            hu = h.get("updates_available", 0)
-            hs = h.get("security_updates", 0)
-            st = 2 if hs > 0 else (1 if hu > 0 else 0)
-            line(st, "CO-37 Updates",
-                 f"{hu} Updates ({hs} sicherheitsrelevant)",
-                 [f"updates={hu}", f"security={hs}"])
-            line(1 if h.get("reboot_required") else 0, "CO-37 Neustart",
-                 "Neustart noetig" if h.get("reboot_required")
-                 else "kein Neustart noetig")
-            if h.get("outdated"):
-                line(1, "CO-37 Agent-Version",
-                     f"veraltet ({h.get('agent_version','?')})")
-            print("<<<<>>>>")
+        name = h.get("hostname")
+        if name in ziele:
+            pb.append((name, h))
+        elif len(ziele) == 1:
+            pb.append((ziele[0], h))
+        else:
+            mehrdeutig.append(name)
+
+    if mehrdeutig:
+        line(1, "CO-37 Piggyback mehrdeutig",
+             "kein eindeutiger Checkmk-Host fuer: "
+             + ", ".join(sorted(mehrdeutig))
+             + " - mehrere Zuordnungen ohne namensgleichen Eintrag, "
+               "Piggyback uebersprungen",
+             [f"hosts={len(mehrdeutig)}"])
+
+    for ziel, h in pb:
+        print(f"<<<<{ziel}>>>>")
+        print("<<<local>>>")
+        if h.get("online"):
+            age = h.get("last_seen_age")
+            line(0, "CO-37 Kontakt",
+                 f"Agent gemeldet vor {age}s" if age is not None
+                 else "Agent gemeldet")
+        else:
+            line(2, "CO-37 Kontakt",
+                 "Agent meldet sich nicht (Server-Sicht)")
+        hu = h.get("updates_available", 0)
+        hs = h.get("security_updates", 0)
+        st = 2 if hs > 0 else (1 if hu > 0 else 0)
+        line(st, "CO-37 Updates",
+             f"{hu} Updates ({hs} sicherheitsrelevant)",
+             [f"updates={hu}", f"security={hs}"])
+        line(1 if h.get("reboot_required") else 0, "CO-37 Neustart",
+             "Neustart noetig" if h.get("reboot_required")
+             else "kein Neustart noetig")
+        if h.get("outdated"):
+            line(1, "CO-37 Agent-Version",
+                 f"veraltet ({h.get('agent_version','?')})")
+        print("<<<<>>>>")
 
 
 if __name__ == "__main__":
