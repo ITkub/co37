@@ -22,13 +22,14 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
 import urllib3
 import requests
 
-AGENT_VERSION = "0.39.0"
+AGENT_VERSION = "0.46.0"
 IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -1390,6 +1391,148 @@ def boot_time() -> float:
 
 
 # ======================================================================
+# Gepufferte Rueckmeldungen
+# ======================================================================
+# Am 2026-10-21 lief auf KK-PVE02 ein Patchlauf sauber durch, und das
+# Ergebnis ging trotzdem verloren: das Backend war in genau der Sekunde
+# der Schlussmeldung nicht erreichbar, weil es sich selbst patchte.
+# api() wiederholt nichts, die Ausnahme lief bis in die Hauptschleife,
+# und dort steht nur "Verbindungsfehler" im Journal. Serverseitig blieb
+# der Auftrag auf "laeuft" stehen.
+#
+# Deshalb wird jede Meldung VOR dem Senden auf die Platte geschrieben
+# und erst nach einer Antwort geloescht. Liegt sie noch da, reicht der
+# naechste Durchlauf sie nach - das uebersteht auch einen Neustart des
+# Agenten oder des ganzen Hosts.
+#
+# Neben agent.py, wie die Vermerke zur Selbstheilung: self_update()
+# ersetzt nur die eigene Datei, alles daneben bleibt liegen.
+PENDING_DIR = Path(__file__).resolve().parent / "pending-reports"
+
+# Grenzen, damit ein Host, der seinen Server nie erreicht, nicht sein
+# eigenes Dateisystem fuellt. Sieben Tage, weil eine Meldung, die so
+# lange niemand abgeholt hat, ohnehin keinen Auftrag mehr trifft - der
+# Server hat ihn langst ueber die Hoechstlaufzeit verworfen.
+PENDING_MAX_AGE = 7 * 86400
+PENDING_MAX_FILES = 50
+
+
+def pending_dateien() -> list:
+    """Gepufferte Meldungen, aelteste zuerst."""
+    try:
+        return sorted(PENDING_DIR.glob("*.json"),
+                      key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return []
+
+
+def pending_ablegen(bericht: dict) -> Optional[Path]:
+    """Legt eine Meldung ab, bevor sie gesendet wird."""
+    try:
+        PENDING_DIR.mkdir(parents=True, exist_ok=True)
+        pfad = PENDING_DIR / f"{bericht['report_id']}.json"
+        pfad.write_text(json.dumps(bericht), encoding="utf-8")
+        return pfad
+    except Exception as exc:  # noqa: BLE001
+        # Kein Grund, den Auftrag scheitern zu lassen: ohne Puffer ist
+        # die Lage genau die von vorher.
+        log(f"Rueckmeldung laesst sich nicht puffern: {exc}", err=True)
+        return None
+
+
+def pending_verwerfen(pfad: Path):
+    try:
+        pfad.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def pending_aufraeumen():
+    """Zu alte und zu viele gepufferte Meldungen wegraeumen."""
+    jetzt = time.time()
+    dateien = []
+    for pfad in pending_dateien():
+        try:
+            zu_alt = jetzt - pfad.stat().st_mtime > PENDING_MAX_AGE
+        except OSError:
+            continue
+        if zu_alt:
+            pending_verwerfen(pfad)
+        else:
+            dateien.append(pfad)
+
+    # Bleibt zu viel uebrig, faellt das Aelteste zuerst: die juengste
+    # Meldung hat die besten Aussichten, noch einen Auftrag zu treffen,
+    # den es auf dem Server gibt.
+    while len(dateien) > PENDING_MAX_FILES:
+        pending_verwerfen(dateien.pop(0))
+
+
+def pending_senden() -> int:
+    """
+    Reicht offene Meldungen nach. Gibt zurueck, wie viele ankamen.
+
+    Aufgerufen nach einem gelungenen Heartbeat - dann steht fest, dass
+    der Server ueberhaupt redet.
+    """
+    pending_aufraeumen()
+    zugestellt = 0
+    for pfad in pending_dateien():
+        try:
+            bericht = json.loads(pfad.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            # Unlesbar bleibt unlesbar; liegenlassen hiesse, es bei
+            # jedem Durchlauf erneut zu versuchen.
+            log(f"Gepufferte Rueckmeldung {pfad.name} ist unlesbar und "
+                f"wird verworfen.", err=True)
+            pending_verwerfen(pfad)
+            continue
+
+        try:
+            api("POST", "/api/v1/agent/report", bericht)
+        except requests.HTTPError as exc:
+            code = exc.response.status_code if exc.response is not None else 0
+            if code in (400, 404, 422):
+                # Den Auftrag gibt es nicht mehr, oder die Meldung passt
+                # nicht zu dem, was der Server erwartet. Wiederholen
+                # aendert daran nichts.
+                log(f"Gepufferte Rueckmeldung zu Auftrag "
+                    f"{bericht.get('job_id')} wird vom Server mit {code} "
+                    f"abgewiesen und verworfen.", err=True)
+                pending_verwerfen(pfad)
+                continue
+            # Alles andere ist eine Lage des Servers, keine der Meldung.
+            break
+        except requests.RequestException:
+            break
+
+        pending_verwerfen(pfad)
+        zugestellt += 1
+
+    return zugestellt
+
+
+def bericht_abliefern(bericht: dict) -> bool:
+    """
+    Meldet einen Auftragszustand - gepuffert, damit er nicht verloren
+    geht, wenn der Server gerade nicht da ist.
+
+    Wirft nicht: ein nicht erreichbarer Server ist kein Fehler des
+    Auftrags, und die Meldung liegt ja vor.
+    """
+    pfad = pending_ablegen(bericht)
+    try:
+        api("POST", "/api/v1/agent/report", bericht)
+    except Exception as exc:  # noqa: BLE001
+        log(f"Rueckmeldung zu Auftrag {bericht.get('job_id')} kam nicht an "
+            f"({exc}). Sie ist gepuffert und wird nachgereicht.", err=True)
+        return False
+    if pfad:
+        pending_verwerfen(pfad)
+    return True
+
+
+# ======================================================================
 # Job-Verarbeitung
 # ======================================================================
 def handle_job(job: dict):
@@ -1422,8 +1565,13 @@ def handle_job(job: dict):
         Auftrag eine Zeile darueber ins Protokoll geschrieben hat.
         """
         sink.flush()
-        api("POST", "/api/v1/agent/report", {
+        bericht_abliefern({
             "job_id": job_id,
+            # Eigene Kennung je Meldung. Kommt dieselbe Meldung zweimal
+            # an - gesendet, aber die Antwort ging verloren -, erkennt
+            # der Server das daran und loest die Nebenwirkungen nicht
+            # erneut aus.
+            "report_id": uuid.uuid4().hex,
             "state": state,
             "log": sink.tail(),
             "error": error,
@@ -2136,6 +2284,15 @@ def main():
             unauthorized = 0
             http_fails = 0
             clear_update_marker()   # Aktualisierung hat sich zurueckgemeldet
+
+            # Der Server redet wieder - also zuerst nachreichen, was beim
+            # letzten Mal nicht ankam, und erst danach neue Auftraege
+            # annehmen. Sonst stuende ein erledigter Auftrag noch auf
+            # "laeuft", waehrend der naechste schon beginnt.
+            nachgereicht = pending_senden()
+            if nachgereicht:
+                log(f"{nachgereicht} gepufferte Rueckmeldung(en) "
+                    f"nachgereicht")
 
             # Nach angestossenem Neustart nur noch melden, nicht arbeiten.
             # Der Auftrag bleibt beim Backend liegen und wird nach dem

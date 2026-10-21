@@ -65,9 +65,18 @@ def hole(ip, token=None):
 
 TOKEN = main.monitor_token()
 check("Token-Datei wird angelegt", bool(TOKEN), TOKEN[:6])
-check("Token-Datei hat Rechte 600",
-      (main.MONITOR_TOKEN_FILE.stat().st_mode & 0o777) == 0o600,
-      oct(main.MONITOR_TOKEN_FILE.stat().st_mode & 0o777))
+
+# Die Rechte werden nur geprueft, wo es sie gibt. Unter Windows bildet
+# Python st_mode aus dem Schreibschutz-Attribut - dort steht 0o666, und
+# das sagt nichts darueber, wer die Datei lesen darf. Eine Pruefung, die
+# auf dem Entwicklungsrechner immer rot ist, wird irgendwann abgeschaltet
+# und schuetzt den Server dann gar nicht mehr.
+if os.name == "nt":
+    print("ok     Token-Datei hat Rechte 600 (entfaellt unter Windows)")
+else:
+    check("Token-Datei hat Rechte 600",
+          (main.MONITOR_TOKEN_FILE.stat().st_mode & 0o777) == 0o600,
+          oct(main.MONITOR_TOKEN_FILE.stat().st_mode & 0o777))
 
 
 def erwarte_404(label, ip, token):

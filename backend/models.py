@@ -255,6 +255,17 @@ class Job(SQLModel, table=True):
     # Kennzeichnung der fuer diesen Job gesetzten Downtime
     downtime_ref: Optional[str] = None
 
+    # Letztes Lebenszeichen des Agenten ZU DIESEM AUFTRAG: gesetzt bei
+    # jeder Meldung an /agent/job-log, also waehrend eines Laufs alle ein
+    # bis zwei Sekunden. NULL heisst "der Agent hat sich zu dem Auftrag
+    # noch nie gemeldet" - dann gilt started_at.
+    #
+    # Der Heartbeat bricht daran einen Auftrag ab, zu dem nichts mehr
+    # kommt, obwohl der Host selbst meldet. Ohne das steht ein solcher
+    # Auftrag bis zur Hoechstlaufzeit auf running - bei einem Patchlauf
+    # vier Stunden - und blockiert jeden weiteren desselben Typs.
+    last_progress_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
+
     created_at: datetime = Field(default_factory=utcnow, sa_column=Column(UTCDateTime, nullable=False))
     started_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
     finished_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))

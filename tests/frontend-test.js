@@ -1637,8 +1637,19 @@ global.setTimeout = origSetTimeout;
       const zeitpunkt = "2026-08-20T13:34:00Z";
       api.setLastAction({ [hOhne.id]: { host_id: hOhne.id, job_type, state, finished_at: zeitpunkt } });
       api.render();
-      const zeit = api.fmtTime(zeitpunkt, {weekday:"short", hour:"2-digit", minute:"2-digit"});
-      const erwartet = api.t(schluessel, { zeit });
+      // Wochentag und Uhrzeit getrennt, so wie render() es macht:
+      // zusammen ergaebe fmtTime "Do., 15:34", und der Satz laese sich
+      // "Letzte Pruefung um Do., 15:34". Mit zwei Platzhaltern setzt
+      // jede Sprache ihre eigenen Fuegewoerter.
+      const tag  = api.fmtTime(zeitpunkt, {weekday:"short"});
+      const zeit = api.fmtTime(zeitpunkt, {hour:"2-digit", minute:"2-digit"});
+      const erwartet = api.t(schluessel, { tag, zeit });
+      // Gegenprobe zur Nachbildung: stimmen Test und Umsetzung in einem
+      // FEHLENDEN Platzhalter ueberein, waeren beide gruen und die Zeile
+      // zeigte trotzdem "{tag}" an. Genau so ist es am 2026-10-21 beim
+      // Umbau passiert.
+      check(`dritte Zeile fuer ${job_type}/${state} ohne Platzhalterrest`,
+            !erwartet.includes("{"), erwartet);
       check(`dritte Zeile fuer ${job_type}/${state}`,
             el("units").innerHTML.includes(erwartet), erwartet);
     }

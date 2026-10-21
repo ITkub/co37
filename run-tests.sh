@@ -237,6 +237,8 @@ REIHEN=(
   "host-patch      $PY tests/host-patch-test.py"
   "eingaben        $PY tests/eingaben-test.py"
   "frontend        node tests/frontend-test.js PORT SESSION frontend/index.html"
+  "jobstille       $PY tests/jobstille-test.py"
+  "nachreichung    $PY tests/nachreichung-test.py"
   "roles           $PY tests/roles-test.py"
 )
 

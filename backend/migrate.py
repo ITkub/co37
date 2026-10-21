@@ -101,7 +101,19 @@ logger = logging.getLogger(__name__)
 #    Ein Rueckschritt auf 21 ist unkritisch: die aeltere Fassung schreibt
 #    in dieselben Spalten immer Listen, sie sind danach nur strenger als
 #    sie es erwartet.
-SCHEMA_VERSION = 23
+# 24: job.last_progress_at - Zeitpunkt der letzten Meldung des Agenten zu
+#    einem laufenden Auftrag. Ohne DEFAULT: NULL heisst "noch keine
+#    Meldung", und das trifft auf jeden bestehenden Auftrag zu. Der
+#    Heartbeat faellt in dem Fall auf started_at zurueck.
+#    Anlass: am 2026-10-21 lief ein Patchlauf auf KK-PVE02 sauber durch,
+#    aber das Backend war in genau der Sekunde der Schlussmeldung nicht
+#    erreichbar (es patchte sich selbst). Der Agent puffert die Meldung
+#    nicht, also blieb der Auftrag auf running - sichtbar bis die
+#    Hoechstlaufzeit von vier Stunden ihn verworfen haette.
+#    Ein Rueckschritt auf 23 ist unkritisch: die aeltere Fassung kennt
+#    die Spalte nicht und schreibt sie nie; sie bleibt dann einfach
+#    stehen.
+SCHEMA_VERSION = 24
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -136,6 +148,8 @@ EXPECTED_COLUMNS = {
         "downtime_ref": "VARCHAR",
         "scheduled_at": "DATETIME",
         "expires_at": "DATETIME",
+        # Schema 24, siehe oben.
+        "last_progress_at": "DATETIME",
     },
     "user": {
         # Ohne DEFAULT: NULL heisst "hat sich nie entschieden", und dann

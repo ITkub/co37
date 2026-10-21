@@ -781,13 +781,18 @@ function renderUnit(h, i, admin, level = 0){
   const zuletzt = LAST_ACTION[h.id];
   let letzteAktion = "";
   if (zuletzt){
-    const zeit = fmtTime(zuletzt.finished_at, {weekday:"short", hour:"2-digit", minute:"2-digit"});
+    // Wochentag und Uhrzeit getrennt: zusammen ergaeben sie "Mi., 07:03",
+    // und der Satz las sich dann "Letzte Pruefung um Mi., 07:03". Als zwei
+    // Platzhalter kann jede Sprache ihre eigenen Fuegewoerter setzen
+    // (de "am ... um ...", en "on ... at ...").
+    const tag  = fmtTime(zuletzt.finished_at, {weekday:"short"});
+    const zeit = fmtTime(zuletzt.finished_at, {hour:"2-digit", minute:"2-digit"});
     const schluessel = {
       scan:   zuletzt.state === "done" ? "note.last_scan_done"   : "note.last_scan_failed",
       patch:  zuletzt.state === "done" ? "note.last_patch_done"  : "note.last_patch_failed",
       reboot: zuletzt.state === "done" ? "note.last_reboot_done" : "note.last_reboot_failed",
     }[zuletzt.job_type];
-    if (schluessel) letzteAktion = t(schluessel, { zeit });
+    if (schluessel) letzteAktion = t(schluessel, { tag, zeit });
   }
 
   // level 0 = bereichslos (kein Einzug), 1 = in einem obersten Bereich,

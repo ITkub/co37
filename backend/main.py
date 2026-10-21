@@ -116,9 +116,20 @@ def monitor_token() -> str:
     token = secrets.token_urlsafe(32)
     try:
         MONITOR_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # O_NOFOLLOW gibt es nur unter Unix. Unter Windows wirft schon
+        # der Attributzugriff, das except unten faengt es ab, und
+        # monitor_token() gibt dann dauerhaft einen leeren String
+        # zurueck - die Ueberwachung ist damit auf einer
+        # Windows-Installation tot, ohne dass irgendwo etwas steht.
+        # Aufgefallen am 2026-10-21, weil tests/monitoring-test.py auf
+        # dem Entwicklungsrechner nach der ersten Pruefung abbrach.
+        # Der Symlink-Schutz entfaellt dort; Windows kennt die
+        # Angriffsart in dieser Form nicht, und der Betrieb laeuft
+        # ohnehin unter Linux, wo das Flag gesetzt bleibt.
         fd = os.open(
             MONITOR_TOKEN_FILE,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         with os.fdopen(fd, "w", encoding="ascii") as f:
@@ -2474,6 +2485,16 @@ class AgentNotice(BaseModel):
 
 class AgentJobReport(BaseModel):
     job_id: KennungFeld
+    # Kennung dieser einen Meldung, vom Agenten vergeben. Er puffert sie
+    # und reicht sie nach, wenn der Server gerade nicht erreichbar war -
+    # dabei kann dieselbe Meldung zweimal ankommen, etwa wenn nur die
+    # Antwort verloren ging. Daran erkennt der Server die Wiederholung
+    # und loest die Nebenwirkungen kein zweites Mal aus: Syslog, der
+    # Nachschlag-Zaehler und das Aufheben der Downtime haengen daran.
+    #
+    # Optional, damit ein aelterer Agent weiter melden kann; ohne
+    # Kennung gibt es den Schutz eben nicht.
+    report_id: Optional[str] = None
     state: JobState
     log: Optional[str] = None
     error: Optional[str] = None
@@ -2689,6 +2710,80 @@ JOB_MAX_RUNTIME = {
     JobType.reboot: timedelta(hours=1),
     JobType.selfupdate: timedelta(minutes=30),
 }
+
+# Wie lange ein laufender Auftrag schweigen darf, waehrend sein Host sich
+# weiter meldet. Grosszuegig gewaehlt: bei apt fliesst die Ausgabe
+# durchgehend, ein einzelner Windows-Installationsschritt kann dagegen
+# laenger stumm bleiben. Gilt nicht fuer Auftraege mit gekuerztem
+# Protokoll - siehe die Schleife im Heartbeat.
+JOB_LOG_SILENCE = timedelta(minutes=30)
+
+# Start dieses Prozesses. Die Stilleregel zaehlt erst ab hier: war das
+# BACKEND weg - Neustart, Update, Wartung -, konnte kein Agent Zeilen
+# liefern, und seine Fehler dabei schluckt er stillschweigend
+# (LogSink.flush faengt alles ab). Ohne diese Schranke wuerde der erste
+# Heartbeat nach einem Backend-Neustart jeden laufenden Auftrag
+# abraeumen, obwohl die Hosts durchgehend gearbeitet haben.
+BACKEND_START = utcnow()
+
+# In diesem Takt wird das Lebenszeichen eines laufenden Auftrags
+# fortgeschrieben - nicht bei jeder Meldung des Agenten. Siehe
+# agent_job_log().
+JOB_PROGRESS_TAKT = timedelta(minutes=1)
+
+
+def job_verstummt(job: Job, now: datetime) -> bool:
+    """
+    Ist zu einem laufenden Auftrag die Ausgabe versiegt?
+
+    Aufgerufen im Heartbeat des Hosts - der Host MELDET sich also
+    gerade. Waehrend eines Laufs schickt der Agent alle ein bis zwei
+    Sekunden Zeilen an /agent/job-log; bleibt das ueber
+    JOB_LOG_SILENCE aus, obwohl der Host ansprechbar ist, fuehrt er den
+    Auftrag nicht mehr aus.
+
+    Eigene Funktion, nicht in der Schleife: nur so laesst sich die Regel
+    mit vorgespulter Zeit pruefen, ohne eine halbe Stunde zu warten
+    (tests/jobstille-test.py).
+
+    Zwei Ausnahmen, beide mit Anlass:
+
+    Gekuerztes Protokoll. Ist die Obergrenze erreicht, stellt der Agent
+    das Senden fuer diesen Auftrag GANZ ein (LogSink.stopped) - auch den
+    Fortschritt. Die Stille sagt dann nichts ueber den Lauf, und ein
+    langer Patchlauf waere genau der Fall, der sie ausloest. Fuer solche
+    Auftraege bleibt die Hoechstlaufzeit die einzige Schranke.
+
+    Neustart des Backends. War das Backend weg, konnte kein Agent Zeilen
+    liefern - seine Fehler dabei schluckt er stillschweigend
+    (LogSink.flush faengt alles ab). Ohne BACKEND_START raeumte der
+    erste Heartbeat nach jedem Backend-Update alle laufenden Auftraege
+    ab, obwohl die Hosts durchgehend gearbeitet haben.
+    """
+    if (job.params or {}).get("log_truncated"):
+        return False
+    regung = job.last_progress_at or job.started_at
+    if regung is None:
+        return False
+    return now - max(regung, BACKEND_START) > JOB_LOG_SILENCE
+
+
+def job_vom_server_abbrechen(job: Job, now: datetime, grund: str) -> None:
+    """
+    Bricht einen laufenden Auftrag ab, weil der SERVER ihn aufgibt - der
+    Agent hat dazu nichts gesagt.
+
+    Der Vermerk in params ist der Unterschied, auf den es ankommt: eine
+    Meldung, die danach doch noch eintrifft, darf einen so abgebrochenen
+    Auftrag berichtigen (siehe agent_report). Einen Zustand, den der
+    Agent selbst gemeldet hat, darf sie nicht ueberschreiben.
+    """
+    job.state = JobState.cancelled
+    job.finished_at = now
+    job.error = grund
+    params = dict(job.params or {})
+    params["server_cancelled"] = True
+    job.params = params
 
 
 def _schedule_due(
@@ -3184,26 +3279,39 @@ def agent_heartbeat(
         # gleich gehen. Ohne ihn koennte ein Auftrag, der Sekunden nach dem
         # Start begonnen hat, faelschlich als abgeschnitten gelten.
         if booted_at and job.started_at < booted_at - timedelta(minutes=2):
-            job.state = JobState.cancelled
-            job.finished_at = now
-            job.error = (
+            job_vom_server_abbrechen(job, now, (
                 "Abgebrochen: der Host hat neu gestartet, waehrend der Auftrag "
                 "lief. Der Agent kann ihn nach einem Neustart nicht "
                 "fortsetzen."
-            )
+            ))
+            session.add(job)
+            continue
+
+        # Dritter Weg: der Host meldet sich - wir stehen in seinem
+        # Heartbeat -, aber zu seinem laufenden Auftrag kommt nichts
+        # mehr. Etwa, weil die Schlussmeldung des Agenten in einen
+        # Verbindungsfehler lief und nirgends gepuffert wird (am
+        # 2026-10-21 auf KK-PVE02 genau so passiert). Die Regel samt
+        # ihren beiden Ausnahmen steht in job_verstummt().
+        if job_verstummt(job, now):
+            still_seit = job.last_progress_at or job.started_at
+            job_vom_server_abbrechen(job, now, (
+                f"Abgebrochen: seit "
+                f"{int((now - still_seit).total_seconds() // 60)} Minuten "
+                f"keine Ausgabe mehr, obwohl der Host sich meldet. Der "
+                f"Agent fuehrt den Auftrag nicht mehr aus."
+            ))
             session.add(job)
             continue
 
         if now - job.started_at <= limit:
             continue
-        job.state = JobState.cancelled
-        job.finished_at = now
-        job.error = (
+        job_vom_server_abbrechen(job, now, (
             f"Abgebrochen: seit {int((now - job.started_at).total_seconds() // 60)} "
             f"Minuten ohne Rueckmeldung (Grenze "
             f"{int(limit.total_seconds() // 60)} Minuten). Der Agent hat den "
             f"Auftrag nie abgeschlossen."
-        )
+        ))
         session.add(job)
 
     # Waehrend eines angestossenen Neustarts nichts ausliefern. Der Agent
@@ -3359,10 +3467,39 @@ def agent_job_log(
 
     res = joblog.append(payload.job_id, payload.text)
 
+    # Lebenszeichen zu diesem Auftrag. Daran erkennt der Heartbeat einen
+    # Auftrag, den der Agent nicht mehr ausfuehrt, obwohl der Host meldet.
+    #
+    # Bewusst grob: der Agent meldet sich alle ein bis zwei Sekunden, und
+    # jeder Schreibvorgang waere ein eigener commit auf die gemeinsame
+    # SQLite-Datei - bei mehreren gleichzeitigen Patchlaeufen dauernd.
+    # Gegen eine Schranke von 30 Minuten genuegt ein Takt von einer
+    # Minute bei weitem.
+    jetzt = utcnow()
+    geaendert = False
+    if (job.last_progress_at is None
+            or jetzt - job.last_progress_at >= JOB_PROGRESS_TAKT):
+        job.last_progress_at = jetzt
+        geaendert = True
+
+    # Ist die Obergrenze erreicht, stellt der Agent das Senden fuer diesen
+    # Auftrag GANZ ein (LogSink.stopped) - auch den Fortschritt. Das
+    # Lebenszeichen friert damit ein, obwohl der Lauf weitergeht. Der
+    # Vermerk nimmt solche Auftraege von der Stilleregel aus; fuer sie
+    # bleibt die Hoechstlaufzeit die einzige Schranke.
+    params = dict(job.params or {})
+    params_neu = False
+    if res["truncated"] and not params.get("log_truncated"):
+        params["log_truncated"] = True
+        params_neu = True
     if payload.progress:
-        params = dict(job.params or {})
         params["progress"] = payload.progress[:200]
+        params_neu = True
+    if params_neu:
         job.params = params
+        geaendert = True
+
+    if geaendert:
         session.add(job)
         session.commit()
 
@@ -3497,6 +3634,32 @@ async def agent_report(
     if not job or job.host_id != host.id:
         raise HTTPException(404, "Job nicht gefunden")
 
+    bericht_id = (payload.report_id or "")[:64]
+    vermerk = dict(job.params or {})
+
+    # Dieselbe Meldung ein zweites Mal: quittieren und sonst nichts. Der
+    # Agent loescht seine gepufferte Datei erst nach einer Antwort - geht
+    # nur die Antwort verloren, schickt er sie beim naechsten Durchlauf
+    # erneut. Ohne diese Stelle liefe darauf alles noch einmal: ein
+    # zweiter Syslog-Eintrag, eine zweite aufgehobene Downtime und vor
+    # allem ein neu gefuellter Nachschlag-Zaehler, der die Patchkette von
+    # vorn beginnen laesst.
+    if bericht_id and vermerk.get("last_report_id") == bericht_id:
+        return {"ok": True, "duplicate": True}
+
+    # Ein Endzustand, den der AGENT gemeldet hat, steht. Eine spaete
+    # Meldung darf ihn nicht umschreiben - sie kann nur aelter sein als
+    # das, was schon dasteht.
+    #
+    # Hat dagegen der Server den Auftrag aufgegeben (job_vom_server_-
+    # abbrechen), ist die nachgereichte Meldung die bessere Auskunft:
+    # sie kommt von dem, der den Auftrag wirklich ausgefuehrt hat. Genau
+    # dieser Fall trat am 2026-10-21 auf KK-PVE02 auf - der Patchlauf war
+    # erfolgreich, der Server haette ihn als abgebrochen stehenlassen.
+    if (job.state in (JobState.done, JobState.failed, JobState.cancelled)
+            and not vermerk.get("server_cancelled")):
+        return {"ok": True, "ignored": "bereits abgeschlossen"}
+
     # Auch hier den Startzeitpunkt nachtragen. Gesetzt wird er sonst nur
     # bei der ersten Protokollzeile - meldet ein Auftrag ohne Ausgabe, ist
     # started_at leer, und beide Aufraeumwege uebergehen ihn, weil sie
@@ -3504,6 +3667,13 @@ async def agent_report(
     # immer auf running stehen.
     if payload.state == JobState.running and job.started_at is None:
         job.started_at = utcnow()
+
+    # Der Vermerk ueber den Serverabbruch hat seinen Zweck erfuellt,
+    # sobald die Meldung da ist; die Kennung tritt an seine Stelle.
+    vermerk.pop("server_cancelled", None)
+    if bericht_id:
+        vermerk["last_report_id"] = bericht_id
+    job.params = vermerk
 
     job.state = payload.state
     job.log = _bericht_text(payload.log)
