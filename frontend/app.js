@@ -1240,6 +1240,32 @@ async function scanAll(){
   afterAction();
 }
 
+/*
+ * Pruefen und, wo etwas gefunden wird, gleich patchen.
+ *
+ * Hier entstehen nur Scan-Auftraege. Ob daraus ein Patch-Auftrag wird,
+ * entscheidet der Server, wenn das Ergebnis vorliegt - vorher weiss
+ * niemand, ob es ueberhaupt etwas zu patchen gibt. Die Oberflaeche
+ * koennte das nicht leisten: zwischen Klick und Scan-Ergebnis liegen
+ * Minuten, und der Browser muesste die ganze Zeit offen bleiben.
+ *
+ * Neu gestartet wird dabei nie, auch nicht bei Hosts mit automatischem
+ * Neustart. Steht danach ein Neustart an, zeigt die Uebersicht das an
+ * und er wird von Hand ausgeloest.
+ */
+async function scanPatchAll(){
+  const ok = HOSTS.filter(h => h.approval_state === "approved");
+  if (!confirm(t("ask.scan_patch_all", { anzahl: ok.length }))) return;
+  for (const h of ok){
+    try {
+      await api("POST", `/api/v1/hosts/${h.id}/jobs`,
+                {job_type:"scan", patch_after: true, params:{}});
+    } catch(e){}
+  }
+  toast(t("msg.scan_patch_many", { anzahl: ok.length }));
+  afterAction();
+}
+
 async function detail(id){
   const h = HOSTS.find(x => x.id === id);
   document.getElementById("dTitle").textContent = h.display_name || h.hostname;
@@ -2538,6 +2564,7 @@ document.getElementById("uFetch").onclick = async () => {
 /* ---------- Start ---------- */
 document.getElementById("btnReload").onclick = () => load().then(() => toast(t("msg.refreshed")));
 document.getElementById("btnScanAll").onclick = scanAll;
+document.getElementById("btnScanPatchAll").onclick = scanPatchAll;
 document.getElementById("filter").oninput = render;
 document.getElementById("fState").onchange = render;
 

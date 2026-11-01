@@ -2256,6 +2256,12 @@ class JobCreate(BaseModel):
     set_downtime: bool = True
     # Nur fuer Patch-Auftraege: anschliessend neu starten, falls noetig.
     reboot_after: bool = False
+    # Nur fuer Scan-Auftraege: findet die Pruefung Updates, wird im
+    # Anschluss gepatcht - ohne Neustart, egal was am Host eingestellt
+    # ist. Eigenes Feld und kein Eintrag in params, weil der Aufrufer in
+    # den Steuerkanal des Auftrags nicht hineinschreiben darf (F-22,
+    # siehe ERLAUBTE_PARAMS in create_job).
+    patch_after: bool = False
     # Nachlauf in Minuten. Meldet sich der Host erst danach, wird der Auftrag
     # verworfen. Vorgabe: 120 bei geplanten, 10 bei sofortigen Neustarts.
     grace_minutes: Optional[MengeFeld] = None
@@ -2731,6 +2737,51 @@ BACKEND_START = utcnow()
 # agent_job_log().
 JOB_PROGRESS_TAKT = timedelta(minutes=1)
 
+# Wie lange ein wartender Scan- oder Patch-Auftrag auf seinen Host
+# wartet, bevor er verfaellt. Neustarts haben ihren eigenen, viel
+# kuerzeren Nachlauf (grace_minutes).
+#
+# Vorher hatten beide gar kein Verfallsdatum - "ein Scan oder Patch
+# schadet auch spaeter nicht". Bei Hosts, die bewusst laengere Zeit aus
+# sind, sammeln sich die Auftraege dadurch an und laufen beim
+# Einschalten alle nacheinander los. Und ein Patch-Auftrag von vor drei
+# Wochen installiert Updates, die inzwischen von neueren ueberholt
+# sind, auf einem Host, dessen Zustand niemand mehr kennt.
+#
+# Sieben Tage: ein Wochenende oder ein Urlaub darf dazwischenliegen.
+# Wer danach noch etwas will, klickt neu - und bekommt eine Pruefung
+# auf dem Stand von heute statt einer von vorgestern.
+JOB_MAX_WAIT = timedelta(days=7)
+
+
+def verfallsgrund(job: Job) -> str:
+    """
+    Warum ein wartender Auftrag verworfen wurde.
+
+    Zwei Faelle, und sie haben nichts miteinander zu tun. Beim Neustart
+    ist es der Nachlauf von Minuten, den jemand bewusst gewaehlt hat.
+    Bei Scan und Patch ist es die weite Frist aus JOB_MAX_WAIT, von der
+    niemand etwas weiss, bis sie zuschlaegt.
+
+    Bis die Frist auch fuer Scan und Patch galt, gab es nur den ersten
+    Fall. Der Text stand deshalb fest auf "Nachlauf" - und haette bei
+    einem verfallenen Scan "Nachlauf None Minuten" gemeldet.
+    """
+    when = job.scheduled_at or job.created_at
+    grace = (job.params or {}).get("grace_minutes")
+    if job.job_type == JobType.reboot and grace is not None:
+        return (
+            f"Nicht ausgefuehrt: Nachlauf abgelaufen. Geplant war "
+            f"{when:%d.%m.%Y %H:%M} UTC, Nachlauf {grace} Minuten. "
+            f"Der Host hat sich in diesem Zeitraum nicht gemeldet."
+        )
+    return (
+        f"Nicht ausgefuehrt: der Auftrag wartete seit "
+        f"{when:%d.%m.%Y %H:%M} UTC auf den Host, laenger als die "
+        f"Frist von {JOB_MAX_WAIT.days} Tagen. In dieser Zeit hat sich "
+        f"der Host nicht gemeldet."
+    )
+
 
 def job_verstummt(job: Job, now: datetime) -> bool:
     """
@@ -3156,6 +3207,7 @@ def agent_heartbeat(
                     "reboot_if_needed": host.patch_auto_reboot,
                     "downtime_minutes": host.downtime_minutes,
                 },
+                expires_at=utcnow() + JOB_MAX_WAIT,
             ))
             host.last_patch_run = utcnow()
             session.add(host)
@@ -3174,6 +3226,7 @@ def agent_heartbeat(
                     "reboot_if_needed": host.patch_auto_reboot,
                     "downtime_minutes": host.downtime_minutes,
                 },
+                expires_at=utcnow() + JOB_MAX_WAIT,
             ))
             host.last_patch_run = utcnow()
             session.add(host)
@@ -3200,6 +3253,7 @@ def agent_heartbeat(
                         "reboot_if_needed": area.patch_auto_reboot,
                         "downtime_minutes": area.downtime_minutes,
                     },
+                    expires_at=utcnow() + JOB_MAX_WAIT,
                 ))
                 host.area_patch_last_run = utcnow()
                 session.add(host)
@@ -3220,13 +3274,7 @@ def agent_heartbeat(
     for job in expired:
         job.state = JobState.cancelled
         job.finished_at = now
-        grace = (job.params or {}).get("grace_minutes")
-        when = job.scheduled_at or job.created_at
-        job.error = (
-            f"Nicht ausgefuehrt: Nachlauf abgelaufen. Geplant war "
-            f"{when:%d.%m.%Y %H:%M} UTC, Nachlauf {grace} Minuten. "
-            f"Der Host hat sich in diesem Zeitraum nicht gemeldet."
-        )
+        job.error = verfallsgrund(job)
         session.add(job)
 
     # Laufende Auftraege ohne Abschluss einsammeln. Ein Auftrag, dessen
@@ -3720,6 +3768,47 @@ async def agent_report(
     ):
         host.patch_followup_left = PATCH_MAX_FOLLOWUPS
         session.add(host)
+
+    # "Alle pruefen und patchen": die Pruefung ist durch, jetzt steht
+    # fest, ob es etwas zu tun gibt. Vorher laesst sich das nicht sagen -
+    # deshalb entsteht der Patch-Auftrag hier und nicht schon beim Klick.
+    #
+    # Der Scan meldet sein Ergebnis ueber /agent/scan-result, bevor er
+    # sich hier als fertig meldet; updates_available ist also aktuell.
+    #
+    # reboot_if_needed steht fest auf False und kommt nicht vom
+    # Aufrufer: gepatcht wird, neu gestartet nicht - auch dann nicht,
+    # wenn am Host auto_reboot gesetzt ist. Wer neu starten will, nimmt
+    # den Weg ueber einen Neustart-Auftrag, und der verlangt ein Recht,
+    # das nicht jeder hat.
+    if (
+        job.job_type == JobType.scan
+        and payload.state == JobState.done
+        and (job.params or {}).get("patch_after")
+        and host.updates_available > 0
+    ):
+        offen = session.exec(
+            select(Job).where(
+                Job.host_id == host.id,
+                Job.job_type == JobType.patch,
+                Job.state.in_([JobState.pending, JobState.running]),
+            )
+        ).first()
+        # Laeuft schon einer - aus dem Zeitplan, einem Bereich oder von
+        # Hand -, bleibt es dabei. Zwei Patch-Auftraege nebeneinander auf
+        # demselben Host sind nirgends vorgesehen.
+        if not offen:
+            session.add(Job(
+                host_id=host.id,
+                job_type=JobType.patch,
+                params={
+                    "reboot_if_needed": False,
+                    "from_scan_job_id": job.id,
+                },
+                expires_at=utcnow() + JOB_MAX_WAIT,
+            ))
+            host.last_patch_run = utcnow()
+            session.add(host)
 
     session.commit()
 
@@ -4631,6 +4720,17 @@ def create_job(
         if not has_downtime_target(host):
             params.setdefault("allow_without_downtime", True)
 
+    # Pruefen und, wenn etwas gefunden wird, gleich patchen. Der Vermerk
+    # haengt am Scan-Auftrag; den Patch-Auftrag legt agent_report() an,
+    # sobald das Ergebnis da ist - vorher weiss niemand, ob es ueberhaupt
+    # etwas zu patchen gibt.
+    #
+    # Keine neue Tuer zum Neustart: der daraus entstehende Patch-Auftrag
+    # bekommt reboot_if_needed=False fest verdrahtet. Deshalb reicht hier
+    # das Patch-Recht, das jeder Angemeldete hat.
+    if payload.job_type == JobType.scan and payload.patch_after:
+        params["patch_after"] = True
+
     # Patch-Auftrag mit ausdruecklichem Neustartwunsch. 'manual' uebergeht
     # Richtlinie und Wartungsfenster - beides waere hier falsch, weil der
     # Zeitpunkt bewusst gewaehlt wurde.
@@ -4670,8 +4770,11 @@ def create_job(
                 f"begrenzt.")
         params["downtime_minutes"] = max(1, payload.downtime_minutes)
 
-    # Verfallszeitpunkt nur fuer Neustarts. Ein Scan oder Patch schadet auch
-    # spaeter nicht, ein Neustart im laufenden Betrieb schon.
+    # Verfallszeitpunkt. Beim Neustart ist er kurz und heisst Nachlauf:
+    # ein Neustart, der Tage spaeter im laufenden Betrieb nachgeholt
+    # wird, ist genau das, was niemand will. Scan und Patch bekommen die
+    # weite Frist aus JOB_MAX_WAIT - sie schaden spaeter nicht, aber
+    # endlos warten sollen sie auch nicht.
     expires = None
     if payload.job_type == JobType.reboot:
         grace = payload.grace_minutes
@@ -4681,6 +4784,8 @@ def create_job(
         base = scheduled or utcnow()
         expires = base + timedelta(minutes=grace)
         params["grace_minutes"] = grace
+    elif payload.job_type in (JobType.scan, JobType.patch):
+        expires = (scheduled or utcnow()) + JOB_MAX_WAIT
 
     job = Job(
         host_id=host_id,

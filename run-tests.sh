@@ -239,6 +239,7 @@ REIHEN=(
   "frontend        node tests/frontend-test.js PORT SESSION frontend/index.html"
   "jobstille       $PY tests/jobstille-test.py"
   "nachreichung    $PY tests/nachreichung-test.py"
+  "scan-patch      $PY tests/scan-patch-test.py"
   "roles           $PY tests/roles-test.py"
 )
 
@@ -389,31 +390,70 @@ fi
 export CO37_TEST_SESSION="$SESSION"
 export CO37_TEST_ADMIN_PW="$TESTPW"
 
+# ---------------------------------------------------------------------
+# Zeit je Reihe
+# ---------------------------------------------------------------------
+# Damit sichtbar ist, wo die Laufzeit hingeht, statt sie zu schaetzen.
+#
+# date +%s%N statt $EPOCHREALTIME: letzteres setzt das Dezimalzeichen
+# nach Spracheinstellung, und mit deutschem Komma rechnet die Shell
+# nicht. Kann date das nicht (dann bleibt das 'N' stehen), wird gar
+# keine Zeit angezeigt - eine falsche waere schlimmer als keine.
+jetzt_ms() {
+  local t
+  t=$(date +%s%N 2>/dev/null)
+  case "$t" in
+    ''|*[!0-9]*) echo "" ;;
+    *) echo $((t / 1000000)) ;;
+  esac
+}
+
+# ---------------------------------------------------------------------
+# Reihen, die nebenher laufen
+# ---------------------------------------------------------------------
+# Diese vier teilen sich mit niemandem etwas: sie bringen ihre eigene
+# Datenbank oder ihren eigenen Server mit und fassen weder das
+# gemeinsame Backend auf $PORT noch dessen Sitzung an. Deshalb duerfen
+# sie neben den uebrigen laufen, statt die Schlange aufzuhalten.
+#
+# Gemessen am 2026-11-01 brauchten sie zusammen rund die Haelfte der
+# Gesamtzeit, bei einem Zehntel der Pruefungen: harness 51s, schluessel
+# 26s, proxy-fallback 17s, qr 15s. Nacheinander ist das eine Minute
+# Warten auf vier Reihen, die aufeinander gar nicht warten muessen.
+#
+# Wer hier eine Reihe eintraegt, muss das pruefen und nicht vermuten.
+# Eine Reihe, die Hosts oder Benutzer im gemeinsamen Backend anlegt,
+# gehoert NICHT hierher - sie greift den anderen in die Daten, und der
+# Fehlschlag haengt dann davon ab, wer zuerst fertig war.
+PARALLEL=" harness schluessel qr proxy-fallback "
+
+ist_parallel() {
+  case "$PARALLEL" in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
 gesamt=0; fehlerhaft=0; uebersprungen=0
-echo
+zeit_gesamt=0
 
-for eintrag in "${REIHEN[@]}"; do
-  name="${eintrag%% *}"
-  befehl="${eintrag#* }"
-  befehl="${befehl#"${befehl%%[![:space:]]*}"}"
-  befehl="${befehl/PORT/$PORT}"
-  befehl="${befehl/SESSION/$SESSION}"
+# Ergebnis einer Reihe ausgeben und mitzaehlen. Eine Funktion, weil die
+# nebenher laufenden Reihen erst am Ende ausgewertet werden und dabei
+# genau dieselbe Behandlung brauchen wie die der Reihe nach.
+auswerten() {
+  local name="$1" ausgabe="$2" code="$3" ms="$4"
+  local n dauer=""
 
-  if [ -n "$NUR" ] && [ "$NUR" != "$name" ]; then
-    uebersprungen=$((uebersprungen + 1))
-    continue
-  fi
-
-  ausgabe=$($befehl 2>&1)
-  code=$?
   n=$(printf '%s\n' "$ausgabe" | grep -cE '^(ok|FEHLER)')
   gesamt=$((gesamt + n))
 
+  if [ -n "$ms" ] && [ "$ms" -gt 0 ]; then
+    zeit_gesamt=$((zeit_gesamt + ms))
+    dauer=$(printf '%d.%01ds' $((ms / 1000)) $(((ms % 1000) / 100)))
+  fi
+
   if [ "$code" -eq 0 ]; then
-    printf '  \033[32m✓\033[0m %-16s %3d Prüfungen\n' "$name" "$n"
+    printf '  \033[32m✓\033[0m %-16s %3d Prüfungen %8s\n' "$name" "$n" "$dauer"
   else
     fehlerhaft=$((fehlerhaft + 1))
-    printf '  \033[31m✗\033[0m %-16s %3d Prüfungen\n' "$name" "$n"
+    printf '  \033[31m✗\033[0m %-16s %3d Prüfungen %8s\n' "$name" "$n" "$dauer"
     printf '%s\n' "$ausgabe" | grep -E '^FEHLER' | sed 's/^/      /'
     # Bricht eine Reihe ab, statt Fehler zu melden, steht der Grund nur am
     # Ende der Ausgabe.
@@ -429,7 +469,101 @@ for eintrag in "${REIHEN[@]}"; do
     fi
   fi
 
-  [ "$AUSFUEHRLICH" -eq 1 ] && printf '%s\n' "$ausgabe" | sed 's/^/      /'
+  if [ "$AUSFUEHRLICH" -eq 1 ]; then
+    printf '%s\n' "$ausgabe" | sed 's/^/      /'
+  fi
+  return 0
+}
+
+# Erst die nebenher laufenden anstossen, dann die uebrigen der Reihe
+# nach. Jede schreibt ihre Ausgabe in eine eigene Datei, damit sich die
+# Meldungen nicht ineinanderschieben.
+#
+# Die Nummern der angestossenen Prozesse werden gesammelt, weil weiter
+# unten GEZIELT auf sie gewartet werden muss. Ein blosses 'wait' wartet
+# auf alle Hintergrundprozesse dieser Shell - und dazu gehoert das
+# Backend, das bis zum Aufraeumen laeuft. Der Lauf bliebe stehen.
+PAR_PIDS=""
+
+for eintrag in "${REIHEN[@]}"; do
+  name="${eintrag%% *}"
+  befehl="${eintrag#* }"
+  befehl="${befehl#"${befehl%%[![:space:]]*}"}"
+  befehl="${befehl/PORT/$PORT}"
+  befehl="${befehl/SESSION/$SESSION}"
+
+  ist_parallel "$name" || continue
+  [ -n "$NUR" ] && [ "$NUR" != "$name" ] && continue
+
+  (
+    p0=$(jetzt_ms)
+    par_ausgabe=$($befehl 2>&1)
+    par_code=$?
+    p1=$(jetzt_ms)
+    printf '%s' "$par_ausgabe" > "$TMP/par-$name.out"
+    if [ -n "$p0" ] && [ -n "$p1" ]; then
+      printf '%s %s\n' "$par_code" "$((p1 - p0))" > "$TMP/par-$name.meta"
+    else
+      printf '%s 0\n' "$par_code" > "$TMP/par-$name.meta"
+    fi
+  ) &
+  PAR_PIDS="$PAR_PIDS $!"
+done
+
+echo
+
+for eintrag in "${REIHEN[@]}"; do
+  name="${eintrag%% *}"
+  befehl="${eintrag#* }"
+  befehl="${befehl#"${befehl%%[![:space:]]*}"}"
+  befehl="${befehl/PORT/$PORT}"
+  befehl="${befehl/SESSION/$SESSION}"
+
+  if [ -n "$NUR" ] && [ "$NUR" != "$name" ]; then
+    uebersprungen=$((uebersprungen + 1))
+    continue
+  fi
+
+  # Laeuft schon nebenher, wird unten eingesammelt.
+  ist_parallel "$name" && continue
+
+  t0=$(jetzt_ms)
+  ausgabe=$($befehl 2>&1)
+  code=$?
+  t1=$(jetzt_ms)
+
+  ms=0
+  if [ -n "$t0" ] && [ -n "$t1" ]; then
+    ms=$((t1 - t0))
+  fi
+
+  auswerten "$name" "$ausgabe" "$code" "$ms"
+done
+
+# Die nebenher laufenden Reihen einsammeln. Sie stehen am Ende der
+# Liste statt an ihrer Stelle - die Reihenfolge der Ausgabe gibt jetzt
+# wieder, wann etwas fertig wurde, nicht wo es in REIHEN steht.
+for pid in $PAR_PIDS; do
+  wait "$pid" 2>/dev/null
+done
+
+for eintrag in "${REIHEN[@]}"; do
+  name="${eintrag%% *}"
+
+  ist_parallel "$name" || continue
+  [ -n "$NUR" ] && [ "$NUR" != "$name" ] && continue
+
+  if [ ! -f "$TMP/par-$name.meta" ]; then
+    # Die Reihe wurde angestossen, hat aber nichts hinterlassen. Das
+    # stillschweigend zu uebergehen hiesse, eine nicht gelaufene Reihe
+    # als bestanden zu zaehlen.
+    fehlerhaft=$((fehlerhaft + 1))
+    printf '  \033[31m✗\033[0m %-16s %s\n' "$name" "kein Ergebnis hinterlassen"
+    continue
+  fi
+
+  read -r par_code par_ms < "$TMP/par-$name.meta"
+  auswerten "$name" "$(cat "$TMP/par-$name.out")" "$par_code" "$par_ms"
 done
 
 # ---------------------------------------------------------------------
@@ -460,6 +594,17 @@ if [ "$tracebacks" -gt 0 ]; then
 fi
 
 [ "$uebersprungen" -gt 0 ] && echo "  $uebersprungen Reihe(n) übersprungen"
+
+# Die Rechenzeit aller Reihen zusammen - NICHT die verstrichene Zeit.
+# Vier Reihen laufen nebenher, ihre Sekunden zaehlen hier mit, obwohl
+# die Uhr sie nur einmal gesehen hat. Die Summe ist deshalb groesser
+# als die Dauer des Laufs, und das ist gewollt: sie zeigt, was eine
+# Reihe kostet, waehrend 'time ./run-tests.sh' zeigt, was sie dich an
+# Wartezeit kostet.
+if [ "$zeit_gesamt" -gt 0 ]; then
+  printf '  %d.%01ds Rechenzeit in den Reihen (vier laufen nebenher)\n' \
+    $((zeit_gesamt / 1000)) $(((zeit_gesamt % 1000) / 100))
+fi
 
 if [ "$fehlerhaft" -eq 0 ]; then
   echo "  $gesamt Prüfungen, alle bestanden"

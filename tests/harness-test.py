@@ -21,6 +21,7 @@ Aufruf:
 
     python3 tests/harness-test.py
 """
+import importlib.util
 import os
 import socket
 import stat
@@ -304,14 +305,27 @@ ConnectionResetError: [Errno 104] Connection reset by peer
 """
 
 
+# Der Zaehler wird importiert, nicht gestartet.
+#
+# Vorher lief fuer jede dieser Pruefungen ein eigener Python-Prozess -
+# acht Starts, die unter Windows den Loewenanteil der Laufzeit dieser
+# Reihe ausmachten (gemessen am 2026-11-01: 51 Sekunden fuer 30
+# Pruefungen, waehrend 289 Pruefungen der Frontend-Reihe 2 Sekunden
+# brauchten).
+#
+# Geprueft wird dadurch nichts weniger: bloecke() und echt() treffen
+# die Entscheidung, main() zaehlt sie nur ab und druckt sie. Dass auch
+# der Aufruf ALS PROGRAMM stimmt - Zahl in der ersten Zeile,
+# Rueckgabewert, fehlende Datei -, steht weiter unten und laeuft
+# weiterhin als echter Prozess.
+_spec = importlib.util.spec_from_file_location("co37_tbzaehler", ZAEHLER)
+tbzaehler = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(tbzaehler)
+
+
 def zaehle(text: str):
-    with tempfile.TemporaryDirectory(prefix="co37-tb-") as tmp:
-        pfad = Path(tmp) / "backend.log"
-        pfad.write_text(text, encoding="utf-8")
-        proc = subprocess.run([sys.executable, str(ZAEHLER), str(pfad)],
-                              capture_output=True, text=True, timeout=60)
-        zeilen = (proc.stdout or "").splitlines()
-        return int(zeilen[0]) if zeilen else -1, "\n".join(zeilen[1:])
+    gemeldet = [b for b in tbzaehler.bloecke(text) if tbzaehler.echt(b)]
+    return len(gemeldet), "\n".join("\n".join(b) for b in gemeldet)
 
 
 anzahl, _ = zaehle(WINDOWS_RAUSCHEN)
@@ -374,6 +388,22 @@ try:
     check("und der Lauf gilt dann nicht als bestanden", code != 0, code)
 finally:
     kaputt_pfad.unlink(missing_ok=True)
+
+# Ab hier wieder als echter Prozess: run-tests.sh ruft den Zaehler so
+# auf, und die Verdrahtung ist genauso Teil der Sache wie die
+# Entscheidung, was zaehlt.
+with tempfile.TemporaryDirectory(prefix="co37-tb-") as _tmp:
+    _pfad = Path(_tmp) / "backend.log"
+    _pfad.write_text(WINDOWS_RAUSCHEN + ECHTER_FEHLER, encoding="utf-8")
+    _proc = subprocess.run([sys.executable, str(ZAEHLER), str(_pfad)],
+                           capture_output=True, text=True, timeout=60)
+_zeilen = (_proc.stdout or "").splitlines()
+check("als Programm aufgerufen steht die Zahl in der ersten Zeile",
+      _zeilen and _zeilen[0].strip() == "1", _zeilen[:1])
+check("und der Befund folgt darunter",
+      "KeyError" in "\n".join(_zeilen[1:]), "\n".join(_zeilen[1:])[:120])
+check("der Rueckgabewert meldet keinen Fehler", _proc.returncode == 0,
+      _proc.returncode)
 
 leer_code = subprocess.run(
     [sys.executable, str(ZAEHLER), str(HIER / "gibt-es-nicht.log")],
