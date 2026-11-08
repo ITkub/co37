@@ -140,6 +140,17 @@ buero = next(a for a in areas if a["id"] == area_a)
 check("host_count zaehlt den verschobenen Host", buero["host_count"] == 1,
       buero["host_count"])
 
+# Dieselbe Zahl muss die Antwort auf das AENDERN eines Bereichs liefern.
+# Sie entsteht dort an einer eigenen Stelle, unabhaengig von der Liste -
+# und war bis 2026-11-08 die einzige der vier Zaehlstellen im Backend
+# ohne Pruefung. Eine Zahl, die nur an einer Stelle stimmt, faellt erst
+# beim Benutzer auf.
+code, res = call(f"/api/v1/areas/{area_a}", {"name": "Buero"},
+                 method="PATCH", hdr=ADM)
+check("das Aendern eines Bereichs meldet dieselbe Hostzahl",
+      code == 200 and res.get("host_count") == 1,
+      (code, res.get("host_count")))
+
 code, res = call(f"/api/v1/hosts/{h1}/area", {"area_id": 999999}, hdr=ADM)
 check("unbekannter Bereich abgewiesen", code == 404, code)
 

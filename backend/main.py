@@ -890,10 +890,19 @@ def load_license(session: Session):
 
 
 def approved_hosts(session: Session) -> int:
-    """Gezaehlt werden freigegebene Hosts - so steht es in der Lizenz."""
-    return len(session.exec(
-        select(Host).where(Host.approval_state == ApprovalState.approved)
-    ).all())
+    """
+    Gezaehlt werden freigegebene Hosts - so steht es in der Lizenz.
+
+    COUNT in der Datenbank statt len() ueber geladene Zeilen. Bis
+    2026-11-08 holte diese Funktion VOLLSTAENDIGE Host-Objekte, nur um
+    sie danach zu zaehlen - und sie laeuft bei jeder Freigabe und bei
+    jedem Abruf der Hostliste. Bei zehn Hosts faellt das nicht auf, bei
+    zweihundert schon.
+    """
+    return session.exec(
+        select(func.count(Host.id))
+        .where(Host.approval_state == ApprovalState.approved)
+    ).one()
 
 
 def check_host_limit(session: Session):
@@ -1234,10 +1243,11 @@ def note_enroll(ip: Optional[str]):
 
 
 def pending_count(session: Session) -> int:
-    """Wie viele Hosts warten auf Freigabe."""
-    return len(session.exec(
-        select(Host.id).where(Host.approval_state == ApprovalState.pending)
-    ).all())
+    """Wie viele Hosts warten auf Freigabe. COUNT, siehe approved_hosts()."""
+    return session.exec(
+        select(func.count(Host.id))
+        .where(Host.approval_state == ApprovalState.pending)
+    ).one()
 
 
 # Obergrenzen fuer das Pruefprotokoll (F-63 der Pruefung vom 2026-09-04).
@@ -4515,10 +4525,18 @@ def _area_conflicts(session: Session, area_id: int) -> list[str]:
          dependencies=[Depends(require_login)])
 def list_areas(session: Session = Depends(get_session)):
     areas = session.exec(select(Area).order_by(Area.sort_order, Area.name)).all()
-    counts: dict[int, int] = {}
-    for area_id in session.exec(select(Host.area_id)).all():
-        if area_id is not None:
-            counts[area_id] = counts.get(area_id, 0) + 1
+    # Eine Abfrage mit GROUP BY statt aller area_id-Werte und einer
+    # Schleife darueber. IS NOT NULL bleibt noetig: Hosts ohne Bereich
+    # bilden sonst eine eigene Gruppe, und die gehoert in keine Zahl -
+    # genau das tat die Bedingung in der alten Schleife.
+    counts: dict[int, int] = {
+        area_id: anzahl
+        for area_id, anzahl in session.exec(
+            select(Host.area_id, func.count(Host.id))
+            .where(Host.area_id.is_not(None))
+            .group_by(Host.area_id)
+        ).all()
+    }
     out = []
     for a in areas:
         data = AreaRead.model_validate(a)
@@ -4581,9 +4599,9 @@ def update_area(area_id: Kennung, payload: AreaPatch, request: Request,
     session.refresh(area)
 
     data = AreaRead.model_validate(area)
-    data.host_count = len(session.exec(
-        select(Host.id).where(Host.area_id == area.id)
-    ).all())
+    data.host_count = session.exec(
+        select(func.count(Host.id)).where(Host.area_id == area.id)
+    ).one()
     # Nur pruefen, wenn der Bereich selbst gerade einen Zeitplan hat -
     # sonst gibt es nichts, das sich mit dem Host-eigenen ueberschneiden
     # koennte.
