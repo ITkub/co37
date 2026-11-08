@@ -80,3 +80,17 @@ OPS_*_Edition_*.pdf
 # Geschaeftspost. Die Regel gilt nur im Wurzelverzeichnis - PDFs in
 # Unterordnern bleiben versionierbar.
 /*.pdf
+
+# Unfertige und nicht freigegebene Arbeiten. Nichts daraus gehoert ins
+# oeffentliche Repository - die Videos, Sprachproben und Zwischenstaende
+# waren am 2026-09-23 versehentlich mit drin und sind am 2026-11-07 aus
+# der Historie entfernt worden.
+#
+# Die Regel stand bis dahin nur in .git/info/exclude. Die gilt auf genau
+# einem Rechner und fehlt in jedem frischen Klon - so ist der Ordner
+# damals hereingeraten. Deshalb hier, wo sie mitversioniert wird.
+Claude outputs/
+
+# Die Signatur des Agent-Codes, Fall im Wurzelverzeichnis. Die Regel
+# weiter oben deckt nur agent/agent.py.sig ab.
+/agent.py.sig
