@@ -1,10 +1,30 @@
 # Alle Fassungen festgenagelt. Ein Update, das sich beim Einspielen
 # selbst zusammensucht, ist bei jedem Kunden ein anderes.
 #
-# Stand geprueft am 2026-09-04: pip-audit meldet null Befunde ueber ALLE
-# 29 Eintraege. Beim Anheben wiederholen - tests/deps-test.py haelt nur
-# den Abgleich zwischen dieser Datei und dem, was tatsaechlich
-# installiert ist, nicht den Stand der Schwachstellen.
+# Stand geprueft am 2026-11-08: keine Befunde ueber alle 29 Eintraege.
+# Beim Anheben wiederholen - tests/deps-test.py haelt nur den Abgleich
+# zwischen dieser Datei und dem, was tatsaechlich installiert ist, nicht
+# den Stand der Schwachstellen.
+#
+# Der Lauf davor war am 2026-09-04. Dazwischen war certifi 2026.7.22
+# angreifbar geworden (emSign ECC Root CA - G3 im mitgelieferten
+# Zertifikatsspeicher, dazu acht eMudhra-Zwischenzertifikate) - zwei
+# Monate lang, ohne dass irgendetwas davon aufgefallen waere. Die
+# Pruefung gehoert vor jedes Release, nicht wenn jemand daran denkt.
+#
+# Pruefen laesst sie sich plattformunabhaengig, ohne pip-audit und ohne
+# Installation: name==fassung aus dieser Datei lesen und je Eintrag
+# https://pypi.org/pypi/<name>/<fassung>/json abfragen - das Feld
+# "vulnerabilities" ist die Antwort. Der Umweg lohnt, weil pip-audit
+# gegen agent/requirements.txt an den plattformgebundenen Hashes
+# scheitert, sobald es nicht auf dem Baurechner laeuft.
+#
+# WER DAS NACHBAUT, MUSS DIE EXTRAS MITLESEN. Ein Muster wie
+# ^name==fassung$ geht ueber 'uvicorn[standard]==0.52.4' hinweg, zaehlt
+# 28 statt 29 und laesst ausgerechnet den Webserver ungeprueft - genau
+# so beim Lauf am 2026-11-08 passiert, aufgefallen erst daran, dass
+# tests/deps-test.py eine andere Zahl nannte. Die eckige Klammer
+# gehoert ins Muster, nicht in den Paketnamen.
 #
 # ----------------------------------------------------------------------
 # WARUM HIER 29 PAKETE STEHEN UND NICHT 8 (2026-09-04)
@@ -112,7 +132,7 @@ starlette==1.6.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
-certifi==2026.7.22
+certifi==2026.10.23
 cffi==2.1.1
 click==8.4.2
 greenlet==3.5.4
