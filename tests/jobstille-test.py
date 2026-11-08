@@ -3,13 +3,13 @@ CO-37 - ein laufender Auftrag, zu dem nichts mehr kommt.
 
 DER ANLASS
 
-Am 2026-10-21 lief auf KK-PVE02 ein Patchlauf sauber durch: dpkg meldete
-um 06:58:20 alle Pakete als installiert. In derselben Minute war das
-Backend fuer rund fuenf Minuten nicht erreichbar - es patchte sich
-selbst. Die Schlussmeldung des Agenten lief in einen Verbindungsfehler,
-und der Agent puffert sie nicht: api() hat keinen Wiederholungsversuch,
-die Hauptschleife schreibt "Verbindungsfehler" ins Journal und schlaeft
-weiter. Das Ergebnis war damit weg.
+Am 2026-10-21 lief auf einem Proxmox-Host ein Patchlauf sauber durch:
+dpkg meldete um 06:58:20 alle Pakete als installiert. In derselben
+Minute war das Backend fuer rund fuenf Minuten nicht erreichbar - es
+patchte sich selbst. Die Schlussmeldung des Agenten lief in einen
+Verbindungsfehler, und der Agent puffert sie nicht: api() hat keinen
+Wiederholungsversuch, die Hauptschleife schreibt "Verbindungsfehler" ins
+Journal und schlaeft weiter. Das Ergebnis war damit weg.
 
 Serverseitig blieb der Auftrag auf running stehen - sichtbar als
 laufender Patchlauf in der Oberflaeche, obwohl auf dem Host nichts mehr
@@ -115,7 +115,7 @@ check("Ausgabe jenseits der Grenze -> verstummt",
 
 # Genau der Fall vom 2026-10-21: der Agent hat gemeldet, bis die
 # Verbindung wegbrach, und danach nie wieder.
-check("der Fall KK-PVE02 wird erkannt",
+check("der Fall vom 2026-10-21 wird erkannt",
       main.job_verstummt(auftrag(gestartet_vor=timedelta(hours=3),
                                  regung_vor=timedelta(hours=3)),
                          JETZT) is True)

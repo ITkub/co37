@@ -3,12 +3,12 @@ CO-37 - eine Rueckmeldung, die nicht ankam, geht nicht verloren.
 
 DER ANLASS
 
-Am 2026-10-21 lief auf KK-PVE02 ein Patchlauf durch, waehrend sich das
-Backend selbst patchte. Die Schlussmeldung des Agenten lief in einen
-Verbindungsfehler. api() wiederholt nichts, die Hauptschleife schrieb
-"Verbindungsfehler" ins Journal und schlief weiter - Log, Ergebnis und
-der Neustartbedarf waren damit weg, und der Auftrag stand serverseitig
-weiter auf "laeuft".
+Am 2026-10-21 lief auf einem Proxmox-Host ein Patchlauf durch, waehrend
+sich das Backend selbst patchte. Die Schlussmeldung des Agenten lief in
+einen Verbindungsfehler. api() wiederholt nichts, die Hauptschleife
+schrieb "Verbindungsfehler" ins Journal und schlief weiter - Log,
+Ergebnis und der Neustartbedarf waren damit weg, und der Auftrag stand
+serverseitig weiter auf "laeuft".
 
 WAS DIESE REIHE TUT
 

@@ -1393,9 +1393,10 @@ def boot_time() -> float:
 # ======================================================================
 # Gepufferte Rueckmeldungen
 # ======================================================================
-# Am 2026-10-21 lief auf KK-PVE02 ein Patchlauf sauber durch, und das
-# Ergebnis ging trotzdem verloren: das Backend war in genau der Sekunde
-# der Schlussmeldung nicht erreichbar, weil es sich selbst patchte.
+# Am 2026-10-21 lief auf einem Proxmox-Host ein Patchlauf sauber durch,
+# und das Ergebnis ging trotzdem verloren: das Backend war in genau der
+# Sekunde der Schlussmeldung nicht erreichbar, weil es sich selbst
+# patchte.
 # api() wiederholt nichts, die Ausnahme lief bis in die Hauptschleife,
 # und dort steht nur "Verbindungsfehler" im Journal. Serverseitig blieb
 # der Auftrag auf "laeuft" stehen.

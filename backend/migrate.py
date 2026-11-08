@@ -105,11 +105,12 @@ logger = logging.getLogger(__name__)
 #    einem laufenden Auftrag. Ohne DEFAULT: NULL heisst "noch keine
 #    Meldung", und das trifft auf jeden bestehenden Auftrag zu. Der
 #    Heartbeat faellt in dem Fall auf started_at zurueck.
-#    Anlass: am 2026-10-21 lief ein Patchlauf auf KK-PVE02 sauber durch,
-#    aber das Backend war in genau der Sekunde der Schlussmeldung nicht
-#    erreichbar (es patchte sich selbst). Der Agent puffert die Meldung
-#    nicht, also blieb der Auftrag auf running - sichtbar bis die
-#    Hoechstlaufzeit von vier Stunden ihn verworfen haette.
+#    Anlass: am 2026-10-21 lief ein Patchlauf auf einem Proxmox-Host
+#    sauber durch, aber das Backend war in genau der Sekunde der
+#    Schlussmeldung nicht erreichbar (es patchte sich selbst). Der
+#    Agent puffert die Meldung nicht, also blieb der Auftrag auf
+#    running - sichtbar bis die Hoechstlaufzeit von vier Stunden ihn
+#    verworfen haette.
 #    Ein Rueckschritt auf 23 ist unkritisch: die aeltere Fassung kennt
 #    die Spalte nicht und schreibt sie nie; sie bleibt dann einfach
 #    stehen.

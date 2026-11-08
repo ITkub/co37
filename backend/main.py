@@ -3386,8 +3386,8 @@ def agent_heartbeat(
         # Heartbeat -, aber zu seinem laufenden Auftrag kommt nichts
         # mehr. Etwa, weil die Schlussmeldung des Agenten in einen
         # Verbindungsfehler lief und nirgends gepuffert wird (am
-        # 2026-10-21 auf KK-PVE02 genau so passiert). Die Regel samt
-        # ihren beiden Ausnahmen steht in job_verstummt().
+        # 2026-10-21 auf einem verwalteten Host genau so passiert). Die
+        # Regel samt ihren beiden Ausnahmen steht in job_verstummt().
         if job_verstummt(job, now):
             still_seit = job.last_progress_at or job.started_at
             job_vom_server_abbrechen(job, now, (
@@ -3749,8 +3749,9 @@ async def agent_report(
     # Hat dagegen der Server den Auftrag aufgegeben (job_vom_server_-
     # abbrechen), ist die nachgereichte Meldung die bessere Auskunft:
     # sie kommt von dem, der den Auftrag wirklich ausgefuehrt hat. Genau
-    # dieser Fall trat am 2026-10-21 auf KK-PVE02 auf - der Patchlauf war
-    # erfolgreich, der Server haette ihn als abgebrochen stehenlassen.
+    # dieser Fall trat am 2026-10-21 auf einem verwalteten Host auf - der
+    # Patchlauf war erfolgreich, der Server haette ihn als abgebrochen
+    # stehenlassen.
     if (job.state in (JobState.done, JobState.failed, JobState.cancelled)
             and not vermerk.get("server_cancelled")):
         return {"ok": True, "ignored": "bereits abgeschlossen"}
