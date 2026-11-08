@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydField, PlainSerializer
 from typing_extensions import Annotated
-from sqlalchemy import delete, func, or_
+from sqlalchemy import delete, event, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -160,7 +160,54 @@ def paketverzeichnis() -> Path:
         return PKG_DIR_ALT
     return PKG_DIR
 
+# ======================================================================
+# Zwei PRAGMAs, die SQLite nicht von sich aus setzt
+# ======================================================================
+# WAL: ab Werk laeuft SQLite im Rollback-Journal, und dort sperrt ein
+# Schreiber die ganze Datei - auch gegen Leser. Das Backend bedient die
+# Heartbeats im Threadpool; zwei Hosts, die sich im selben Augenblick
+# melden, waehrend nebenher ein Auftrag geschrieben wird, bekommen dann
+# eine 500 statt einer kurzen Wartezeit.
+#
+# busy_timeout: ohne ihn wartet ein blockierter Schreiber GAR NICHT,
+# sondern scheitert sofort mit "database is locked". WAL allein genuegt
+# also nicht - Schreiber serialisieren auch dort, WAL nimmt nur die
+# Leser aus dem Weg. Fuenf Sekunden sind reichlich fuer Schreibvorgaenge,
+# die hier Millisekunden dauern, und weit unter jedem HTTP-Timeout.
+#
+# synchronous bleibt bewusst auf FULL. NORMAL ist der uebliche Begleiter
+# von WAL und schneller; er kann bei Stromausfall die letzten
+# Transaktionen verlieren, ohne die Datei zu beschaedigen. Fuer das
+# Pruefprotokoll nach OPS.1.1.5 ist das der falsche Tausch.
+#
+# Der WAL-Modus steht im Dateikopf und BLEIBT - wer die Zeile hier
+# wieder entfernt, bekommt das Rollback-Journal nicht zurueck. Dazu
+# braucht es ein ausdrueckliches 'PRAGMA journal_mode=DELETE'.
+BUSY_TIMEOUT_MS = 5000
+
+
+def sqlite_pragmas_anhaengen(motor):
+    """
+    Haengt die PRAGMAs an EINEN Motor - nicht global an Engine.
+
+    Global waere kuerzer und falsch: die Pruefreihen bringen eigene
+    Motoren mit, und schema-drift-test.py misst an seinem gezielt das
+    Sperrverhalten. Ein globaler Listener wuerde genau das verstellen,
+    und der Fehlschlag haette mit der Reihe nichts zu tun.
+    """
+    @event.listens_for(motor, "connect")
+    def _setzen(verbindung, _verbindungsdaten):
+        zeiger = verbindung.cursor()
+        try:
+            zeiger.execute("PRAGMA journal_mode=WAL")
+            zeiger.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS:d}")
+        finally:
+            zeiger.close()
+    return motor
+
+
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+sqlite_pragmas_anhaengen(engine)
 
 
 def get_session():
