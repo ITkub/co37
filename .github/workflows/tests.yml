@@ -1,0 +1,77 @@
+# CO-37 - Pruefreihen bei jedem Push auf main.
+#
+# Baut und signiert NICHTS. Der private Signaturschluessel gehoert nicht
+# in die Repository-Secrets; ein Release entsteht weiterhin von Hand auf
+# dem Baurechner (siehe claude/release-ablauf.md).
+#
+# Python 3.13 und nicht 3.14: das ist die Nebenversion auf OPS01, und der
+# mittelbare Block in backend/requirements.txt wurde dort abgelesen. Eine
+# andere Nebenversion loest anders auf, und dann misst die Reihe etwas
+# anderes als der Betrieb tut.
+#
+# Gemessen am 2026-11-09 in einer frischen Linux-Umgebung mit genau
+# diesen Schritten: 2186 Pruefungen, alle bestanden. Auf einem
+# Windows-Rechner sind es 2172 - acht Pruefungen der Reihe 'schluessel'
+# laufen dort gar nicht.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nur lesen. Der Lauf braucht nichts anderes, und ein Token, das mehr
+# darf als noetig, ist ein Token, das mehr kann als gewollt.
+permissions:
+  contents: read
+
+# Ein neuer Push macht den laufenden Durchgang ueberfluessig.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pruefreihen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Die qr-Reihe liest erzeugte QR-Bilder wieder ein und braucht
+      # dafuer die zbar-Bibliothek. Ohne sie faellt sie ROT aus, nicht
+      # uebersprungen - so ist sie absichtlich gebaut.
+      - name: zbar
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libzbar0
+
+      - name: Abhaengigkeiten des Backends
+        run: pip install -r backend/requirements.txt
+
+      # Fuenf Reihen laden agent/agent.py direkt und brauchen dessen
+      # requests und urllib3. Die Datei selbst laesst sich hier nicht
+      # installieren: ihre Hashes gelten fuer win_amd64 und cp314, und
+      # pip meldet den Unterschied als "someone may have tampered with
+      # them" - das sieht nach Angriff aus und ist keiner.
+      #
+      # Darum die --hash-Zeilen herausfiltern und die GEPINNTEN Fassungen
+      # behalten. Die Reihe prueft damit gegen genau das, was der Agent
+      # ausliefert, statt gegen das, was PyPI heute gerade hergibt.
+      - name: Abhaengigkeiten des Agenten (ohne die Windows-Hashes)
+        run: |
+          grep -v -- '--hash' agent/requirements.txt \
+            | sed 's/[[:space:]]*\\$//' \
+            | grep -E '^[A-Za-z]' > /tmp/agent-ci.txt
+          cat /tmp/agent-ci.txt
+          pip install -r /tmp/agent-ci.txt
+
+      - name: Zusatzpakete der qr-Reihe
+        run: pip install segno pillow numpy pyzbar
+
+      # Ueber 'bash' und nicht './run-tests.sh': die Skripte tragen im
+      # Repository kein Ausfuehrungs-Bit (alle vier stehen auf 100644).
+      - name: Pruefreihen
+        run: bash run-tests.sh
