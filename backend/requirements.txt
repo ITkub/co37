@@ -64,6 +64,14 @@
 # Entwicklungsrechner: OPS01 laeuft auf Python 3.13, ein Container mit
 # 3.11 loest anders auf.
 #
+# DABEI GEHT DIE PLATTFORMBEDINGUNG VON uvloop VERLOREN. 'pip list
+# --format=freeze' gibt nackte Pins aus und wirft die Bedingung weg, die
+# uvicorn[standard] mitbringt. uvloop laesst sich unter Windows nicht
+# bauen - ohne das '; sys_platform != "win32"' bricht ein
+# 'pip install -r backend/requirements.txt' dort ab, bevor irgendetwas
+# installiert ist. Nach jedem Neuerzeugen also wieder anhaengen;
+# tests/deps-test.py prueft, dass sie da ist.
+#
 # WAS HIER BEWUSST NICHT STEHT: --hash-Angaben, wie sie
 # agent/requirements.txt seit 0.37.16 traegt. Zehn dieser Pakete sind
 # kompiliert, ihre Raeder haengen an Python-Nebenversion UND Architektur
@@ -147,6 +155,6 @@ PyYAML==6.0.3
 SQLAlchemy==2.0.51
 typing_extensions==4.16.0
 typing-inspection==0.4.4
-uvloop==0.22.1
+uvloop==0.22.1 ; sys_platform != "win32"
 watchfiles==1.2.0
 websockets==17.0.1

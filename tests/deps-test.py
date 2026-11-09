@@ -71,7 +71,14 @@ def check(label, ok, extra=""):
 # Zeilen einlesen. Kommentare und Leerzeilen fliegen raus, die Extras in
 # eckigen Klammern (uvicorn[standard]) gehoeren nicht zum Paketnamen.
 # ----------------------------------------------------------------------
-ZEILE = re.compile(r"^([A-Za-z0-9._-]+)(\[[^\]]*\])?==([^\s#]+)\s*$")
+# Hinter der Fassung darf eine Plattformbedingung stehen
+# ('; sys_platform != "win32"'). Die Fassung endet dann am Semikolon -
+# deshalb ist es aus der Fassungsgruppe ausgeschlossen, sonst wuerde sie
+# die Bedingung mitschlucken und jeder Vergleich gegen das Installierte
+# schluge fehl.
+ZEILE = re.compile(
+    r"^([A-Za-z0-9._-]+)(\[[^\]]*\])?==([^\s;#]+)"
+    r"\s*(?:;\s*[^#]+?)?\s*$")
 
 check("requirements.txt ist lesbar", REQ.is_file(), REQ)
 
@@ -92,6 +99,32 @@ for zeile in inhalt:
 check("jede Zeile ist auf == festgenagelt", not krumm, "; ".join(krumm))
 check("alle Eintraege eingelesen", len(pins) == len(inhalt) - len(krumm),
       f"{len(pins)} von {len(inhalt)}")
+
+# ----------------------------------------------------------------------
+# Plattformbedingungen
+# ----------------------------------------------------------------------
+# uvloop laesst sich unter Windows nicht einmal bauen ("uvloop does not
+# support Windows at the moment"). Es steht hier, weil der mittelbare
+# Block auf OPS01 mit 'pip list --format=freeze' abgelesen wird - und
+# dabei faellt die Bedingung weg, die uvicorn[standard] von sich aus
+# mitbringt. Folge: 'pip install -r backend/requirements.txt' bricht auf
+# einem Windows-Rechner ab, bevor irgendetwas installiert ist. Am
+# 2026-11-08 genau so passiert.
+_beispiel = 'uvloop==0.22.1 ; sys_platform != "win32"'
+_m = ZEILE.match(_beispiel)
+check("eine Zeile mit Plattformbedingung wird als gepinnt gelesen",
+      _m is not None, _beispiel)
+check("und die Fassung enthaelt die Bedingung nicht",
+      _m is not None and _m.group(3) == "0.22.1",
+      _m.group(3) if _m else "(nicht gelesen)")
+
+# Der eigentliche Waechter. Die Bedingung verschwindet bei JEDEM
+# Neuerzeugen des unteren Blocks wieder - diese Pruefung macht das laut,
+# statt es bis zum naechsten Windows-Rechner warten zu lassen.
+_uvloop = [z for z in inhalt if z.lower().startswith("uvloop")]
+check("uvloop traegt eine Plattformbedingung",
+      bool(_uvloop) and ";" in _uvloop[0],
+      _uvloop[0] if _uvloop else "(uvloop steht gar nicht drin)")
 
 # ----------------------------------------------------------------------
 # starlette muss ausdruecklich dabei sein

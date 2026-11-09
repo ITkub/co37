@@ -246,6 +246,43 @@ REIHEN=(
   "roles           $PY tests/roles-test.py"
 )
 
+# ---------------------------------------------------------------------
+# Einen genannten Reihennamen gegen die Liste halten
+# ---------------------------------------------------------------------
+# Bis 0.49.0 lief ein vertippter Name einfach durch: jede Reihe wurde
+# uebersprungen, und am Ende stand
+#
+#     43 Reihe(n) uebersprungen
+#     0 Pruefungen, alle bestanden
+#
+# mit Rueckgabe 0. Ein Tippfehler sah damit aus wie ein bestandener
+# Lauf - bei dem Werkzeug, mit dem alles andere geprueft wird.
+# Aufgefallen am 2026-11-08 beim ersten Lauf der Reihe 'sqlite-pragma',
+# bevor sie hier eingetragen war.
+#
+# Die Pruefung steht VOR dem Portcheck und vor dem Backendstart: ein
+# Name, den es nicht gibt, soll nichts anfassen. Der Trap ist an dieser
+# Stelle noch nicht gesetzt, deshalb wird $TMP von Hand geraeumt.
+if [ -n "$NUR" ]; then
+  bekannt=0
+  for eintrag in "${REIHEN[@]}"; do
+    if [ "${eintrag%% *}" = "$NUR" ]; then
+      bekannt=1
+      break
+    fi
+  done
+  if [ "$bekannt" -ne 1 ]; then
+    echo "Unbekannte Reihe: $NUR"
+    echo
+    echo "Vorhanden sind:"
+    for eintrag in "${REIHEN[@]}"; do
+      printf '  %s\n' "${eintrag%% *}"
+    done
+    rm -rf "$TMP"
+    exit 2
+  fi
+fi
+
 aufraeumen() {
   [ -n "${BACKEND_PID:-}" ] && kill "$BACKEND_PID" 2>/dev/null
   wait "${BACKEND_PID:-}" 2>/dev/null

@@ -413,6 +413,65 @@ check("eine fehlende Protokolldatei ergibt null, nicht einen Absturz",
       (leer_code.returncode, leer_code.stdout.strip()[:60]))
 
 # ----------------------------------------------------------------------
+# Ein Reihenname, den es nicht gibt
+# ----------------------------------------------------------------------
+# Bis 0.49.0 meldete './run-tests.sh gibtesnicht' woertlich
+#
+#     43 Reihe(n) uebersprungen
+#     0 Pruefungen, alle bestanden
+#
+# und gab 0 zurueck. Ein vertippter Name sah damit aus wie ein
+# bestandener Lauf - und zwar bei dem Werkzeug, mit dem alles andere
+# geprueft wird. Am 2026-11-08 beim ersten Lauf der Reihe
+# 'sqlite-pragma' aufgefallen, bevor sie eingetragen war.
+#
+# Dieselbe Fehlerart, von der diese Reihe handelt: nicht "es lief und
+# war gut", sondern "es lief gar nicht und sagt, es sei gut".
+# EIGENER PORT je Aufruf. Ohne das erben die verschachtelten Laeufe die
+# 8099 des aeusseren Laufs, scheitern an "Port belegt" - und die beiden
+# ersten Pruefungen unten waeren GRUEN, ohne je einen unbekannten
+# Reihennamen gesehen zu haben. Beim ersten Lauf am 2026-11-09 genau so
+# passiert.
+def freier_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+unbekannt = dict(os.environ)
+unbekannt["CO37_TEST_PORT"] = str(freier_port())
+code, ausgabe = lauf(unbekannt, args=("gibtesnicht",))
+
+check("und scheitert nicht etwa am Port",
+      "ist belegt" not in ausgabe, ausgabe.strip()[-160:])
+
+check("ein unbekannter Reihenname bricht ab", code != 0, code)
+
+# Die wichtigere Haelfte. Ohne sie bliebe die Pruefung gruen, wenn
+# jemand den Abbruch spaeter wieder weich macht.
+check("und meldet NICHT 'alle bestanden'",
+      "alle bestanden" not in ausgabe, ausgabe.strip()[-160:])
+
+check("und nennt den Namen, den es nicht gibt",
+      "gibtesnicht" in ausgabe, ausgabe.strip()[-160:])
+
+check("und sagt, welche Reihen es gibt",
+      "roles" in ausgabe and "deps" in ausgabe, ausgabe.strip()[-160:])
+
+# Gegenprobe: ein Name, den es WIRKLICH gibt, darf davon nicht getroffen
+# werden. Sonst waere der Abbruch zu scharf und das Werkzeug unbrauchbar.
+# Bewusst eine Reihe ohne Backend und ohne Netz.
+vorhanden = dict(os.environ)
+vorhanden["CO37_TEST_PORT"] = str(freier_port())
+code, ausgabe = lauf(vorhanden, args=("keyguard",))
+check("ein vorhandener Reihenname laeuft weiterhin", code == 0, code)
+check("und wird tatsaechlich ausgefuehrt",
+      "keyguard" in ausgabe and "0 Prüfungen" not in ausgabe,
+      ausgabe.strip()[-160:])
+
+# ----------------------------------------------------------------------
 # Kein fest verdrahtetes python3 mehr in den Aufrufen
 # ----------------------------------------------------------------------
 # Bewusst nur die ausgefuehrten Zeilen, nicht die Kommentare: dort steht
