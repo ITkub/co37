@@ -237,6 +237,7 @@ REIHEN=(
   "i18n-guard      node tests/i18n-guard-test.js frontend/app.js"
   "proxy-https     $PY tests/proxy-https-test.py"
   "agent-api       $PY tests/agent-api-test.py"
+  "heartbeat-plan  $PY tests/heartbeat-plan-test.py"
   "area            $PY tests/area-test.py"
   "host-patch      $PY tests/host-patch-test.py"
   "eingaben        $PY tests/eingaben-test.py"
