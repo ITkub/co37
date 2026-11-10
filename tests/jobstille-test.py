@@ -49,6 +49,7 @@ os.environ["CO37_SECRET_KEY"] = "test"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import main  # noqa: E402
+import scheduling  # noqa: E402
 from models import Job, JobType  # noqa: E402
 from utctime import utcnow  # noqa: E402
 
@@ -67,7 +68,15 @@ JETZT = utcnow()
 # Das Backend laeuft seit gestern - die Schranke aus BACKEND_START ist in
 # den ersten Faellen also nicht im Weg. Sie bekommt ihren eigenen Block
 # weiter unten.
-main.BACKEND_START = JETZT - timedelta(days=1)
+#
+# GESETZT WIRD IN scheduling, NICHT IN main. Seit dem Umbau vom
+# 2026-11-10 steht job_verstummt() dort und liest BACKEND_START aus
+# seinem eigenen Modul. main re-exportiert die uebrigen Namen, diesen
+# ABER NICHT - haette es ihn, gaebe es zwei Bindungen, die Zuweisung
+# hier traefe die eine und die Abfrage die andere, und diese Reihe
+# pruefte etwas anderes als sie zu pruefen glaubt. Das ist F-12/F-14.
+# tests/scheduling-export-test.py haelt fest, dass main ihn nicht hat.
+scheduling.BACKEND_START = JETZT - timedelta(days=1)
 
 STILLE = main.JOB_LOG_SILENCE
 
@@ -161,13 +170,13 @@ check("ein anderer Eintrag in params nimmt nicht aus",
 # ----------------------------------------- Ausnahme 2: Backend-Neustart
 print("--- nach einem Neustart des Backends zaehlt dessen Start ---")
 
-main.BACKEND_START = JETZT - timedelta(minutes=1)
+scheduling.BACKEND_START = JETZT - timedelta(minutes=1)
 check("Backend gerade gestartet, Auftrag lange still -> laeuft",
       main.job_verstummt(auftrag(gestartet_vor=timedelta(hours=3),
                                  regung_vor=timedelta(hours=3)),
                          JETZT) is False)
 
-main.BACKEND_START = JETZT - (STILLE + timedelta(minutes=1))
+scheduling.BACKEND_START = JETZT - (STILLE + timedelta(minutes=1))
 check("Backend laeuft laenger als die Grenze -> Stille zaehlt wieder",
       main.job_verstummt(auftrag(gestartet_vor=timedelta(hours=3),
                                  regung_vor=timedelta(hours=3)),

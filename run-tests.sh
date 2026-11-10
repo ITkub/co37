@@ -217,6 +217,7 @@ REIHEN=(
   "patchdue        $PY tests/patchdue-test.py"
   "sqlite-pragma   $PY tests/sqlite-pragma-test.py"
   "hostnamen       $PY tests/hostnamen-test.py"
+  "scheduling      $PY tests/scheduling-export-test.py"
   "area-migrate    $PY tests/area-migrate-test.py"
   "area-schedule   $PY tests/area-schedule-test.py"
   "login-throttle  $PY tests/login-throttle-test.py"
