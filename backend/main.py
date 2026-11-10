@@ -4561,13 +4561,20 @@ def list_jobs(
     for job in stale:
         job.state = JobState.cancelled
         job.finished_at = now
-        grace = (job.params or {}).get("grace_minutes")
-        when = job.scheduled_at or job.created_at
-        job.error = (
-            f"Nicht ausgefuehrt: Nachlauf abgelaufen. Geplant war "
-            f"{when:%d.%m.%Y %H:%M} UTC, Nachlauf {grace} Minuten. "
-            f"Der Host hat sich in diesem Zeitraum nicht gemeldet."
-        )
+        # Denselben Grund wie der Heartbeat, aus derselben Funktion.
+        #
+        # Hier stand bis 0.49.0 eine zweite, selbst gebaute Fassung des
+        # Textes - und zwar nur mit dem Nachlauf-Zweig. Ein verfallener
+        # Patch- oder Scan-Auftrag hat kein grace_minutes und bekam
+        # dadurch "Nachlauf None Minuten", waehrend der Heartbeat fuer
+        # denselben Auftrag die Frist nannte. Welcher der beiden Texte in
+        # der Oberflaeche stand, entschied allein, wer zuerst dran war:
+        # die Auftragsliste oder der naechste Heartbeat des Hosts.
+        #
+        # Genau dafuer hat verfallsgrund() seine zwei Zweige. Ein Wert an
+        # zwei Stellen, von denen nur eine die Korrektur hat - F-12/F-14
+        # in Reinform. Deshalb steht der Text nur noch dort.
+        job.error = verfallsgrund(job)
         session.add(job)
     if stale:
         session.commit()
