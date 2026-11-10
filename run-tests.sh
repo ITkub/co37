@@ -243,6 +243,7 @@ REIHEN=(
   "eingaben        $PY tests/eingaben-test.py"
   "frontend        node tests/frontend-test.js PORT SESSION frontend/index.html"
   "jobstille       $PY tests/jobstille-test.py"
+  "auftragspflege  $PY tests/auftragspflege-test.py"
   "nachreichung    $PY tests/nachreichung-test.py"
   "scan-patch      $PY tests/scan-patch-test.py"
   "roles           $PY tests/roles-test.py"
