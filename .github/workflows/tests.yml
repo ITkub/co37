@@ -2,7 +2,7 @@
 #
 # Baut und signiert NICHTS. Der private Signaturschluessel gehoert nicht
 # in die Repository-Secrets; ein Release entsteht weiterhin von Hand auf
-# dem Baurechner (siehe claude/release-ablauf.md).
+# dem Baurechner.
 #
 # Python 3.13 und nicht 3.14: das ist die Nebenversion auf OPS01, und der
 # mittelbare Block in backend/requirements.txt wurde dort abgelesen. Eine

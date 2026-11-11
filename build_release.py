@@ -52,8 +52,13 @@ DATEIEN = [
 # wanderte aber bis 0.36.12 in jedes Paket. Damit hing der Paketinhalt
 # davon ab, was auf dem Baurechner zufaellig herumlag, und im schlechten
 # Fall stuenden dort Hostnamen und Fehlermeldungen aus einem fremden Netz.
+# ki-hinweise-test.py prueft das REPOSITORY (verfolgte Dateien, Pfade,
+# Commit-Kopfdaten) und braucht dafuer git und ein .git. In einem
+# entpackten Release-ZIP ist beides nicht da; die Reihe koennte dort
+# also gar nicht gruen werden und waere beim Kunden eine rote Zeile ohne
+# Sinn. Repo-Hygiene ist nicht Teil des Produkts.
 AUSSCHLUSS = ("__pycache__", ".pyc", ".db", ".db-shm", ".db-wal", ".DS_Store",
-              ".log", ".log.1")
+              ".log", ".log.1", "ki-hinweise-test.py")
 AUSSCHLUSS_ORDNER = ("__pycache__", "packaging/cache", "packaging/_msi_build")
 
 # Diese Dateien brauchen im Paket das Ausfuehrungsrecht. Pythons

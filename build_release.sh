@@ -74,7 +74,7 @@ zip -rq "$OUT" \
   update_watcher.py \
   setup.sh build_packages.sh build_release.sh migrate_to_co37.sh README.md \
   REVERSE-PROXY.md GITHUB.md LICENSE run-tests.sh .gitignore .gitattributes \
-  -x '*__pycache__*' '*.pyc' '*.db' '*.db-*' 'backend/test*' '.DS_Store' 'packaging/cache/*' 'packaging/_msi_build/*'
+  -x '*__pycache__*' '*.pyc' '*.db' '*.db-*' 'backend/test*' '.DS_Store' 'packaging/cache/*' 'packaging/_msi_build/*' 'tests/ki-hinweise-test.py'
 
 # ---------------------------------------------------------------------
 # Gegenpruefung: alles, was der Watcher austauschen will, muss auch im

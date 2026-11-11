@@ -39,10 +39,15 @@ MUSTER = re.compile(PRAEFIX + r"[A-Z0-9]{2,}")
 UEBERSPRINGEN = {
     ".git", ".venv", "venv", "__pycache__", "node_modules", "vendor",
     "dist", "build", "cache", "_msi_build", "data", "state",
-    "db_backups", "update_backups", "Claude outputs",
+    "db_backups", "update_backups", "unfertig",
 }
 
-ENDUNGEN = {".py", ".js", ".sh", ".md", ".html", ".txt", ".example", ".ps1"}
+# .yml und .yaml sind am 2026-11-11 dazugekommen: der Waechter las die
+# Workflow-Dateien bis dahin nicht, und genau dort stand ein Hinweis, den
+# er haette finden sollen. Eine Endungsliste ist nur so gut wie die
+# Dateiarten, an die man beim Schreiben gedacht hat.
+ENDUNGEN = {".py", ".js", ".sh", ".md", ".html", ".txt", ".example", ".ps1",
+            ".yml", ".yaml"}
 
 # Dateien, die GELESEN WERDEN MUESSEN - unabhaengig davon, ob die
 # Endungsliste sie zufaellig erfasst.
