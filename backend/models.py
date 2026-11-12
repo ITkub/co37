@@ -100,6 +100,17 @@ class Host(SQLModel, table=True):
     # sonst mit dem Umschalten still ausfallen.
     last_seen_secure: bool = Field(default=False)
     last_scan: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
+    # Wann der Host zuletzt gestartet ist, aus der boot_time des
+    # Heartbeats. Weicht der gemeldete Wert davon ab, hat der Host
+    # zwischendurch neu gestartet - dann wird ein Scan angelegt, weil
+    # updates_available sonst die Zahl von VOR dem Neustart behaelt.
+    #
+    # NULL heisst "noch nie gesehen", nicht "nie gestartet". Der
+    # Unterschied ist der Grund, warum beim ersten Sehen nur gespeichert
+    # und nicht gescannt wird: nach dem Einspielen dieses Updates ist das
+    # Feld bei jedem Host leer, und ein Scan an dieser Stelle hiesse,
+    # dass die ganze Anlage gleichzeitig scannt.
+    last_boot: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
     updates_available: int = Field(default=0)
     security_updates: int = Field(default=0)
     reboot_required: bool = Field(default=False)

@@ -114,7 +114,21 @@ logger = logging.getLogger(__name__)
 #    Ein Rueckschritt auf 23 ist unkritisch: die aeltere Fassung kennt
 #    die Spalte nicht und schreibt sie nie; sie bleibt dann einfach
 #    stehen.
-SCHEMA_VERSION = 24
+# 25: host.last_boot - Startzeitpunkt des Hosts aus der boot_time des
+#    Heartbeats. Ohne DEFAULT: NULL heisst "noch nie gesehen", und das
+#    trifft nach dem Einspielen auf jeden bestehenden Host zu. Genau
+#    deshalb loest das erste Sehen KEINEN Scan aus - sonst scannte die
+#    ganze Anlage gleichzeitig.
+#    Anlass: updates_available wird nur von /agent/scan-result
+#    geschrieben, und der Nachlauf-Scan des Agenten laeuft VOR dem
+#    Neustart - da zaehlt Windows das installierte, auf den Neustart
+#    wartende Update noch als offen. Danach scannte nichts mehr, die
+#    falsche Zahl blieb bis zum naechsten Scan von Hand stehen.
+#    Ein Rueckschritt auf 24 ist unkritisch: die aeltere Fassung kennt
+#    die Spalte nicht und schreibt sie nie; sie bleibt stehen. Beim
+#    spaeteren Wiederaufstieg steht dort ein veralteter Wert, der genau
+#    einen Scan je Host ausloest.
+SCHEMA_VERSION = 25
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
@@ -127,6 +141,7 @@ EXPECTED_COLUMNS = {
         "patch_followup_left": "INTEGER DEFAULT 0",
         "updates_require_reboot": "BOOLEAN DEFAULT 0",
         "last_seen_secure": "BOOLEAN DEFAULT 0",
+        "last_boot": "DATETIME",
         "approval_state": "VARCHAR DEFAULT 'approved'",
         "enrolled_at": "DATETIME",
         "enrolled_from_ip": "VARCHAR",
