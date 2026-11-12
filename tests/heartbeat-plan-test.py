@@ -235,5 +235,79 @@ heartbeat(D, d_kopf, reboot_pending=False)
 check("kein Auftrag, obwohl Tag und Uhrzeit passen",
       len(patch_auftraege(d_id)) == 0, patch_auftraege(d_id))
 
+# ------------------------------- 5. Nach einem Neustart wird gescannt
+print("--- nach einem erkannten Neustart entsteht ein Scan ---")
+
+# DER ANLASS (gemeldet am 2026-11-12)
+#
+# host.updates_available wird an genau EINER Stelle geschrieben: in
+# /api/v1/agent/scan-result. Der Agent scannt nach einem Patchlauf zwar
+# nach, aber VOR dem Neustart - und da zaehlt Windows das installierte,
+# auf den Neustart wartende Update noch als offen. Danach scannt nichts
+# mehr, also blieb die falsche Zahl stehen, bis jemand von Hand scannte.
+#
+# Der Server erkennt den Neustart jetzt an host.last_boot gegen die
+# gemeldete boot_time und legt einen Scan an.
+#
+# Diese Hosts werden ABSICHTLICH NICHT eingeplant (einplanen=False).
+# Waeren sie faellig, entstuende nebenher ein Patch-Auftrag, und die
+# Zaehlung unten pruefte etwas anderes als sie zu pruefen glaubt.
+
+STARTZEIT_ALT = (localnow() - timedelta(hours=3)).timestamp()
+STARTZEIT_NEU = (localnow() - timedelta(minutes=10)).timestamp()
+
+
+def scan_auftraege(hid):
+    auftraege = call(f"/api/v1/jobs?host_id={hid}", hdr=adm)
+    if not isinstance(auftraege, list):
+        raise SystemExit(f"Auftragsliste nicht lesbar: {auftraege}")
+    return [a for a in auftraege if a.get("job_type") == "scan"]
+
+
+E = "TEST-BOOT01"
+e_id, e_kopf = host_anlegen(E, einplanen=False)
+
+# Erstes Sehen. Hier darf NICHTS passieren: beim Einspielen dieses
+# Updates ist last_boot bei jedem Host leer, und ein Scan an dieser
+# Stelle hiesse, dass die ganze Anlage gleichzeitig scannt.
+erste_antwort = heartbeat(E, e_kopf, boot_time=STARTZEIT_ALT)
+# "jobs" in der Antwort heisst: der Heartbeat ist durchgelaufen. Ohne das
+# ist diese Pruefung wertlos - bei einem Serverfehler gibt es auch keinen
+# Scan-Auftrag, und sie waere gruen, ohne etwas gemessen zu haben.
+# Aufgefallen am 2026-11-12 bei der Mutationsprobe: ein TypeError in der
+# Pflege liess den Heartbeat mit 500 antworten, und die Pruefung nickte.
+check("erster Heartbeat laeuft durch und merkt sich nur den Startzeitpunkt",
+      "jobs" in erste_antwort and len(scan_auftraege(e_id)) == 0,
+      (erste_antwort, scan_auftraege(e_id)))
+
+# Derselbe Start noch einmal. boot_time kann um Sekunden wandern, wenn
+# NTP die Uhr stellt - daher die Toleranz. Ohne sie entstuende hier bei
+# jedem Heartbeat ein Scan.
+heartbeat(E, e_kopf, boot_time=STARTZEIT_ALT + 12)
+check("derselbe Startzeitpunkt loest keinen Scan aus",
+      len(scan_auftraege(e_id)) == 0, scan_auftraege(e_id))
+
+# Jetzt ein echter Neustart.
+heartbeat(E, e_kopf, boot_time=STARTZEIT_NEU)
+nach_neustart = scan_auftraege(e_id)
+check("ein neuer Startzeitpunkt legt genau einen Scan an",
+      len(nach_neustart) == 1, nach_neustart)
+# Ein reiner Scan. Nach einem Neustart ungefragt zu patchen waere eine
+# Verhaltensaenderung, die niemand verlangt hat - und bei einem Server,
+# der gerade hochgefahren ist, die falsche.
+check("und es ist ein reiner Scan, ohne patch_after",
+      bool(nach_neustart)
+      and not (nach_neustart[0].get("params") or {}).get("patch_after"),
+      nach_neustart)
+
+# Ein Host, der mehrfach startet, soll keine Scans stapeln.
+# Fuenf Minuten spaeter: mehr als die Toleranz, also ein neuer Start -
+# und immer noch in der Vergangenheit. Hier stand zuerst +7200, das lag
+# 110 Minuten in der ZUKUNFT und fiel aus dem Plausibilitaetsband; die
+# Pruefung war damit gruen, ohne den Stapelschutz zu beruehren.
+heartbeat(E, e_kopf, boot_time=STARTZEIT_NEU + 300)
+check("solange der Scan offen ist, kommt kein zweiter dazu",
+      len(scan_auftraege(e_id)) == 1, scan_auftraege(e_id))
+
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)

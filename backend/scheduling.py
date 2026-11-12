@@ -467,6 +467,122 @@ def patch_auftraege_planen(session: Session, host: Host, payload) -> None:
                 session.add(host)
 
 
+def boot_zeit(payload, now: datetime) -> Optional[datetime]:
+    """
+    Der Startzeitpunkt des Hosts aus der gemeldeten boot_time - oder
+    None, wenn der Wert nicht plausibel ist.
+
+    Plausibilitaetsband (F-41 der Pruefung vom 2026-08-31):
+    from_timestamp() ist datetime.fromtimestamp() und wirft bei grossen
+    Werten - 1e18 gibt OSError, 1e30 OverflowError. Das fing niemand ab:
+    ein Agent, der einmal Unsinn meldet, bekam bei jedem Heartbeat einen
+    500 und fiel damit aus dem Betrieb. Ein Wert weit in der Zukunft
+    bricht ausserdem ohne Fehler alle laufenden Auftraege des Hosts ab.
+
+    Ausserhalb des Bandes wird der WERT verworfen, nicht der Heartbeat:
+    boot_time ist eine Hilfsangabe, kein Grund, einen Host stillzulegen.
+
+    Der Rueckgabewert traegt die Zeitzone UTC und wird nicht davon
+    befreit. Vorher stand an der Aufrufstelle ein .replace(tzinfo=None):
+    der Vergleich mit job.started_at warf dann den TypeError, fuer den
+    utctime.py gerade gebaut ist - beim Agent kam er als 500 an, und der
+    Heartbeat schlug dauerhaft fehl.
+
+    Steht als eigene Funktion da, weil zwei Stellen sie brauchen -
+    auftraege_aufraeumen() und scan_nach_neustart(). Eine zweite Fassung
+    desselben Bandes waere derselbe Fehler, der am 2026-11-10 in
+    list_jobs() steckte: ein Wert an zwei Stellen, von denen nur eine
+    eine Korrektur bekommt.
+    """
+    if not payload.boot_time or payload.boot_time <= 0:
+        return None
+    # Nach unten das Jahr 2000, nach oben eine Stunde Vorlauf fuer Uhren,
+    # die nicht genau gehen.
+    if not (946684800 < payload.boot_time < now.timestamp() + 3600):
+        return None
+    return from_timestamp(payload.boot_time)
+
+
+# Wie weit die gemeldete boot_time wandern darf, ohne als neuer Start zu
+# gelten.
+#
+# Der Wert kommt als Gleitkommazahl vom Host und verschiebt sich um
+# Sekunden, wenn NTP die Uhr stellt. Auf Gleichheit zu pruefen hiesse,
+# bei solchen Korrekturen einen Scan anzulegen, ohne dass etwas gestartet
+# ist. Ein echter Neustart verschiebt boot_time um die ganze vorige
+# Laufzeit, also um Minuten bis Monate - zwei Minuten trennen das
+# zuverlaessig, und es ist dieselbe Spanne, die der Abbruch laufender
+# Auftraege weiter unten benutzt.
+BOOT_TOLERANZ = timedelta(minutes=2)
+
+
+def scan_nach_neustart(session, host, booted_at) -> None:
+    """
+    Hat der Host neu gestartet, einen Scan anlegen.
+
+    DER ANLASS (gemeldet am 2026-11-12)
+
+    host.updates_available wird an genau EINER Stelle geschrieben, in
+    /agent/scan-result. Der Agent scannt nach einem Patchlauf zwar nach,
+    aber VOR dem Neustart - und da zaehlt Windows das installierte, auf
+    den Neustart wartende Update noch als offen. Danach scannte nichts
+    mehr: der Neustart-Auftrag scannt gar nicht, und die Oberflaeche
+    zeigte die Zahl von vor dem Neustart, bis jemand von Hand scannte.
+
+    Aufgefallen ist es nur manchmal, und das hatte einen Grund: startet
+    der Agent SELBST neu (patch_auto_reboot), merkt der Server einen
+    Nachschlag vor, und dessen Patchlauf scannt nach dem Neustart - es
+    heilte von selbst. Startet ein Mensch neu, und das ist die Vorgabe,
+    wurde kein Nachschlag vorgemerkt und nichts heilte.
+
+    DREI BREMSEN
+
+    - Beim ERSTEN Sehen wird nur gespeichert. Nach dem Einspielen ist
+      last_boot bei jedem Host leer; ein Scan an dieser Stelle hiesse,
+      dass die ganze Anlage gleichzeitig scannt.
+    - Innerhalb von BOOT_TOLERANZ gilt der Start als derselbe.
+    - Kein zweiter Scan, solange einer wartet oder laeuft. Ein Host, der
+      mehrfach startet, soll keine Auftraege stapeln.
+
+    Der Auftrag ist ein REINER Scan, ohne patch_after. Nach einem
+    Neustart ungefragt zu patchen waere eine Verhaltensaenderung, die
+    niemand verlangt hat - und bei einem Server, der gerade hochgefahren
+    ist, die falsche.
+    """
+    if booted_at is None:
+        return
+
+    if host.last_boot is None:
+        host.last_boot = booted_at
+        session.add(host)
+        return
+
+    if abs(booted_at - host.last_boot) <= BOOT_TOLERANZ:
+        return
+
+    host.last_boot = booted_at
+    session.add(host)
+
+    offen = session.exec(
+        select(Job).where(
+            Job.host_id == host.id,
+            Job.job_type == JobType.scan,
+            Job.state.in_([JobState.pending, JobState.running]),
+        )
+    ).first()
+    if offen is not None:
+        return
+
+    session.add(Job(
+        host_id=host.id,
+        job_type=JobType.scan,
+        # Der Vermerk steht nur da, damit in der Auftragsliste erkennbar
+        # ist, warum dieser Scan von selbst auftauchte.
+        params={"nach_neustart": True},
+        expires_at=utcnow() + JOB_MAX_WAIT,
+    ))
+
+
 def auftraege_aufraeumen(
     session: Session, host: Host, payload, now: datetime
 ) -> None:
@@ -505,28 +621,8 @@ def auftraege_aufraeumen(
     #
     # Der zweite ist die Hoechstlaufzeit als Auffangnetz - fuer Abstuerze
     # ohne Neustart und fuer Agents, die keine Boot-Zeit liefern.
-    # from_timestamp liefert UTC *mit* Zeitzone. Vorher stand hier ein
-    # .replace(tzinfo=None): der Vergleich mit job.started_at warf dann den
-    # TypeError, fuer den utctime.py gerade gebaut ist - beim Agent kam er
-    # als 500 an, und der Heartbeat schlug dauerhaft fehl.
-    # Plausibilitaetsband um boot_time (F-41 der Pruefung vom 2026-08-31).
-    #
-    # from_timestamp() ist datetime.fromtimestamp() und wirft bei grossen
-    # Werten - 1e18 gibt OSError, 1e30 OverflowError. Das fing niemand ab:
-    # ein Agent, der einmal Unsinn meldet, bekam bei jedem Heartbeat einen
-    # 500 und fiel damit aus dem Betrieb. Ein Wert weit in der Zukunft
-    # bricht ausserdem ohne Fehler alle laufenden Auftraege des Hosts ab
-    # (siehe die Schleife unten).
-    #
-    # Ausserhalb des Bandes wird der Wert verworfen, nicht der Heartbeat:
-    # boot_time ist eine Hilfsangabe, kein Grund, einen Host stillzulegen.
-    booted_at = None
-    if payload.boot_time and payload.boot_time > 0:
-        jetzt = now.timestamp()
-        # Nach unten das Jahr 2000, nach oben eine Stunde Vorlauf fuer
-        # Uhren, die nicht genau gehen.
-        if 946684800 < payload.boot_time < jetzt + 3600:
-            booted_at = from_timestamp(payload.boot_time)
+
+    booted_at = boot_zeit(payload, now)
 
     for job in session.exec(
         select(Job).where(

@@ -2951,6 +2951,17 @@ def agent_heartbeat(
     # Punkt - ein verfallener Auftrag darf nicht noch einmal hinausgehen.
     scheduling.auftraege_aufraeumen(session, host, payload, now)
 
+    # Hat der Host neu gestartet, einmal scannen lassen.
+    #
+    # NACH dem Aufraeumen: dort werden Auftraege verworfen, die den
+    # Neustart nicht ueberlebt haben, und der neue Scan soll nicht in
+    # dieselbe Schleife geraten.
+    #
+    # VOR dem Ausliefern: so geht der Scan in derselben Antwort mit
+    # hinaus und nicht erst beim naechsten Heartbeat.
+    scheduling.scan_nach_neustart(
+        session, host, scheduling.boot_zeit(payload, now))
+
     # Waehrend eines angestossenen Neustarts nichts ausliefern. Der Agent
     # lehnt Auftraege in diesem Zustand ohnehin ab - wuerden sie trotzdem
     # zugestellt, liefe der Zaehler MAX_JOB_DELIVERIES hoch und der Auftrag
