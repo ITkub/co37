@@ -239,6 +239,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
+  + "bundledNote, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
@@ -1872,6 +1873,38 @@ global.setTimeout = origSetTimeout;
     check("roStart benutzt dieselbe Funktion",
           ro > 0 && appjs.slice(ro, ro + 200).includes("rolloutStarten("),
           appjs.slice(ro, ro + 120));
+  }
+
+  // ====================================================================
+  // Der gemeldete Stand der Agent-Laufzeit
+  // ====================================================================
+  // Eine reine Funktion statt einer Zeichenkettensuche: ein Aufruf
+  // belegt Verhalten, eine gefundene Zeichenkette belegt nur, dass
+  // jemand etwas hingeschrieben hat.
+  //
+  // Der wichtigste Fall ist "unbekannt": ein Linux-Host und jeder
+  // aeltere Windows-Agent landen dort, und wuerde das einen Hinweis
+  // erzeugen, stuende er bei fast jedem Host - ein Hinweis, der
+  // ueberall steht, wird nirgends gelesen.
+  if (typeof api.bundledNote === "function") {
+    check("bundledNote: abweichend ergibt einen Hinweis",
+          typeof api.bundledNote({ bundled_state: "abweichend" }) === "string"
+          && api.bundledNote({ bundled_state: "abweichend" }).length > 0,
+          api.bundledNote({ bundled_state: "abweichend" }));
+    check("bundledNote: gleich ergibt keinen",
+          api.bundledNote({ bundled_state: "gleich" }) === null);
+    check("bundledNote: unbekannt ergibt keinen",
+          api.bundledNote({ bundled_state: "unbekannt" }) === null);
+    check("bundledNote: ein Host ohne das Feld ergibt keinen",
+          api.bundledNote({}) === null);
+    // Kein Knopf: die Selbstaktualisierung behebt das gerade NICHT, und
+    // ein Knopf, der Erfolg meldet und nichts aendert, waere schlimmer
+    // als kein Hinweis.
+    const hinweis = api.bundledNote({ bundled_state: "abweichend" });
+    check("der Hinweis traegt kein data-act",
+          !/data-act/.test(hinweis), hinweis);
+  } else {
+    check("bundledNote() ist exportiert", false, typeof api.bundledNote);
   }
 
   console.log(`\nFehler: ${fails}`);
