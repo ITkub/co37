@@ -300,5 +300,122 @@ with TestClient(main.app) as klient:
         check("ein Heartbeat ohne das Feld laesst den Stand stehen",
               gespeichert() == gut, gespeichert())
 
+print("\n--- Teil 4: Vergleich gegen das aktuelle Paket ---")
+
+for name in ("paket_soll", "paket_gebaut_aktuell", "bundled_abweichungen",
+             "bundled_vergleich"):
+    check(f"{name}() gibt es", hasattr(main, name))
+
+if all(hasattr(main, n) for n in
+       ("paket_soll", "paket_gebaut_aktuell", "bundled_abweichungen",
+        "bundled_vergleich")):
+
+    # --- die Vergleichsgrundlage ---------------------------------------
+    soll = main.paket_soll(WURZEL)
+    check("paket_soll() liest die Python-Fassung aus build_msi.py",
+          (soll or {}).get("python") == "3.14.10", (soll or {}).get("python"))
+    # Acht Pins, und die Namen normalisiert: in der Datei steht
+    # charset-normalizer, im .dist-info charset_normalizer. Ohne
+    # Normalisierung auf BEIDEN Seiten meldete der Server fuer jeden
+    # gesunden Host eine Abweichung.
+    check("paket_soll() liest die acht Pins",
+          len((soll or {}).get("packages", {})) == 8,
+          sorted((soll or {}).get("packages", {})))
+    check("die Namen sind normalisiert",
+          "charset-normalizer" in (soll or {}).get("packages", {}),
+          sorted((soll or {}).get("packages", {})))
+
+    leer_wurzel = TMP / "ohne-packaging"
+    (leer_wurzel / "agent").mkdir(parents=True, exist_ok=True)
+    check("fehlt build_msi.py, ist die Grundlage unbekannt",
+          main.paket_soll(leer_wurzel) is None, main.paket_soll(leer_wurzel))
+
+    # --- gehoert das gebaute Paket zum Stand? --------------------------
+    pkg = TMP / "packages"
+    pkg.mkdir(parents=True, exist_ok=True)
+    check("ohne Paket gilt der Bau als nicht aktuell",
+          main.paket_gebaut_aktuell(pkg, "0.50.1") is False)
+    (pkg / "co37-agent-0.50.0.msi").write_bytes(b"x")
+    check("ein Paket der Vorgaengerfassung zaehlt nicht",
+          main.paket_gebaut_aktuell(pkg, "0.50.1") is False)
+    (pkg / "co37-agent-0.50.1.msi").write_bytes(b"x")
+    check("ein Paket der laufenden Fassung zaehlt",
+          main.paket_gebaut_aktuell(pkg, "0.50.1") is True)
+
+    # --- die drei Arten von Abweichung ---------------------------------
+    ist = {"certifi": "2026.10.23", "urllib3": "2.8.0"}
+    check("gleich ergibt keine Abweichung",
+          main.bundled_abweichungen(ist, dict(ist)) == [],
+          main.bundled_abweichungen(ist, dict(ist)))
+    andere = main.bundled_abweichungen({"certifi": "2026.7.22"},
+                                       {"certifi": "2026.10.23"})
+    check("eine andere Fassung wird gemeldet",
+          len(andere) == 1 and "certifi" in andere[0], andere)
+    fehlt = main.bundled_abweichungen({}, {"certifi": "2026.10.23"})
+    check("ein fehlendes Paket wird gemeldet",
+          len(fehlt) == 1 and "certifi" in fehlt[0], fehlt)
+    extra = main.bundled_abweichungen({"neunte": "1.0"}, {})
+    check("ein zusaetzliches Paket wird gemeldet",
+          len(extra) == 1 and "neunte" in extra[0], extra)
+
+    # --- die Zustandstabelle -------------------------------------------
+    class FakeHost:
+        def __init__(self, os_type, bundled):
+            self.os_type = os_type
+            self.bundled = bundled
+
+    win_gut = {"python": "3.14.10", "packages": dict(soll["packages"])} \
+        if soll else {"python": "3.14.10", "packages": {}}
+
+    check("ein Linux-Host bleibt unbekannt",
+          main.bundled_vergleich(FakeHost("linux", win_gut))[0] == "unbekannt",
+          main.bundled_vergleich(FakeHost("linux", win_gut))[0])
+    check("ein Windows-Host ohne Meldung bleibt unbekannt",
+          main.bundled_vergleich(FakeHost("windows", {}))[0] == "unbekannt")
+    check("eine Meldung ohne Pakete bleibt unbekannt",
+          main.bundled_vergleich(
+              FakeHost("windows", {"python": "3.14.10", "packages": {}}))[0]
+          == "unbekannt")
+
+    # Die beiden Zeilen der Tabelle, die an den Dateien auf dem Server
+    # haengen: dafuer werden die zwei Funktionen am Modul ersetzt. Keine
+    # Attrappe des Verhaltens - der Vergleich selbst laeuft echt.
+    echt_soll, echt_gebaut = main.paket_soll, main.paket_gebaut_aktuell
+    try:
+        main.paket_soll = lambda *a, **k: None
+        main.paket_gebaut_aktuell = lambda *a, **k: True
+        check("ohne Vergleichsgrundlage bleibt es unbekannt",
+              main.bundled_vergleich(FakeHost("windows", win_gut))[0]
+              == "unbekannt")
+
+        main.paket_soll = lambda *a, **k: {"python": "3.14.10",
+                                           "packages": dict(ist)}
+        main.paket_gebaut_aktuell = lambda *a, **k: False
+        check("gehoert das gebaute Paket nicht zum Stand, bleibt es unbekannt",
+              main.bundled_vergleich(
+                  FakeHost("windows",
+                           {"python": "3.14.10", "packages": dict(ist)}))[0]
+              == "unbekannt")
+
+        main.paket_gebaut_aktuell = lambda *a, **k: True
+        zustand, diff = main.bundled_vergleich(
+            FakeHost("windows", {"python": "3.14.10", "packages": dict(ist)}))
+        check("stimmt alles, ist der Zustand gleich", zustand == "gleich",
+              (zustand, diff))
+
+        zustand, diff = main.bundled_vergleich(
+            FakeHost("windows", {"python": "3.14.7", "packages": dict(ist)}))
+        check("eine aeltere Python-Fassung ist eine Abweichung",
+              zustand == "abweichend" and any("3.14.7" in z for z in diff),
+              (zustand, diff))
+    finally:
+        main.paket_soll, main.paket_gebaut_aktuell = echt_soll, echt_gebaut
+
+    # --- und es kommt bis in die Ausgabe -------------------------------
+    check("HostRead traegt bundled_state",
+          "bundled_state" in main.HostRead.model_fields)
+    check("HostRead traegt bundled_diff",
+          "bundled_diff" in main.HostRead.model_fields)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

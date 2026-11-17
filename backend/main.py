@@ -11,6 +11,7 @@ Start:
 import hashlib
 import json
 import os
+import importlib.util
 import re
 import shutil
 import secrets
@@ -2285,6 +2286,12 @@ class HostRead(BaseModel):
     patch_followup_left: int = 0
     sort_order: int = 0
     area_id: Optional[int] = None
+    # Der gemeldete Stand der Agent-Laufzeit, als Urteil statt als
+    # Rohdaten: gleich, abweichend oder unbekannt. Die Oberflaeche soll
+    # nicht selbst vergleichen muessen - und sie soll vor allem nicht
+    # unbekannt mit abweichend verwechseln.
+    bundled_state: str = "unbekannt"
+    bundled_diff: list[str] = []
 
     model_config = {"from_attributes": True}
 
@@ -2558,6 +2565,131 @@ def bundled_sauber(raw) -> dict:
         if not isinstance(fassung, str) or not BUNDLED_FASSUNG.match(fassung):
             return {}
     return {"python": python, "packages": dict(pakete)}
+
+
+# ----------------------------------------------------------------------
+# Vergleich: was der Host meldet gegen das, was das Paket mitbringt
+# ----------------------------------------------------------------------
+# Die Vergleichsgrundlage kommt aus packaging/build_msi.py und
+# agent/requirements.txt - denselben zwei Dateien, aus denen der Paketbau
+# selbst liest. Deshalb wird build_msi.py geladen statt nachgebaut: eine
+# zweite Auswertung derselben Dateien waere eine zweite Wahrheit, und
+# auseinandergelaufen faellt sie erst beim Kunden auf.
+#
+# Gueltig ist der Vergleich nur, wenn die gebaute MSI zum laufenden Stand
+# gehoert. Sonst zeigte der Hinweis in die falsche Richtung: die
+# Quelldateien sagten die neue Fassung, installierbar waere nur die alte,
+# und jeder Host bekaeme "Paket neu installieren" - eine Handlung, die
+# nichts aendert. Der Watcher baut nach jedem Update neu, laesst es aber
+# ausdruecklich aus, wenn wixl fehlt oder das Embeddable nicht ladbar ist.
+# Genau dann greift diese Sperre.
+BUILD_MSI_SRC = Path(__file__).resolve().parent.parent / "packaging" / "build_msi.py"
+AGENT_REQ_SRC = Path(__file__).resolve().parent.parent / "agent" / "requirements.txt"
+
+_paket_soll_cache: dict = {}
+
+
+def paket_soll(wurzel: Optional[Path] = None) -> Optional[dict]:
+    """
+    Was das aktuelle Paket mitbringen wuerde: Python-Fassung und Pins.
+
+    None heisst "nicht feststellbar" - fehlende Datei, nicht auswertbarer
+    Inhalt. Dann bleibt jeder Host unbekannt, statt dass eine Vermutung
+    zur Abweichung wird.
+
+    Zwischengespeichert ueber die Aenderungszeit beider Dateien: der
+    Inhalt aendert sich nur mit einem Update, die Frage stellt sich aber
+    bei jedem Abruf der Hostliste.
+
+    wurzel ist nur fuer die Pruefung da.
+    """
+    bm = (wurzel / "packaging" / "build_msi.py") if wurzel else BUILD_MSI_SRC
+    req = (wurzel / "agent" / "requirements.txt") if wurzel else AGENT_REQ_SRC
+    try:
+        stempel = (bm.stat().st_mtime_ns, req.stat().st_mtime_ns)
+    except OSError:
+        return None
+    schluessel = (str(bm), str(req))
+    gemerkt = _paket_soll_cache.get(schluessel)
+    if gemerkt and gemerkt[0] == stempel:
+        return gemerkt[1]
+    try:
+        spec = importlib.util.spec_from_file_location("co37_build_msi", bm)
+        modul = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modul)
+        pins = modul.lies_pins(req.read_text(encoding="utf-8"))
+        soll = {
+            "python": modul.PY_VERSION,
+            "packages": {modul.normname(n): v for n, v in pins.items()},
+        }
+    except Exception:  # noqa: BLE001
+        soll = None
+    _paket_soll_cache[schluessel] = (stempel, soll)
+    return soll
+
+
+def paket_gebaut_aktuell(verzeichnis: Optional[Path] = None,
+                         version: str = "") -> bool:
+    """
+    Gehoert die gebaute MSI zum laufenden Stand?
+
+    Dieselbe Frage, die die Selbstpruefung unter "Windows-Paket" stellt,
+    und dieselbe Antwort: der Dateiname traegt die Agent-Version. Stimmt
+    sie, wurde das Paket aus diesem Quellstand gebaut.
+    """
+    pfad = verzeichnis or paketverzeichnis()
+    want = version or agent_source_version()
+    if not want or want == "unbekannt" or not pfad.is_dir():
+        return False
+    return any(p.name.endswith(".msi") and want in p.name
+               for p in pfad.glob("co37-agent*"))
+
+
+def bundled_abweichungen(ist: dict, soll: dict) -> list[str]:
+    """
+    Beide Richtungen, wie in pruefe_vendorstand() im Paketbau.
+
+    Fehlt etwas, ist der Host nicht nachgezogen; liegt etwas zusaetzlich
+    da, gehoert es nicht zum Paket - der Fall, der ohne diese Richtung
+    gar nicht auffiele.
+    """
+    zeilen = []
+    for name in sorted(set(ist) | set(soll)):
+        hat, will = ist.get(name), soll.get(name)
+        if hat is None:
+            zeilen.append(f"{name}: fehlt, Paket bringt {will}")
+        elif will is None:
+            zeilen.append(f"{name} {hat}: zusaetzlich, nicht im Paket")
+        elif hat != will:
+            zeilen.append(f"{name}: {hat}, Paket bringt {will}")
+    return zeilen
+
+
+def bundled_vergleich(host) -> tuple[str, list[str]]:
+    """
+    Zustand des gemeldeten Stands: gleich, abweichend oder unbekannt.
+
+    unbekannt ist ausdruecklich NICHT abweichend. Ein Host, von dem man es
+    nicht weiss, darf keinen Hinweis erzeugen - sonst stuende er bei jedem
+    Linux-Agenten und jedem aelteren Windows-Agenten da, und ein Hinweis,
+    der ueberall steht, wird nirgends gelesen.
+    """
+    if getattr(host, "os_type", None) != OSType.windows:
+        return "unbekannt", []
+    ist = host.bundled if isinstance(host.bundled, dict) else {}
+    ist_pakete = ist.get("packages")
+    if not isinstance(ist_pakete, dict) or not ist_pakete:
+        return "unbekannt", []
+    soll = paket_soll()
+    if not soll or not paket_gebaut_aktuell():
+        return "unbekannt", []
+    zeilen = bundled_abweichungen(ist_pakete, soll.get("packages", {}))
+    ist_python, soll_python = ist.get("python"), soll.get("python")
+    if ist_python and soll_python and ist_python != soll_python:
+        # Die Laufzeit zuerst: sie ist der Grund, aus dem es dieses Feld
+        # ueberhaupt gibt.
+        zeilen.insert(0, f"Python: {ist_python}, Paket bringt {soll_python}")
+    return ("abweichend" if zeilen else "gleich"), zeilen
 
 
 # ----------------------------------------------------------------------
@@ -3962,6 +4094,7 @@ def list_hosts(session: Session = Depends(get_session)):
     for h in hosts:
         data = HostRead.model_validate(h)
         data.next_patch_run = next_patch_run(h)
+        data.bundled_state, data.bundled_diff = bundled_vergleich(h)
         out.append(data)
     return out
 
