@@ -29,7 +29,7 @@ from typing import Optional
 import urllib3
 import requests
 
-AGENT_VERSION = "0.50.1"
+AGENT_VERSION = "0.51.0"
 IS_WINDOWS = platform.system() == "Windows"
 
 
