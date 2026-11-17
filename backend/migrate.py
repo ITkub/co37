@@ -128,11 +128,12 @@ logger = logging.getLogger(__name__)
 #    die Spalte nicht und schreibt sie nie; sie bleibt stehen. Beim
 #    spaeteren Wiederaufstieg steht dort ein veralteter Wert, der genau
 #    einen Scan je Host ausloest.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Spalten, die es in 0.4.0 gibt. Fehlen sie, werden sie ergaenzt.
 EXPECTED_COLUMNS = {
     "host": {
+        "bundled": "JSON",
         "checkmk_hosts": "JSON",
         "reboot_reasons": "JSON",
         "downtime_minutes": "INTEGER DEFAULT 30",

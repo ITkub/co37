@@ -90,6 +90,21 @@ class Host(SQLModel, table=True):
     os_version: Optional[str] = None
     ip_address: Optional[str] = None
     agent_version: Optional[str] = None
+    # Was der Agent an eigener Laufzeit mitbringt: die Python-Fassung und
+    # die Bibliotheken aus seinem site-packages. Nur Windows-Agents haben
+    # das - unter Linux kommt beides aus der Distribution.
+    #
+    # Getrennt von agent_version, und das ist der ganze Punkt:
+    # self_update() tauscht nur agent.py aus. Laufzeit und Bibliotheken
+    # kommen allein ueber eine Neuinstallation des Pakets auf den Host.
+    # Ein Host mit aktueller agent_version kann also eine veraltete
+    # Laufzeit fahren, und bis 0.50.1 sah das niemand.
+    #
+    # nullable=False wie bei reboot_reasons: eine JSON-Spalte, die NULL
+    # zulaesst, zwingt jeden Leser zu einer Sonderbehandlung, und einer
+    # vergisst sie.
+    bundled: dict = Field(default_factory=dict,
+                          sa_column=Column(JSON, nullable=False))
 
     # Zustand
     status: HostStatus = Field(default=HostStatus.unknown)
