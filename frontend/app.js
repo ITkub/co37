@@ -589,6 +589,26 @@ function bundledNote(h){
   return t("note.bundled_outdated");
 }
 
+// Ein Eintrag aus bundled_diff als uebersetzte Zeile. Das Backend
+// schickt art/name/ist/soll, nicht den fertigen Satz - sonst stuende
+// deutsche Prosa im englischen Dialog. Dasselbe Muster wie bei
+// reboot_reasons, wo der Agent 'kernel' schickt.
+const BUNDLED_ART = {
+  anders: "note.bundled_diff_changed",
+  fehlt: "note.bundled_diff_missing",
+  zusaetzlich: "note.bundled_diff_extra",
+  python: "note.bundled_diff_python",
+};
+
+function bundledDiffText(e){
+  const key = BUNDLED_ART[e && e.art];
+  // Eine Art, die diese Fassung der Oberflaeche nicht kennt, wird
+  // weggelassen statt als Schluessel angezeigt: ein neuerer Server
+  // waere sonst in einem aelteren Frontend an dieser Stelle unlesbar.
+  if (!key) return null;
+  return t(key, { name: e.name, ist: e.ist || "", soll: e.soll || "" });
+}
+
 function stateOf(h){
   // Erreichbarkeit hat Vorrang vor einem laufenden Auftrag. Vorher stand
   // die Pruefung auf ACTIVE ganz oben: ein Host mit haengendem Auftrag
@@ -1303,8 +1323,11 @@ async function detail(id){
   // vom Host und sind damit fremde Eingabe, auch wenn das Backend sie
   // schon auf Zeichensatz und Menge geprueft hat.
   if ((h.bundled_diff || []).length){
-    L.push("", t("note.bundled_detail") + ":");
-    h.bundled_diff.forEach(z => L.push("  " + z));
+    const zeilen = h.bundled_diff.map(bundledDiffText).filter(Boolean);
+    if (zeilen.length){
+      L.push("", t("note.bundled_detail") + ":");
+      zeilen.forEach(z => L.push("  " + z));
+    }
   }
   L.push("", t("history.open_updates", { anzahl: ups.length }));
   ups.slice(0,80).forEach(u => L.push(`  ${u.is_security?t("history.security_marker"):"     "} ${u.package_id}  ${u.new_version||""}`));

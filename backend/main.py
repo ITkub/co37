@@ -20,7 +20,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, get_args
+from typing import Any, Optional, get_args
 
 from fastapi import (
     Depends, FastAPI, File, Form, Header, HTTPException,
@@ -2291,7 +2291,9 @@ class HostRead(BaseModel):
     # nicht selbst vergleichen muessen - und sie soll vor allem nicht
     # unbekannt mit abweichend verwechseln.
     bundled_state: str = "unbekannt"
-    bundled_diff: list[str] = []
+    # Strukturiert, nicht als Satz - die Oberflaeche formatiert und
+    # uebersetzt. Je Eintrag: art, name, ist, soll.
+    bundled_diff: list[dict] = []
 
     model_config = {"from_attributes": True}
 
@@ -2517,7 +2519,13 @@ class AgentHeartbeat(BaseModel):
     # Bibliotheken aus seinem site-packages. Aeltere Agents und der
     # Linux-Agent senden das Feld nicht; ein leeres Feld heisst deshalb
     # "nichts gemeldet", nicht "nichts installiert".
-    bundled: dict = {}
+    #
+    # ABSICHTLICH Any und nicht dict: ein dict hier liesse Pydantic mit
+    # 422 antworten, BEVOR bundled_sauber() ueberhaupt laeuft - und ein
+    # Agent, der an seinem eigenen Heartbeat scheitert, meldet auch keine
+    # Updates und keinen ausstehenden Neustart mehr. Der Typ wird deshalb
+    # erst in bundled_sauber() geprueft, zusammen mit allem anderen.
+    bundled: Any = None
 
 
 # ----------------------------------------------------------------------
@@ -2622,10 +2630,20 @@ def paket_soll(wurzel: Optional[Path] = None) -> Optional[dict]:
             "python": modul.PY_VERSION,
             "packages": {modul.normname(n): v for n, v in pins.items()},
         }
-    except Exception:  # noqa: BLE001
+    except (Exception, SystemExit):  # noqa: BLE001
+        # SystemExit ausdruecklich mit: build_msi.py ist ein
+        # Kommandozeilenskript und meldet Fehler mit 'raise SystemExit',
+        # unter anderem lies_pins() bei einer Zeile ohne feste Fassung.
+        # Das ist kein Exception, kaeme also hier vorbei - und riss in
+        # Starlette die ganze Hostliste mit. Eine schief geschriebene
+        # Zeile in agent/requirements.txt soll den Paketbau laut
+        # scheitern lassen, nicht den Hauptbildschirm.
         soll = None
     _paket_soll_cache[schluessel] = (stempel, soll)
     return soll
+
+
+_paket_gebaut_cache: dict = {}
 
 
 def paket_gebaut_aktuell(verzeichnis: Optional[Path] = None,
@@ -2636,33 +2654,71 @@ def paket_gebaut_aktuell(verzeichnis: Optional[Path] = None,
     Dieselbe Frage, die die Selbstpruefung unter "Windows-Paket" stellt,
     und dieselbe Antwort: der Dateiname traegt die Agent-Version. Stimmt
     sie, wurde das Paket aus diesem Quellstand gebaut.
+
+    Gemerkt ueber die Aenderungszeiten von agent/agent.py und des
+    Paketverzeichnisses - zwei stat()-Aufrufe statt agent.py ganz zu
+    lesen. Das ist kein Feinschliff: agent_source_version() liest die
+    Datei vollstaendig (rund 97 KB), und die Hostliste fragt je Host.
+    Bei 300 Hosts und einem Abruf alle 15 Sekunden je offenem Browser
+    waeren das rund 29 MB Dateilesen pro Abruf.
+
+    Mit ausdruecklichen Argumenten (Pruefung) wird nicht gemerkt.
     """
-    pfad = verzeichnis or paketverzeichnis()
-    want = version or agent_source_version()
+    if verzeichnis is not None or version:
+        pfad = verzeichnis or paketverzeichnis()
+        want = version or agent_source_version()
+        return _paket_passt(pfad, want)
+    pfad = paketverzeichnis()
+    try:
+        stempel = (AGENT_SRC.stat().st_mtime_ns,
+                   pfad.stat().st_mtime_ns if pfad.is_dir() else 0)
+    except OSError:
+        stempel = None
+    gemerkt = _paket_gebaut_cache.get("stand")
+    if stempel is not None and gemerkt and gemerkt[0] == stempel:
+        return gemerkt[1]
+    antwort = _paket_passt(pfad, agent_source_version())
+    if stempel is not None:
+        _paket_gebaut_cache["stand"] = (stempel, antwort)
+    return antwort
+
+
+def _paket_passt(pfad: Path, want: str) -> bool:
     if not want or want == "unbekannt" or not pfad.is_dir():
         return False
     return any(p.name.endswith(".msi") and want in p.name
                for p in pfad.glob("co37-agent*"))
 
 
-def bundled_abweichungen(ist: dict, soll: dict) -> list[str]:
+def bundled_abweichungen(ist: dict, soll: dict) -> list[dict]:
     """
     Beide Richtungen, wie in pruefe_vendorstand() im Paketbau.
 
     Fehlt etwas, ist der Host nicht nachgezogen; liegt etwas zusaetzlich
     da, gehoert es nicht zum Paket - der Fall, der ohne diese Richtung
     gar nicht auffiele.
+
+    Strukturiert und NICHT als fertiger Satz: die Oberflaeche ist
+    vollstaendig zweisprachig, und deutsche Prosa aus dem Backend stuende
+    im englischen Dialog mitten im uebersetzten Text. Dasselbe Muster wie
+    bei reboot_reasons - der Agent schickt 'kernel', rebootNote()
+    uebersetzt es.
+
+    art ist eines von: anders, fehlt, zusaetzlich, python.
     """
-    zeilen = []
+    eintraege = []
     for name in sorted(set(ist) | set(soll)):
         hat, will = ist.get(name), soll.get(name)
         if hat is None:
-            zeilen.append(f"{name}: fehlt, Paket bringt {will}")
+            art = "fehlt"
         elif will is None:
-            zeilen.append(f"{name} {hat}: zusaetzlich, nicht im Paket")
+            art = "zusaetzlich"
         elif hat != will:
-            zeilen.append(f"{name}: {hat}, Paket bringt {will}")
-    return zeilen
+            art = "anders"
+        else:
+            continue
+        eintraege.append({"art": art, "name": name, "ist": hat, "soll": will})
+    return eintraege
 
 
 def bundled_vergleich(host) -> tuple[str, list[str]]:
@@ -2683,13 +2739,14 @@ def bundled_vergleich(host) -> tuple[str, list[str]]:
     soll = paket_soll()
     if not soll or not paket_gebaut_aktuell():
         return "unbekannt", []
-    zeilen = bundled_abweichungen(ist_pakete, soll.get("packages", {}))
+    eintraege = bundled_abweichungen(ist_pakete, soll.get("packages", {}))
     ist_python, soll_python = ist.get("python"), soll.get("python")
     if ist_python and soll_python and ist_python != soll_python:
         # Die Laufzeit zuerst: sie ist der Grund, aus dem es dieses Feld
         # ueberhaupt gibt.
-        zeilen.insert(0, f"Python: {ist_python}, Paket bringt {soll_python}")
-    return ("abweichend" if zeilen else "gleich"), zeilen
+        eintraege.insert(0, {"art": "python", "name": "python",
+                             "ist": ist_python, "soll": soll_python})
+    return ("abweichend" if eintraege else "gleich"), eintraege
 
 
 # ----------------------------------------------------------------------
@@ -5343,6 +5400,22 @@ def diagnostics():
         None if has_msi else
         ("apt install -y wixl, danach: bash build_packages.sh" if not wixl
          else "cd /opt/co37 && bash build_packages.sh"))
+    # Die Grundlage, gegen die der gemeldete Stand der Agent-Laufzeit
+    # verglichen wird. Ohne sie steht jeder Host auf "unbekannt", und
+    # unbekannt erzeugt an der Hostzeile planmaessig keinen Hinweis -
+    # "alle aktuell" waere dann von "Vergleich nicht moeglich" nicht zu
+    # unterscheiden. Deshalb hier, und nicht neben "Windows-Paket": das
+    # ist eine andere Frage, auch wenn beide das Paket betreffen.
+    _soll = paket_soll()
+    add("Vergleichsgrundlage der Agent-Laufzeit", _soll is not None,
+        f"Paket bringt Python {_soll['python']} und "
+        f"{len(_soll['packages'])} Bibliotheken" if _soll
+        else "packaging/build_msi.py oder agent/requirements.txt nicht "
+             "auswertbar - der gemeldete Stand der Hosts wird nicht "
+             "verglichen",
+        None if _soll else
+        "Beide Dateien pruefen: python3 tools/pin-hashes.py zeigt, ob "
+        "sie lesbar sind.")
     add("Keine veralteten Pakete", not stale,
         "aufgeraeumt" if not stale else f"veraltet: {', '.join(stale)}",
         None if not stale else "cd /opt/co37 && bash build_packages.sh")

@@ -75,9 +75,12 @@ conn = sqlite3.connect(DB_PATH)
 cols = {r[1] for r in conn.execute("PRAGMA table_info(host)").fetchall()}
 check("host.bundled ergaenzt", "bundled" in cols, sorted(cols))
 
-# Der Bestandshost bleibt stehen, und die neue Spalte ist bei ihm leer -
-# NICHT NULL: eine JSON-Spalte, die NULL zulaesst, zwingt jeden Leser zu
-# einer Sonderbehandlung (derselbe Grund wie bei reboot_reasons).
+# Der Bestandshost bleibt stehen. Die Spalte steht bei ihm auf NULL, und
+# das ist die bekannte Drift: ALTER TABLE ergaenzt sie ohne NOT NULL,
+# waehrend create_all() sie auf einer frischen Datenbank mit NOT NULL
+# anlegt - genau wie bei tags und reboot_reasons. Harmlos, weil jeder
+# Leser des Feldes NULL aushaelt; geprueft wird das unten in Teil 4
+# (isinstance) und hier nur, dass der Host den Aufstieg ueberlebt.
 try:
     zeile = conn.execute("SELECT hostname, bundled FROM host WHERE id = 1").fetchone()
 except sqlite3.OperationalError as exc:
@@ -195,6 +198,25 @@ if hasattr(agent, "bundled_stand"):
         check("ohne Windows meldet der Agent nichts",
               agent.bundled_stand() is None, agent.bundled_stand())
 
+# Waechter: _normname() im Agenten und normname() im Paketbau muessen
+# dasselbe tun. Sie liegen doppelt, weil der Agent packaging/ nicht
+# mitgeliefert bekommt - und laufen sie auseinander, meldet der Server
+# fuer JEDEN gesunden Host eine Abweichung. Dieselbe Sorte Waechter wie
+# schema-drift, i18n-guard und ki-hinweise.
+_bm_spec = importlib.util.spec_from_file_location(
+    "co37_build_msi_test", WURZEL / "packaging" / "build_msi.py")
+_bm = importlib.util.module_from_spec(_bm_spec)
+_bm_spec.loader.exec_module(_bm)
+
+if hasattr(agent, "_normname"):
+    PROBEN = ["charset_normalizer", "charset-normalizer", "Charset.Normalizer",
+              "certifi", "urllib3", "pycparser", "A__B--C..D", "CFFI"]
+    abweichend = [n for n in PROBEN
+                  if agent._normname(n) != _bm.normname(n)]
+    check("Agent und Paketbau normalisieren Namen gleich",
+          not abweichend,
+          [(n, agent._normname(n), _bm.normname(n)) for n in abweichend])
+
 # Der Stand muss auch im Heartbeat landen - sonst sammelt der Agent
 # etwas ein, das nie ankommt. Geprueft wird am Quelltext, weil der
 # Heartbeat selbst ein Backend und eine Anmeldung braucht; die Wirkung
@@ -283,10 +305,24 @@ with TestClient(main.app) as klient:
             return None if h is None else h.bundled
 
     if token:
-        r = heartbeat({"python": "3.14.10", "packages": "viele"})
-        check("Heartbeat mit kaputtem bundled bleibt 200",
-              r.status_code == 200, r.status_code)
-        check("und gespeichert wird nichts", gespeichert() == {}, gespeichert())
+        # Nicht nur ein falsches Unterfeld, sondern die falschen TYPEN -
+        # und zwar ueber HTTP. Die Reihe hatte diese Faelle nur direkt an
+        # bundled_sauber() gegeben; dort kommen sie an, ueber die Route
+        # dagegen entscheidet vorher die Typpruefung des Schemas. Genau
+        # in dieser Luecke sass die 422, die die Vorgabe "keine 4xx"
+        # verletzte - und ein Agent, der an seinem eigenen Heartbeat
+        # scheitert, meldet auch keine Updates mehr.
+        for was, wert in (("packages als Zeichenkette",
+                           {"python": "3.14.10", "packages": "viele"}),
+                          ("ganzes Feld als Liste", ["certifi"]),
+                          ("ganzes Feld als Zeichenkette", "certifi==1"),
+                          ("ganzes Feld als Zahl", 7),
+                          ("ganzes Feld null", None)):
+            r = heartbeat(wert)
+            check(f"Heartbeat bleibt 200: {was}", r.status_code == 200,
+                  (r.status_code, r.text[:120]))
+            check(f"und gespeichert wird nichts: {was}",
+                  gespeichert() == {}, gespeichert())
 
         gut = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
         r = heartbeat(gut)
@@ -312,15 +348,26 @@ if all(hasattr(main, n) for n in
 
     # --- die Vergleichsgrundlage ---------------------------------------
     soll = main.paket_soll(WURZEL)
+    # Gegen die Dateien, nicht gegen abgetippte Zahlen: sonst macht die
+    # naechste Anhebung von PY_VERSION diese Reihe rot ohne Befund -
+    # dieselbe Objektion wie oben bei SCHEMA_VERSION.
+    import re as _re  # noqa: E402
+    _bm = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+    PY_ERWARTET = _re.search(r'^PY_VERSION = "([^"]+)"', _bm, _re.M).group(1)
+    PINS_ERWARTET = len([z for z in
+                         (WURZEL / "agent" / "requirements.txt")
+                         .read_text(encoding="utf-8").splitlines()
+                         if _re.match(r"^[A-Za-z].*==", z)])
     check("paket_soll() liest die Python-Fassung aus build_msi.py",
-          (soll or {}).get("python") == "3.14.10", (soll or {}).get("python"))
+          (soll or {}).get("python") == PY_ERWARTET,
+          ((soll or {}).get("python"), PY_ERWARTET))
     # Acht Pins, und die Namen normalisiert: in der Datei steht
     # charset-normalizer, im .dist-info charset_normalizer. Ohne
     # Normalisierung auf BEIDEN Seiten meldete der Server fuer jeden
     # gesunden Host eine Abweichung.
-    check("paket_soll() liest die acht Pins",
-          len((soll or {}).get("packages", {})) == 8,
-          sorted((soll or {}).get("packages", {})))
+    check("paket_soll() liest alle Pins der Datei",
+          len((soll or {}).get("packages", {})) == PINS_ERWARTET,
+          (len((soll or {}).get("packages", {})), PINS_ERWARTET))
     check("die Namen sind normalisiert",
           "charset-normalizer" in (soll or {}).get("packages", {}),
           sorted((soll or {}).get("packages", {})))
@@ -329,6 +376,43 @@ if all(hasattr(main, n) for n in
     (leer_wurzel / "agent").mkdir(parents=True, exist_ok=True)
     check("fehlt build_msi.py, ist die Grundlage unbekannt",
           main.paket_soll(leer_wurzel) is None, main.paket_soll(leer_wurzel))
+
+    def wurzel_mit(req_inhalt: str, bm_inhalt: str = "", name: str = "w"):
+        """Eine Wurzel nachbauen: echtes build_msi.py, eigene requirements."""
+        w = TMP / name
+        (w / "packaging").mkdir(parents=True, exist_ok=True)
+        (w / "agent").mkdir(parents=True, exist_ok=True)
+        if bm_inhalt:
+            (w / "packaging" / "build_msi.py").write_text(bm_inhalt,
+                                                          encoding="utf-8")
+        else:
+            shutil.copy(WURZEL / "packaging" / "build_msi.py",
+                        w / "packaging" / "build_msi.py")
+        (w / "agent" / "requirements.txt").write_text(req_inhalt,
+                                                      encoding="utf-8")
+        return w
+
+    # lies_pins() wirft bei einer Zeile ohne feste Fassung ein SystemExit -
+    # es ist ein Kommandozeilenskript, kein Bibliotheksmodul. SystemExit
+    # ist kein Exception, kaeme also an jedem "except Exception" vorbei
+    # und riss in Starlette die ganze Hostliste mit: der Hauptbildschirm,
+    # im 15-Sekunden-Takt, wegen einer schief geschriebenen Zeile in
+    # agent/requirements.txt.
+    kaputte_pins = wurzel_mit("requests>=2.0\n", name="pins-kaputt")
+    try:
+        ergebnis = main.paket_soll(kaputte_pins)
+        ausnahme = None
+    except BaseException as exc:  # noqa: BLE001
+        ergebnis, ausnahme = "AUSNAHME", exc
+    check("eine Zeile ohne feste Fassung ergibt None, keine Ausnahme",
+          ergebnis is None and ausnahme is None, ausnahme or ergebnis)
+
+    # Und die zweite Haelfte derselben Forderung: PY_VERSION nicht lesbar.
+    ohne_py = wurzel_mit("certifi==2026.10.23\n",
+                         bm_inhalt="def lies_pins(t):\n    return {}\n",
+                         name="ohne-pyversion")
+    check("ohne PY_VERSION ist die Grundlage unbekannt",
+          main.paket_soll(ohne_py) is None, main.paket_soll(ohne_py))
 
     # --- gehoert das gebaute Paket zum Stand? --------------------------
     pkg = TMP / "packages"
@@ -347,16 +431,28 @@ if all(hasattr(main, n) for n in
     check("gleich ergibt keine Abweichung",
           main.bundled_abweichungen(ist, dict(ist)) == [],
           main.bundled_abweichungen(ist, dict(ist)))
+
+    # Strukturiert, nicht als fertiger Satz: die Oberflaeche ist
+    # vollstaendig zweisprachig, und Prosa aus dem Backend stuende im
+    # englischen Dialog auf Deutsch. Dasselbe Muster wie bei
+    # reboot_reasons, wo der Agent 'kernel' schickt und rebootNote()
+    # uebersetzt.
     andere = main.bundled_abweichungen({"certifi": "2026.7.22"},
                                        {"certifi": "2026.10.23"})
-    check("eine andere Fassung wird gemeldet",
-          len(andere) == 1 and "certifi" in andere[0], andere)
+    check("eine andere Fassung wird strukturiert gemeldet",
+          andere == [{"art": "anders", "name": "certifi",
+                      "ist": "2026.7.22", "soll": "2026.10.23"}], andere)
     fehlt = main.bundled_abweichungen({}, {"certifi": "2026.10.23"})
-    check("ein fehlendes Paket wird gemeldet",
-          len(fehlt) == 1 and "certifi" in fehlt[0], fehlt)
+    check("ein fehlendes Paket wird strukturiert gemeldet",
+          fehlt == [{"art": "fehlt", "name": "certifi",
+                     "ist": None, "soll": "2026.10.23"}], fehlt)
     extra = main.bundled_abweichungen({"neunte": "1.0"}, {})
-    check("ein zusaetzliches Paket wird gemeldet",
-          len(extra) == 1 and "neunte" in extra[0], extra)
+    check("ein zusaetzliches Paket wird strukturiert gemeldet",
+          extra == [{"art": "zusaetzlich", "name": "neunte",
+                     "ist": "1.0", "soll": None}], extra)
+    check("keine Abweichung traegt fertige Prosa",
+          all(set(e) == {"art", "name", "ist", "soll"}
+              for e in andere + fehlt + extra), andere + fehlt + extra)
 
     # --- die Zustandstabelle -------------------------------------------
     class FakeHost:
@@ -406,10 +502,81 @@ if all(hasattr(main, n) for n in
         zustand, diff = main.bundled_vergleich(
             FakeHost("windows", {"python": "3.14.7", "packages": dict(ist)}))
         check("eine aeltere Python-Fassung ist eine Abweichung",
-              zustand == "abweichend" and any("3.14.7" in z for z in diff),
+              zustand == "abweichend" and diff
+              and diff[0] == {"art": "python", "name": "python",
+                              "ist": "3.14.7", "soll": "3.14.10"},
               (zustand, diff))
+
+        # Der ganze Weg fuer eine zusaetzliche Bibliothek: Host meldet
+        # eine neunte, Zustand abweichend, und sie steht als solche drin.
+        neun = dict(ist)
+        neun["neunte"] = "1.0"
+        zustand, diff = main.bundled_vergleich(
+            FakeHost("windows", {"python": "3.14.10", "packages": neun}))
+        check("eine neunte Bibliothek macht den Host abweichend",
+              zustand == "abweichend"
+              and any(e["art"] == "zusaetzlich" and e["name"] == "neunte"
+                      for e in diff), (zustand, diff))
     finally:
         main.paket_soll, main.paket_gebaut_aktuell = echt_soll, echt_gebaut
+
+    # --- die Hostliste darf nicht je Host die Dateien lesen ------------
+    # paket_gebaut_aktuell() ruft agent_source_version(), und das liest
+    # agent/agent.py GANZ (rund 97 KB) und geht sie zeilenweise durch.
+    # Die Hostliste wird alle 15 Sekunden geholt, bei laufenden Auftraegen
+    # alle 3, je offenem Browser - je Host einmal waere bei 300 Hosts
+    # rund 29 MB Dateilesen pro Abruf.
+    echt_asv = main.agent_source_version
+    zaehler = {"n": 0}
+
+    def gezaehlt():
+        zaehler["n"] += 1
+        return echt_asv()
+
+    try:
+        main.agent_source_version = gezaehlt
+        # Mit gefuelltem bundled, sonst steigt bundled_vergleich frueher
+        # aus und erreicht die Paketpruefung gar nicht - dann zaehlte die
+        # Reihe eine Ersparnis, die nirgends anfaellt. (Genau so hat eine
+        # Mutation ueberlebt, bevor diese Zeile stand.)
+        with main.Session(main.engine) as s:
+            for i in range(5):
+                s.add(models.Host(hostname=f"ZAEHL-{i}",
+                                  os_type=models.OSType.windows,
+                                  agent_token_hash=f"z{i}",
+                                  bundled={"python": "3.14.10",
+                                           "packages": {"certifi": "1.0"}}))
+            s.commit()
+        # Kein TestClient hier: dessen Start ruft selbst einmal
+        # agent_source_version() und verfaelschte die Zaehlung. Gezaehlt
+        # wird genau das, was list_hosts() tut - bundled_vergleich je
+        # Host.
+        with main.Session(main.engine) as s2:
+            for h in s2.exec(main.select(models.Host)).all():
+                main.bundled_vergleich(h)
+        check("agent_source_version wird nicht je Host gelesen",
+              zaehler["n"] <= 1, zaehler["n"])
+    finally:
+        main.agent_source_version = echt_asv
+
+    # --- der Betreiber muss sehen, wenn gar nicht verglichen wird ------
+    # Sind alle Hosts unbekannt, weil die Vergleichsgrundlage fehlt, steht
+    # an der Hostzeile planmaessig NICHTS - und "alle aktuell" waere von
+    # "Vergleich nicht moeglich" nicht zu unterscheiden. Die
+    # Selbstpruefung muss es sagen.
+    namen = [c["name"] for c in main.diagnostics()["checks"]]
+    check("die Selbstpruefung nennt die Vergleichsgrundlage",
+          any("ergleich" in n for n in namen), namen)
+
+    echt_soll2 = main.paket_soll
+    try:
+        main.paket_soll = lambda *a, **k: None
+        zeile = next((c for c in main.diagnostics()["checks"]
+                      if "ergleich" in c["name"]), None)
+        check("fehlt sie, ist die Zeile rot",
+              zeile is not None and zeile["ok"] is False, zeile)
+    finally:
+        main.paket_soll = echt_soll2
 
     # --- und es kommt bis in die Ausgabe -------------------------------
     check("HostRead traegt bundled_state",
