@@ -203,5 +203,102 @@ agent_quelle = (WURZEL / "agent" / "agent.py").read_text(encoding="utf-8")
 check("der Heartbeat traegt das Feld bundled",
       '"bundled"' in agent_quelle, None)
 
+print("\n--- Teil 3: das Backend nimmt an und prueft ---")
+
+# Der Heartbeat ist angreifbare Eingabe: F-23 und F-33 haben gezeigt, dass
+# ein Host dort hostname, os_type, os_version, ip_address und
+# agent_version frei setzen kann. Fuer bundled gilt dasselbe. Geprueft
+# wird deshalb nicht nur der gute Fall, sondern vor allem, dass Unfug das
+# Feld verwirft statt den Heartbeat scheitern zu lassen - ein Agent, der
+# an seinem eigenen Heartbeat stirbt, meldet auch nichts anderes mehr.
+#
+# EIGENE Datenbank, nicht die aus Teil 1: die ist absichtlich
+# unvollstaendig nachgebaut (nur die Spalten, die der Aufstieg braucht),
+# und das Backend liest beim Lesen eines Hosts alle. Der Pfad muss
+# stehen, BEVOR main importiert wird - dort entsteht der Motor.
+os.environ["CO37_DB"] = f"sqlite:///{TMP / 'backend.db'}"
+import main  # noqa: E402
+
+check("bundled_sauber() gibt es", hasattr(main, "bundled_sauber"))
+
+if hasattr(main, "bundled_sauber"):
+    gut = {"python": "3.14.10",
+           "packages": {"certifi": "2026.10.23", "urllib3": "2.8.0"}}
+    check("ein gueltiger Stand kommt durch",
+          main.bundled_sauber(gut) == gut, main.bundled_sauber(gut))
+
+    schlecht = {
+        "packages als Zeichenkette": {"python": "3.14.10", "packages": "viele"},
+        "ganzes Feld als Liste": ["certifi", "2026.10.23"],
+        "None": None,
+        "Zeichenkette": "certifi==2026.10.23",
+        "Name mit Leerzeichen": {"python": "3.14.10",
+                                 "packages": {"cer tifi": "2026.10.23"}},
+        "Fassung zu lang": {"python": "3.14.10",
+                            "packages": {"certifi": "9" * 200}},
+        "zu viele Eintraege": {"python": "3.14.10",
+                               "packages": {f"p{i}": "1.0" for i in range(21)}},
+        "Python-Fassung als Zahl": {"python": 3.14, "packages": {}},
+    }
+    for was, wert in schlecht.items():
+        try:
+            ergebnis = main.bundled_sauber(wert)
+            ausnahme = None
+        except Exception as exc:  # noqa: BLE001
+            ergebnis, ausnahme = "AUSNAHME", exc
+        check(f"verworfen statt uebernommen: {was}",
+              ergebnis == {} and ausnahme is None, ausnahme or ergebnis)
+
+    # Genau 20 Eintraege sind erlaubt, 21 nicht - die Grenze selbst
+    # pruefen, nicht nur ein Stueck weit daneben.
+    zwanzig = {"python": "3.14.10",
+               "packages": {f"p{i}": "1.0" for i in range(20)}}
+    check("genau 20 Eintraege gehen durch",
+          main.bundled_sauber(zwanzig) == zwanzig,
+          len(main.bundled_sauber(zwanzig).get("packages", {})))
+
+# Die Wirkung ueber HTTP, im eigenen Prozess: ein Heartbeat mit Unfug im
+# Feld darf nicht scheitern, und gespeichert werden darf er auch nicht.
+from starlette.testclient import TestClient  # noqa: E402
+
+with TestClient(main.app) as klient:
+    anmeldung = klient.post("/api/v1/agent/enroll", json={
+        "hostname": "TEST-STAND01", "os_type": "windows",
+        "os_version": "Windows 11", "agent_version": "0.50.1"})
+    token = (anmeldung.json() or {}).get("agent_token", "")
+    check("Testhost angemeldet", bool(token), anmeldung.status_code)
+
+    def heartbeat(bundled):
+        nutzlast = {"hostname": "TEST-STAND01", "os_type": "windows",
+                    "os_version": "Windows 11", "agent_version": "0.50.1"}
+        if bundled is not ...:
+            nutzlast["bundled"] = bundled
+        return klient.post("/api/v1/agent/heartbeat", json=nutzlast,
+                           headers={"X-Agent-Token": token})
+
+    def gespeichert():
+        with main.Session(main.engine) as s:
+            h = s.exec(main.select(models.Host).where(
+                models.Host.hostname == "TEST-STAND01")).first()
+            return None if h is None else h.bundled
+
+    if token:
+        r = heartbeat({"python": "3.14.10", "packages": "viele"})
+        check("Heartbeat mit kaputtem bundled bleibt 200",
+              r.status_code == 200, r.status_code)
+        check("und gespeichert wird nichts", gespeichert() == {}, gespeichert())
+
+        gut = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+        r = heartbeat(gut)
+        check("ein gueltiger Stand landet am Host",
+              gespeichert() == gut, gespeichert())
+
+        # Alter Agent: Feld fehlt ganz. Das darf den schon gemeldeten
+        # Stand NICHT loeschen - sonst wechselte ein Host bei jedem
+        # Wechsel der Agent-Fassung zwischen bekannt und unbekannt.
+        r = heartbeat(...)
+        check("ein Heartbeat ohne das Feld laesst den Stand stehen",
+              gespeichert() == gut, gespeichert())
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

@@ -2506,6 +2506,58 @@ class AgentHeartbeat(BaseModel):
     # Der Agent hat bereits shutdown abgesetzt und wartet auf das
     # Herunterfahren. Es werden keine Auftraege mehr ausgeliefert.
     reboot_pending: bool = False
+    # Die eigene Laufzeit des Windows-Agents: Python-Fassung und die
+    # Bibliotheken aus seinem site-packages. Aeltere Agents und der
+    # Linux-Agent senden das Feld nicht; ein leeres Feld heisst deshalb
+    # "nichts gemeldet", nicht "nichts installiert".
+    bundled: dict = {}
+
+
+# ----------------------------------------------------------------------
+# Der gemeldete Stand der Agent-Laufzeit
+# ----------------------------------------------------------------------
+# Eine freie Angabe aus dem Heartbeat, also angreifbare Eingabe. F-23 und
+# F-33 haben gezeigt, wie weit das reicht: ein beliebiges Geraet im Netz
+# kann sich anmelden (die Route ist absichtlich offen) und danach im
+# Heartbeat hostname, os_type, os_version, ip_address und agent_version
+# frei setzen. Fuer dieses Feld gilt dasselbe, und es landet zusaetzlich
+# in der Oberflaeche.
+#
+# Grenzen bewusst eng: mehr als 20 Eintraege kann ein CO-37-Paket nicht
+# mitbringen (es sind acht), Paketnamen folgen PEP 508, Fassungen PEP 440.
+# Ein Verstoss verwirft das GANZE Feld, statt einzelne Eintraege
+# wegzulassen: ein halb uebernommener Stand erzeugte eine Abweichung, die
+# niemand aufloesen kann.
+#
+# Und er verwirft nur das Feld, nicht den Heartbeat. Ein Agent, der an
+# seinem eigenen Heartbeat stirbt, meldet auch keine Updates mehr - der
+# Preis fuer eine 422 waere hier hoeher als der Nutzen.
+BUNDLED_MAX = 20
+BUNDLED_NAME = re.compile(r"^[A-Za-z0-9._-]{1,50}$")
+BUNDLED_FASSUNG = re.compile(r"^[A-Za-z0-9.+_-]{1,30}$")
+
+
+def bundled_sauber(raw) -> dict:
+    """
+    Prueft den gemeldeten Stand. Gibt ihn zurueck oder {} - nie eine Ausnahme.
+
+    {} heisst immer "nichts Verwertbares gemeldet" und wird vom Vergleich
+    als unbekannt behandelt, nicht als Abweichung.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    python = raw.get("python")
+    pakete = raw.get("packages")
+    if not isinstance(python, str) or not BUNDLED_FASSUNG.match(python):
+        return {}
+    if not isinstance(pakete, dict) or len(pakete) > BUNDLED_MAX:
+        return {}
+    for name, fassung in pakete.items():
+        if not isinstance(name, str) or not BUNDLED_NAME.match(name):
+            return {}
+        if not isinstance(fassung, str) or not BUNDLED_FASSUNG.match(fassung):
+            return {}
+    return {"python": python, "packages": dict(pakete)}
 
 
 # ----------------------------------------------------------------------
@@ -2860,6 +2912,20 @@ def agent_heartbeat(
     # sofort aus - und still, weil der Agent den Fehler nur in seine
     # eigene Protokolldatei schreibt.
     host.last_seen_secure = request_is_https(request)
+
+    # Der gemeldete Stand der Agent-Laufzeit. Zwei Dinge daran:
+    #
+    # Nur bei Aenderung schreiben. Der Inhalt bleibt wochenlang gleich -
+    # bei jedem Heartbeat eine Schreiboperation anzustossen waere ein
+    # Schreibvorgang je Host und Minute fuer nichts.
+    #
+    # Und ein leeres Ergebnis schreibt NICHTS. Ein aelterer Agent sendet
+    # das Feld nicht, der Linux-Agent auch nicht; wuerde das den schon
+    # gemeldeten Stand loeschen, wechselte ein Host bei jedem Wechsel der
+    # Agent-Fassung zwischen bekannt und unbekannt.
+    gemeldet = bundled_sauber(payload.bundled)
+    if gemeldet and gemeldet != host.bundled:
+        host.bundled = gemeldet
 
     # Auch hier pruefen: der Heartbeat darf den Namen aendern, und ohne
     # diese Zeile liesse sich die Pruefung bei der Anmeldung umgehen -
