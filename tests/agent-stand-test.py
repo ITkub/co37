@@ -102,5 +102,106 @@ check("Host.bundled steht im Modell",
       "bundled" in models.Host.model_fields,
       sorted(models.Host.model_fields)[:5])
 
+print("\n--- Teil 2: der Agent sammelt seinen Stand ein ---")
+
+import importlib.util  # noqa: E402
+import platform  # noqa: E402
+import shutil  # noqa: E402
+
+
+def lade_agent():
+    """
+    Laedt agent.py als Modul aus einem eigenen Verzeichnis.
+
+    Eigenes Verzeichnis samt agent.conf, weil sich der Agent ohne
+    Konfiguration schon beim Laden beendet - dieselbe Hilfe wie in
+    agent-haertung-test.py.
+    """
+    ordner = TMP / "agentmodul"
+    ordner.mkdir(parents=True, exist_ok=True)
+    shutil.copy(WURZEL / "agent" / "agent.py", ordner / "agent.py")
+    (ordner / "agent.conf").write_text("server = http://127.0.0.1:1\n",
+                                       encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("co37agent_stand",
+                                                  ordner / "agent.py")
+    modul = importlib.util.module_from_spec(spec)
+    sys.modules["co37agent_stand"] = modul
+    spec.loader.exec_module(modul)
+    return modul
+
+
+def dist_info(ordner: Path, verzeichnis: str, name: str = "", fassung: str = ""):
+    """
+    Ein .dist-info nachbauen, wie pip --target es hinterlaesst.
+
+    Der Verzeichnisname ist das Entscheidende: genau daraus liest
+    lies_installiert() in packaging/build_msi.py Name und Fassung, und der
+    Agent muss dasselbe tun - sonst vergleicht der Server zwei verschieden
+    gewonnene Angaben.
+    """
+    d = ordner / f"{verzeichnis}.dist-info"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: {fassung}\n",
+        encoding="utf-8")
+    return d
+
+
+agent = lade_agent()
+check("bundled_stand() gibt es", hasattr(agent, "bundled_stand"))
+
+if hasattr(agent, "bundled_stand"):
+    # Ein site-packages nachbauen: zwei vollstaendige Pakete und eines
+    # ohne lesbare METADATA.
+    site = TMP / "site-packages"
+    dist_info(site, "certifi-2026.10.23", "certifi", "2026.10.23")
+    dist_info(site, "urllib3-2.8.0", "urllib3", "2.8.0")
+    # Der Name im Verzeichnis ist unterstrichen, in requirements.txt steht
+    # er mit Bindestrich. Ohne Normalisierung nach PEP 503 meldete der
+    # Server fuer jeden gesunden Host eine Abweichung - der Fall, der
+    # diese Pruefung wert macht.
+    dist_info(site, "charset_normalizer-3.5.1", "charset-normalizer", "3.5.1")
+    # Kein Fassungsteil im Verzeichnisnamen: nicht aufloesbar.
+    dist_info(site, "kaputt", "kaputt", "9.9.9")
+
+    stand = agent.bundled_stand(site)
+    pakete = (stand or {}).get("packages", {})
+
+    check("certifi erscheint mit seiner Fassung",
+          pakete.get("certifi") == "2026.10.23", pakete.get("certifi"))
+    check("urllib3 erscheint mit seiner Fassung",
+          pakete.get("urllib3") == "2.8.0", pakete.get("urllib3"))
+    check("der Name ist nach PEP 503 normalisiert",
+          pakete.get("charset-normalizer") == "3.5.1", sorted(pakete))
+    # Ausgelassen statt geraten: ein Verzeichnisname ohne Fassungsteil
+    # laesst sich nicht aufloesen, und eine Vermutung erzeugte im
+    # Vergleich gegen das Paket einen Hinweis, den niemand aufloesen kann.
+    check("ein nicht aufloesbares .dist-info wird ausgelassen",
+          "kaputt" not in pakete, sorted(pakete))
+    check("die Python-Fassung steht dabei",
+          (stand or {}).get("python") == platform.python_version(),
+          (stand or {}).get("python"))
+
+    leer = TMP / "site-leer"
+    leer.mkdir(parents=True, exist_ok=True)
+    stand_leer = agent.bundled_stand(leer)
+    check("ein leeres site-packages ergibt keine Pakete",
+          (stand_leer or {}).get("packages") == {}, stand_leer)
+
+    # Ohne Parameter: unter Linux gibt es nichts zu melden, dort kommt
+    # Python aus der Distribution. Die Reihe laeuft im Container, also
+    # ist IS_WINDOWS hier falsch.
+    if not agent.IS_WINDOWS:
+        check("ohne Windows meldet der Agent nichts",
+              agent.bundled_stand() is None, agent.bundled_stand())
+
+# Der Stand muss auch im Heartbeat landen - sonst sammelt der Agent
+# etwas ein, das nie ankommt. Geprueft wird am Quelltext, weil der
+# Heartbeat selbst ein Backend und eine Anmeldung braucht; die Wirkung
+# ueber HTTP prueft Teil 3.
+agent_quelle = (WURZEL / "agent" / "agent.py").read_text(encoding="utf-8")
+check("der Heartbeat traegt das Feld bundled",
+      '"bundled"' in agent_quelle, None)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
