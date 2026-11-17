@@ -206,6 +206,7 @@ REIHEN=(
   "health-info     $PY tests/health-info-test.py"
   "monitoring      $PY tests/monitoring-test.py"
   "agent-haertung  $PY tests/agent-haertung-test.py"
+  "agent-stand     $PY tests/agent-stand-test.py"
   "proxy-fallback  $PY tests/proxy-fallback-test.py"
   "license        $PY tests/license-test.py"
   "release-sig    $PY tests/release-sig-test.py"
