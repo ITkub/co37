@@ -77,7 +77,7 @@ RELEASE_KEY = HERE.parent / "backend" / "release_key.pub"
 # denselben Fassungen auf wie unter 3.12 - cffi und charset-normalizer
 # mit echten cp314-Raedern, cryptography ueber abi3. requirements.txt
 # musste dafuer nicht angefasst werden.
-PY_VERSION = "3.14.7"
+PY_VERSION = "3.14.10"
 PY_ZIP = f"python-{PY_VERSION}-embed-amd64.zip"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/{PY_ZIP}"
 
