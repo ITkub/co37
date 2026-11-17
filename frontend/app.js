@@ -570,6 +570,45 @@ function rebootNote(h){
   return t(h.auto_reboot ? "host.reboot_needed_allowed" : "host.reboot_needed") + why;
 }
 
+function bundledNote(h){
+  // Der Agent bringt unter Windows eine eigene Python-Laufzeit und acht
+  // Bibliotheken mit. Die Selbstaktualisierung tauscht nur agent.py aus -
+  // Laufzeit und Bibliotheken kommen allein ueber eine Neuinstallation
+  // des Pakets auf den Host. Ein Host mit aktueller Agent-Fassung kann
+  // also eine veraltete Laufzeit fahren.
+  //
+  // Bewusst OHNE Knopf. Der Knopf, der hier naheliegen wuerde, ist die
+  // Selbstaktualisierung, und die behebt genau das nicht: sie meldete
+  // Erfolg, und nichts waere besser. Das Paket muss neu installiert
+  // werden, und das sagt der Text.
+  //
+  // "unbekannt" erzeugt keinen Hinweis: dort landen jeder Linux-Host und
+  // jeder aeltere Windows-Agent, und ein Hinweis, der ueberall steht,
+  // wird nirgends gelesen.
+  if (h.bundled_state !== "abweichend") return null;
+  return t("note.bundled_outdated");
+}
+
+// Ein Eintrag aus bundled_diff als uebersetzte Zeile. Das Backend
+// schickt art/name/ist/soll, nicht den fertigen Satz - sonst stuende
+// deutsche Prosa im englischen Dialog. Dasselbe Muster wie bei
+// reboot_reasons, wo der Agent 'kernel' schickt.
+const BUNDLED_ART = {
+  anders: "note.bundled_diff_changed",
+  fehlt: "note.bundled_diff_missing",
+  zusaetzlich: "note.bundled_diff_extra",
+  python: "note.bundled_diff_python",
+};
+
+function bundledDiffText(e){
+  const key = BUNDLED_ART[e && e.art];
+  // Eine Art, die diese Fassung der Oberflaeche nicht kennt, wird
+  // weggelassen statt als Schluessel angezeigt: ein neuerer Server
+  // waere sonst in einem aelteren Frontend an dieser Stelle unlesbar.
+  if (!key) return null;
+  return t(key, { name: e.name, ist: e.ist || "", soll: e.soll || "" });
+}
+
 function stateOf(h){
   // Erreichbarkeit hat Vorrang vor einem laufenden Auftrag. Vorher stand
   // die Pruefung auf ACTIVE ganz oben: ein Host mit haengendem Auftrag
@@ -762,6 +801,8 @@ function renderUnit(h, i, admin, level = 0){
   // und umging dabei sowohl die Staffelung mit Pilot-Host als auch die Sperre
   // gegen doppelte Auftraege in _queue_selfupdate() (2026-08-29 entfernt).
   if (stale) notes.push(t("note.agent_outdated", { version: h.agent_version }));
+  const bn = bundledNote(h);
+  if (bn) notes.push(bn);
   if (PLANNED[h.id]) notes.push(t("note.reboot_planned", {
     zeit: PLANNED[h.id].toLocaleString(zeitSprache(),
       {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) }));
@@ -1276,6 +1317,18 @@ async function detail(id){
   const L = [];
   L.push(t("history.system", { os: h.os_version || "?", agent: h.agent_version || "?", ip: h.ip_address || "?" }));
   L.push(t("history.enrolled", { when: fmtTime(h.enrolled_at) }) + (h.enrolled_from_ip ? t("history.enrolled_from", { ip: h.enrolled_from_ip }) : ""));
+  // Welche Eintraege abweichen - hier und nicht in der Hostzeile: die
+  // Zeile sagt, DASS etwas abweicht, der Verlauf sagt, was. Ueber
+  // textContent weiter unten, nicht ueber innerHTML; die Angaben kommen
+  // vom Host und sind damit fremde Eingabe, auch wenn das Backend sie
+  // schon auf Zeichensatz und Menge geprueft hat.
+  if ((h.bundled_diff || []).length){
+    const zeilen = h.bundled_diff.map(bundledDiffText).filter(Boolean);
+    if (zeilen.length){
+      L.push("", t("note.bundled_detail") + ":");
+      zeilen.forEach(z => L.push("  " + z));
+    }
+  }
   L.push("", t("history.open_updates", { anzahl: ups.length }));
   ups.slice(0,80).forEach(u => L.push(`  ${u.is_security?t("history.security_marker"):"     "} ${u.package_id}  ${u.new_version||""}`));
   document.getElementById("log").textContent = L.join("\n");

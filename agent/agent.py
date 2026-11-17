@@ -508,6 +508,73 @@ def own_version() -> str:
     return AGENT_VERSION
 
 
+def _normname(name: str) -> str:
+    """
+    Paketnamen nach PEP 503 vergleichbar machen.
+
+    Dieselben zwei Zeilen stehen als normname() in packaging/build_msi.py.
+    Doppelt, und das ist hier unvermeidlich: der Agent bekommt packaging/
+    nicht mitgeliefert. Wer die eine aendert, aendert die andere mit -
+    sonst meldet der Server fuer gesunde Hosts Abweichungen.
+    """
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def bundled_stand(site_dir: Optional[Path] = None) -> Optional[dict]:
+    """
+    Was dieser Agent an eigener Laufzeit mitbringt: die Python-Fassung und
+    die Bibliotheken aus seinem site-packages.
+
+    Warum das ueberhaupt gemeldet wird: self_update() tauscht nur diese
+    Datei aus. Laufzeit und Raeder kommen allein ueber eine
+    Neuinstallation des Pakets auf den Host - ein Agent mit aktueller
+    AGENT_VERSION kann also eine veraltete Laufzeit fahren. Bis 0.50.1
+    war das nirgends sichtbar: der Server zeigte die Agent-Version und
+    hielt den Host fuer aktuell, waehrend dort ein Python mit offenen
+    Sicherheitskorrekturen lief.
+
+    Aufgezaehlt wird, was WIRKLICH daliegt - die .dist-info in
+    site-packages -, nicht eine im Quelltext hinterlegte Namensliste.
+    Eine solche Liste waere nach einer Selbstaktualisierung die Liste des
+    SERVERS und nicht der eigene Stand, und eine unerwartete zusaetzliche
+    Bibliothek bliebe damit unsichtbar.
+
+    Name und Fassung kommen aus dem Verzeichnisnamen, genau wie in
+    lies_installiert() in packaging/build_msi.py. Zwei verschieden
+    gewonnene Angaben zu vergleichen waere die Sorte Unterschied, die
+    erst beim Kunden auffaellt.
+
+    site_dir ist nur fuer die Pruefung da. Ohne Parameter liefert die
+    Funktion unter Linux None: dort kommt Python aus der Distribution und
+    CO-37 liefert nichts mit, es gibt also nichts zu melden.
+    """
+    if site_dir is None:
+        if not IS_WINDOWS:
+            return None
+        # Die Embeddable liegt unter <Installation>\python, die Raeder
+        # darin unter Lib\site-packages (packaging/build_msi.py:683).
+        site_dir = Path(sys.executable).resolve().parent / "Lib" / "site-packages"
+    pakete: dict[str, str] = {}
+    try:
+        eintraege = sorted(Path(site_dir).glob("*.dist-info"))
+    except OSError:
+        eintraege = []
+    for eintrag in eintraege:
+        name, _, fassung = eintrag.name[: -len(".dist-info")].rpartition("-")
+        # Ausgelassen statt geraten: ohne Fassungsteil im Namen liesse
+        # sich nur vermuten, und eine Vermutung erzeugt beim Vergleich
+        # gegen das Paket einen Hinweis, den niemand aufloesen kann.
+        if name and fassung:
+            pakete[_normname(name)] = fassung
+    return {"python": platform.python_version(), "packages": pakete}
+
+
+# Einmal beim Start, nicht bei jedem Heartbeat: der Inhalt von
+# site-packages aendert sich nur durch eine Neuinstallation, und die
+# startet den Agenten ohnehin neu.
+BUNDLED = bundled_stand()
+
+
 def _which(tool: str) -> bool:
     return shutil.which(tool) is not None
 
@@ -2261,6 +2328,13 @@ def main():
                 "boot_time": boot_time(),
                 "reboot_pending": REBOOT_PENDING,
             }
+            # Nur mitsenden, wenn es etwas zu melden gibt. Ein leeres
+            # Feld waere fuer den Server nicht von "alter Agent, meldet
+            # noch nichts" zu unterscheiden, und der Unterschied
+            # entscheidet, ob ein Host als unbekannt oder als abweichend
+            # gilt.
+            if BUNDLED:
+                payload["bundled"] = BUNDLED
             resp = api("POST", "/api/v1/agent/heartbeat", payload, timeout=60)
             interval = resp.get("poll_interval", interval)
 

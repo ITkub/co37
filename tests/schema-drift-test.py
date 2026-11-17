@@ -73,9 +73,9 @@ def host_einfuegen(conn, hostname, token="h", sortierung=0):
         "checkmk_downtime_all, auto_reboot, patch_enabled, "
         "patch_auto_reboot, patch_grace_hours, patch_followup_left, "
         "sort_order, created_at, tags, reboot_reasons, checkmk_hosts, "
-        "patch_days) "
+        "patch_days, bundled) "
         "VALUES (:h, :t, 'approved', 'ok', 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, "
-        "4, 0, :s, '2026-01-01 00:00:00', '[]', '[]', '[]', '[]')"),
+        "4, 0, :s, '2026-01-01 00:00:00', '[]', '[]', '[]', '[]', '{}')"),
         {"h": hostname, "t": token, "s": sortierung})
 
 

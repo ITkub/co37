@@ -11,6 +11,7 @@ Start:
 import hashlib
 import json
 import os
+import importlib.util
 import re
 import shutil
 import secrets
@@ -19,7 +20,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, get_args
+from typing import Any, Optional, get_args
 
 from fastapi import (
     Depends, FastAPI, File, Form, Header, HTTPException,
@@ -2285,6 +2286,14 @@ class HostRead(BaseModel):
     patch_followup_left: int = 0
     sort_order: int = 0
     area_id: Optional[int] = None
+    # Der gemeldete Stand der Agent-Laufzeit, als Urteil statt als
+    # Rohdaten: gleich, abweichend oder unbekannt. Die Oberflaeche soll
+    # nicht selbst vergleichen muessen - und sie soll vor allem nicht
+    # unbekannt mit abweichend verwechseln.
+    bundled_state: str = "unbekannt"
+    # Strukturiert, nicht als Satz - die Oberflaeche formatiert und
+    # uebersetzt. Je Eintrag: art, name, ist, soll.
+    bundled_diff: list[dict] = []
 
     model_config = {"from_attributes": True}
 
@@ -2506,6 +2515,238 @@ class AgentHeartbeat(BaseModel):
     # Der Agent hat bereits shutdown abgesetzt und wartet auf das
     # Herunterfahren. Es werden keine Auftraege mehr ausgeliefert.
     reboot_pending: bool = False
+    # Die eigene Laufzeit des Windows-Agents: Python-Fassung und die
+    # Bibliotheken aus seinem site-packages. Aeltere Agents und der
+    # Linux-Agent senden das Feld nicht; ein leeres Feld heisst deshalb
+    # "nichts gemeldet", nicht "nichts installiert".
+    #
+    # ABSICHTLICH Any und nicht dict: ein dict hier liesse Pydantic mit
+    # 422 antworten, BEVOR bundled_sauber() ueberhaupt laeuft - und ein
+    # Agent, der an seinem eigenen Heartbeat scheitert, meldet auch keine
+    # Updates und keinen ausstehenden Neustart mehr. Der Typ wird deshalb
+    # erst in bundled_sauber() geprueft, zusammen mit allem anderen.
+    bundled: Any = None
+
+
+# ----------------------------------------------------------------------
+# Der gemeldete Stand der Agent-Laufzeit
+# ----------------------------------------------------------------------
+# Eine freie Angabe aus dem Heartbeat, also angreifbare Eingabe. F-23 und
+# F-33 haben gezeigt, wie weit das reicht: ein beliebiges Geraet im Netz
+# kann sich anmelden (die Route ist absichtlich offen) und danach im
+# Heartbeat hostname, os_type, os_version, ip_address und agent_version
+# frei setzen. Fuer dieses Feld gilt dasselbe, und es landet zusaetzlich
+# in der Oberflaeche.
+#
+# Grenzen bewusst eng: mehr als 20 Eintraege kann ein CO-37-Paket nicht
+# mitbringen (es sind acht), Paketnamen folgen PEP 508, Fassungen PEP 440.
+# Ein Verstoss verwirft das GANZE Feld, statt einzelne Eintraege
+# wegzulassen: ein halb uebernommener Stand erzeugte eine Abweichung, die
+# niemand aufloesen kann.
+#
+# Und er verwirft nur das Feld, nicht den Heartbeat. Ein Agent, der an
+# seinem eigenen Heartbeat stirbt, meldet auch keine Updates mehr - der
+# Preis fuer eine 422 waere hier hoeher als der Nutzen.
+BUNDLED_MAX = 20
+BUNDLED_NAME = re.compile(r"^[A-Za-z0-9._-]{1,50}$")
+BUNDLED_FASSUNG = re.compile(r"^[A-Za-z0-9.+_-]{1,30}$")
+
+
+def bundled_sauber(raw) -> dict:
+    """
+    Prueft den gemeldeten Stand. Gibt ihn zurueck oder {} - nie eine Ausnahme.
+
+    {} heisst immer "nichts Verwertbares gemeldet" und wird vom Vergleich
+    als unbekannt behandelt, nicht als Abweichung.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    python = raw.get("python")
+    pakete = raw.get("packages")
+    if not isinstance(python, str) or not BUNDLED_FASSUNG.match(python):
+        return {}
+    if not isinstance(pakete, dict) or len(pakete) > BUNDLED_MAX:
+        return {}
+    for name, fassung in pakete.items():
+        if not isinstance(name, str) or not BUNDLED_NAME.match(name):
+            return {}
+        if not isinstance(fassung, str) or not BUNDLED_FASSUNG.match(fassung):
+            return {}
+    return {"python": python, "packages": dict(pakete)}
+
+
+# ----------------------------------------------------------------------
+# Vergleich: was der Host meldet gegen das, was das Paket mitbringt
+# ----------------------------------------------------------------------
+# Die Vergleichsgrundlage kommt aus packaging/build_msi.py und
+# agent/requirements.txt - denselben zwei Dateien, aus denen der Paketbau
+# selbst liest. Deshalb wird build_msi.py geladen statt nachgebaut: eine
+# zweite Auswertung derselben Dateien waere eine zweite Wahrheit, und
+# auseinandergelaufen faellt sie erst beim Kunden auf.
+#
+# Gueltig ist der Vergleich nur, wenn die gebaute MSI zum laufenden Stand
+# gehoert. Sonst zeigte der Hinweis in die falsche Richtung: die
+# Quelldateien sagten die neue Fassung, installierbar waere nur die alte,
+# und jeder Host bekaeme "Paket neu installieren" - eine Handlung, die
+# nichts aendert. Der Watcher baut nach jedem Update neu, laesst es aber
+# ausdruecklich aus, wenn wixl fehlt oder das Embeddable nicht ladbar ist.
+# Genau dann greift diese Sperre.
+BUILD_MSI_SRC = Path(__file__).resolve().parent.parent / "packaging" / "build_msi.py"
+AGENT_REQ_SRC = Path(__file__).resolve().parent.parent / "agent" / "requirements.txt"
+
+_paket_soll_cache: dict = {}
+
+
+def paket_soll(wurzel: Optional[Path] = None) -> Optional[dict]:
+    """
+    Was das aktuelle Paket mitbringen wuerde: Python-Fassung und Pins.
+
+    None heisst "nicht feststellbar" - fehlende Datei, nicht auswertbarer
+    Inhalt. Dann bleibt jeder Host unbekannt, statt dass eine Vermutung
+    zur Abweichung wird.
+
+    Zwischengespeichert ueber die Aenderungszeit beider Dateien: der
+    Inhalt aendert sich nur mit einem Update, die Frage stellt sich aber
+    bei jedem Abruf der Hostliste.
+
+    wurzel ist nur fuer die Pruefung da.
+    """
+    bm = (wurzel / "packaging" / "build_msi.py") if wurzel else BUILD_MSI_SRC
+    req = (wurzel / "agent" / "requirements.txt") if wurzel else AGENT_REQ_SRC
+    try:
+        stempel = (bm.stat().st_mtime_ns, req.stat().st_mtime_ns)
+    except OSError:
+        return None
+    schluessel = (str(bm), str(req))
+    gemerkt = _paket_soll_cache.get(schluessel)
+    if gemerkt and gemerkt[0] == stempel:
+        return gemerkt[1]
+    try:
+        spec = importlib.util.spec_from_file_location("co37_build_msi", bm)
+        modul = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modul)
+        pins = modul.lies_pins(req.read_text(encoding="utf-8"))
+        soll = {
+            "python": modul.PY_VERSION,
+            "packages": {modul.normname(n): v for n, v in pins.items()},
+        }
+    except (Exception, SystemExit):  # noqa: BLE001
+        # SystemExit ausdruecklich mit: build_msi.py ist ein
+        # Kommandozeilenskript und meldet Fehler mit 'raise SystemExit',
+        # unter anderem lies_pins() bei einer Zeile ohne feste Fassung.
+        # Das ist kein Exception, kaeme also hier vorbei - und riss in
+        # Starlette die ganze Hostliste mit. Eine schief geschriebene
+        # Zeile in agent/requirements.txt soll den Paketbau laut
+        # scheitern lassen, nicht den Hauptbildschirm.
+        soll = None
+    _paket_soll_cache[schluessel] = (stempel, soll)
+    return soll
+
+
+_paket_gebaut_cache: dict = {}
+
+
+def paket_gebaut_aktuell(verzeichnis: Optional[Path] = None,
+                         version: str = "") -> bool:
+    """
+    Gehoert die gebaute MSI zum laufenden Stand?
+
+    Dieselbe Frage, die die Selbstpruefung unter "Windows-Paket" stellt,
+    und dieselbe Antwort: der Dateiname traegt die Agent-Version. Stimmt
+    sie, wurde das Paket aus diesem Quellstand gebaut.
+
+    Gemerkt ueber die Aenderungszeiten von agent/agent.py und des
+    Paketverzeichnisses - zwei stat()-Aufrufe statt agent.py ganz zu
+    lesen. Das ist kein Feinschliff: agent_source_version() liest die
+    Datei vollstaendig (rund 97 KB), und die Hostliste fragt je Host.
+    Bei 300 Hosts und einem Abruf alle 15 Sekunden je offenem Browser
+    waeren das rund 29 MB Dateilesen pro Abruf.
+
+    Mit ausdruecklichen Argumenten (Pruefung) wird nicht gemerkt.
+    """
+    if verzeichnis is not None or version:
+        pfad = verzeichnis or paketverzeichnis()
+        want = version or agent_source_version()
+        return _paket_passt(pfad, want)
+    pfad = paketverzeichnis()
+    try:
+        stempel = (AGENT_SRC.stat().st_mtime_ns,
+                   pfad.stat().st_mtime_ns if pfad.is_dir() else 0)
+    except OSError:
+        stempel = None
+    gemerkt = _paket_gebaut_cache.get("stand")
+    if stempel is not None and gemerkt and gemerkt[0] == stempel:
+        return gemerkt[1]
+    antwort = _paket_passt(pfad, agent_source_version())
+    if stempel is not None:
+        _paket_gebaut_cache["stand"] = (stempel, antwort)
+    return antwort
+
+
+def _paket_passt(pfad: Path, want: str) -> bool:
+    if not want or want == "unbekannt" or not pfad.is_dir():
+        return False
+    return any(p.name.endswith(".msi") and want in p.name
+               for p in pfad.glob("co37-agent*"))
+
+
+def bundled_abweichungen(ist: dict, soll: dict) -> list[dict]:
+    """
+    Beide Richtungen, wie in pruefe_vendorstand() im Paketbau.
+
+    Fehlt etwas, ist der Host nicht nachgezogen; liegt etwas zusaetzlich
+    da, gehoert es nicht zum Paket - der Fall, der ohne diese Richtung
+    gar nicht auffiele.
+
+    Strukturiert und NICHT als fertiger Satz: die Oberflaeche ist
+    vollstaendig zweisprachig, und deutsche Prosa aus dem Backend stuende
+    im englischen Dialog mitten im uebersetzten Text. Dasselbe Muster wie
+    bei reboot_reasons - der Agent schickt 'kernel', rebootNote()
+    uebersetzt es.
+
+    art ist eines von: anders, fehlt, zusaetzlich, python.
+    """
+    eintraege = []
+    for name in sorted(set(ist) | set(soll)):
+        hat, will = ist.get(name), soll.get(name)
+        if hat is None:
+            art = "fehlt"
+        elif will is None:
+            art = "zusaetzlich"
+        elif hat != will:
+            art = "anders"
+        else:
+            continue
+        eintraege.append({"art": art, "name": name, "ist": hat, "soll": will})
+    return eintraege
+
+
+def bundled_vergleich(host) -> tuple[str, list[str]]:
+    """
+    Zustand des gemeldeten Stands: gleich, abweichend oder unbekannt.
+
+    unbekannt ist ausdruecklich NICHT abweichend. Ein Host, von dem man es
+    nicht weiss, darf keinen Hinweis erzeugen - sonst stuende er bei jedem
+    Linux-Agenten und jedem aelteren Windows-Agenten da, und ein Hinweis,
+    der ueberall steht, wird nirgends gelesen.
+    """
+    if getattr(host, "os_type", None) != OSType.windows:
+        return "unbekannt", []
+    ist = host.bundled if isinstance(host.bundled, dict) else {}
+    ist_pakete = ist.get("packages")
+    if not isinstance(ist_pakete, dict) or not ist_pakete:
+        return "unbekannt", []
+    soll = paket_soll()
+    if not soll or not paket_gebaut_aktuell():
+        return "unbekannt", []
+    eintraege = bundled_abweichungen(ist_pakete, soll.get("packages", {}))
+    ist_python, soll_python = ist.get("python"), soll.get("python")
+    if ist_python and soll_python and ist_python != soll_python:
+        # Die Laufzeit zuerst: sie ist der Grund, aus dem es dieses Feld
+        # ueberhaupt gibt.
+        eintraege.insert(0, {"art": "python", "name": "python",
+                             "ist": ist_python, "soll": soll_python})
+    return ("abweichend" if eintraege else "gleich"), eintraege
 
 
 # ----------------------------------------------------------------------
@@ -2860,6 +3101,20 @@ def agent_heartbeat(
     # sofort aus - und still, weil der Agent den Fehler nur in seine
     # eigene Protokolldatei schreibt.
     host.last_seen_secure = request_is_https(request)
+
+    # Der gemeldete Stand der Agent-Laufzeit. Zwei Dinge daran:
+    #
+    # Nur bei Aenderung schreiben. Der Inhalt bleibt wochenlang gleich -
+    # bei jedem Heartbeat eine Schreiboperation anzustossen waere ein
+    # Schreibvorgang je Host und Minute fuer nichts.
+    #
+    # Und ein leeres Ergebnis schreibt NICHTS. Ein aelterer Agent sendet
+    # das Feld nicht, der Linux-Agent auch nicht; wuerde das den schon
+    # gemeldeten Stand loeschen, wechselte ein Host bei jedem Wechsel der
+    # Agent-Fassung zwischen bekannt und unbekannt.
+    gemeldet = bundled_sauber(payload.bundled)
+    if gemeldet and gemeldet != host.bundled:
+        host.bundled = gemeldet
 
     # Auch hier pruefen: der Heartbeat darf den Namen aendern, und ohne
     # diese Zeile liesse sich die Pruefung bei der Anmeldung umgehen -
@@ -3896,6 +4151,7 @@ def list_hosts(session: Session = Depends(get_session)):
     for h in hosts:
         data = HostRead.model_validate(h)
         data.next_patch_run = next_patch_run(h)
+        data.bundled_state, data.bundled_diff = bundled_vergleich(h)
         out.append(data)
     return out
 
@@ -5144,6 +5400,22 @@ def diagnostics():
         None if has_msi else
         ("apt install -y wixl, danach: bash build_packages.sh" if not wixl
          else "cd /opt/co37 && bash build_packages.sh"))
+    # Die Grundlage, gegen die der gemeldete Stand der Agent-Laufzeit
+    # verglichen wird. Ohne sie steht jeder Host auf "unbekannt", und
+    # unbekannt erzeugt an der Hostzeile planmaessig keinen Hinweis -
+    # "alle aktuell" waere dann von "Vergleich nicht moeglich" nicht zu
+    # unterscheiden. Deshalb hier, und nicht neben "Windows-Paket": das
+    # ist eine andere Frage, auch wenn beide das Paket betreffen.
+    _soll = paket_soll()
+    add("Vergleichsgrundlage der Agent-Laufzeit", _soll is not None,
+        f"Paket bringt Python {_soll['python']} und "
+        f"{len(_soll['packages'])} Bibliotheken" if _soll
+        else "packaging/build_msi.py oder agent/requirements.txt nicht "
+             "auswertbar - der gemeldete Stand der Hosts wird nicht "
+             "verglichen",
+        None if _soll else
+        "Beide Dateien pruefen: python3 tools/pin-hashes.py zeigt, ob "
+        "sie lesbar sind.")
     add("Keine veralteten Pakete", not stale,
         "aufgeraeumt" if not stale else f"veraltet: {', '.join(stale)}",
         None if not stale else "cd /opt/co37 && bash build_packages.sh")

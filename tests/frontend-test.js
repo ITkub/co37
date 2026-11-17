@@ -239,6 +239,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
+  + "bundledNote, bundledDiffText, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
@@ -1872,6 +1873,58 @@ global.setTimeout = origSetTimeout;
     check("roStart benutzt dieselbe Funktion",
           ro > 0 && appjs.slice(ro, ro + 200).includes("rolloutStarten("),
           appjs.slice(ro, ro + 120));
+  }
+
+  // ====================================================================
+  // Der gemeldete Stand der Agent-Laufzeit
+  // ====================================================================
+  // Eine reine Funktion statt einer Zeichenkettensuche: ein Aufruf
+  // belegt Verhalten, eine gefundene Zeichenkette belegt nur, dass
+  // jemand etwas hingeschrieben hat.
+  //
+  // Der wichtigste Fall ist "unbekannt": ein Linux-Host und jeder
+  // aeltere Windows-Agent landen dort, und wuerde das einen Hinweis
+  // erzeugen, stuende er bei fast jedem Host - ein Hinweis, der
+  // ueberall steht, wird nirgends gelesen.
+  if (typeof api.bundledNote === "function") {
+    check("bundledNote: abweichend ergibt einen Hinweis",
+          typeof api.bundledNote({ bundled_state: "abweichend" }) === "string"
+          && api.bundledNote({ bundled_state: "abweichend" }).length > 0,
+          api.bundledNote({ bundled_state: "abweichend" }));
+    check("bundledNote: gleich ergibt keinen",
+          api.bundledNote({ bundled_state: "gleich" }) === null);
+    check("bundledNote: unbekannt ergibt keinen",
+          api.bundledNote({ bundled_state: "unbekannt" }) === null);
+    check("bundledNote: ein Host ohne das Feld ergibt keinen",
+          api.bundledNote({}) === null);
+    // Kein Knopf: die Selbstaktualisierung behebt das gerade NICHT, und
+    // ein Knopf, der Erfolg meldet und nichts aendert, waere schlimmer
+    // als kein Hinweis.
+    const hinweis = api.bundledNote({ bundled_state: "abweichend" });
+    check("der Hinweis traegt kein data-act",
+          !/data-act/.test(hinweis), hinweis);
+
+    // Die Einzelheiten kommen strukturiert vom Backend und werden HIER
+    // formatiert - sonst stuende deutsche Prosa im englischen Dialog.
+    const faelle = [
+      ["anders", { art: "anders", name: "certifi", ist: "2026.7.22", soll: "2026.10.23" }],
+      ["fehlt", { art: "fehlt", name: "certifi", ist: null, soll: "2026.10.23" }],
+      ["zusaetzlich", { art: "zusaetzlich", name: "neunte", ist: "1.0", soll: null }],
+      ["python", { art: "python", name: "python", ist: "3.14.7", soll: "3.14.10" }],
+    ];
+    for (const [art, e] of faelle) {
+      const zeile = api.bundledDiffText(e);
+      check(`bundledDiffText: ${art} ergibt uebersetzten Text`,
+            typeof zeile === "string" && zeile.length > 0
+            && !zeile.startsWith("note."), zeile);
+      check(`bundledDiffText: ${art} nennt den Namen`,
+            zeile.includes(e.name === "python" ? "ython" : e.name), zeile);
+    }
+    check("bundledDiffText: unbekannte Art ergibt keinen Text",
+          api.bundledDiffText({ art: "irgendwas", name: "x" }) === null,
+          api.bundledDiffText({ art: "irgendwas", name: "x" }));
+  } else {
+    check("bundledNote() ist exportiert", false, typeof api.bundledNote);
   }
 
   console.log(`\nFehler: ${fails}`);
