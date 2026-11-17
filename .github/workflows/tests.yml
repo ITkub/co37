@@ -1,4 +1,4 @@
-# CO-37 - Pruefreihen bei jedem Push auf main.
+# CO-37 - Pruefreihen bei jedem Push auf main und bei jedem Pull Request.
 #
 # Baut und signiert NICHTS. Der private Signaturschluessel gehoert nicht
 # in die Repository-Secrets; ein Release entsteht weiterhin von Hand auf
@@ -17,6 +17,14 @@ name: Tests
 
 on:
   push:
+    branches: [main]
+  # Auch auf Pull Requests, und zwar aus dem Grund, der am 2026-11-17
+  # aufgefallen ist: der erste PR dieses Repositorys lief durch, ohne
+  # dass eine einzige Reihe angelaufen waere - geprueft war er nur in
+  # einer fremden Umgebung, auf deren Wort man sich verlassen musste.
+  # Der Lauf baut und signiert nichts und braucht nur Lesezugriff, ist
+  # also auch auf einem PR unbedenklich.
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
