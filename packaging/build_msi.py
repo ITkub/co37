@@ -26,6 +26,7 @@ Aufruf:
 """
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -570,6 +571,52 @@ def lies_hashes(text: str) -> dict[str, list[str]]:
     return hashes
 
 
+def laufzeit_liste(python_dir: Path, version: str) -> dict:
+    """
+    Verzeichnis der mitgelieferten Laufzeit: je Datei Groesse und SHA-256.
+
+    Der Agent prueft damit beim Start, ob noch alles da ist, was dieses
+    Paket hineingelegt hat. Anlass war der 2026-11-18: nach einem
+    Upgrade fehlte certifi/cacert.pem, der Agent lief in einen
+    TLS-Fehler, und sichtbar war davon nur "seit X Minuten nicht
+    gesehen".
+
+    UNSIGNIERT, und das ist kein Versehen. Die MSI entsteht bei Kunden
+    ueber den Watcher auf dem Server, wo weder tools/sign-release.py
+    (F-45 nimmt tools/ aus dem Paket) noch ein privater Schluessel
+    liegt. Wer das Installationsverzeichnis beschreiben kann, kann auch
+    diese Liste aendern - sie erkennt Unfaelle, keine Angreifer, und
+    darf nirgends anders beschrieben werden.
+
+    Die Schluessel sind klein geschrieben und tragen "/" als Trenner.
+    Erzeugt wird die Liste unter Linux, verglichen wird unter Windows:
+    dort ist das Dateisystem bei Gross- und Kleinschreibung
+    unempfindlich und der Trenner ein anderer. Ohne diese
+    Vereinheitlichung meldete JEDER gesunde Host JEDE Datei als fehlend.
+
+    __pycache__ bleibt draussen: das entsteht erst zur Laufzeit auf dem
+    Host und waere damit eine Abweichung, die niemand aufloesen kann.
+
+    Blockweise gelesen - python314.zip ist mehrere Megabyte gross.
+    """
+    dateien: dict[str, dict] = {}
+    for pfad in sorted(python_dir.rglob("*")):
+        if not pfad.is_file():
+            continue
+        teile = pfad.relative_to(python_dir).parts
+        if "__pycache__" in teile:
+            continue
+        summe = hashlib.sha256()
+        with pfad.open("rb") as fh:
+            for block in iter(lambda: fh.read(1024 * 1024), b""):
+                summe.update(block)
+        dateien["/".join(teile).lower()] = {
+            "groesse": pfad.stat().st_size,
+            "sha256": summe.hexdigest(),
+        }
+    return {"version": version, "dateien": dateien}
+
+
 def lies_installiert(site_dir: Path) -> dict[str, str]:
     """Liest aus den .dist-info-Ordnern, was wirklich in site-packages liegt."""
     gefunden: dict[str, str] = {}
@@ -781,6 +828,25 @@ def build(version: str, out_dir: Path) -> Path:
             "Oder ausdruecklich ohne:  CO37_OHNE_SIGNATUR=ja ...")
     (work / "install_task.py").write_text(TASK_SCRIPT, encoding="utf-8")
     (work / "uninstall_task.py").write_text(UNINSTALL_SCRIPT, encoding="utf-8")
+
+    # Verzeichnis der mitgelieferten Laufzeit, gegen das der Agent beim
+    # Start prueft. Zwei Dinge daran sind nicht beliebig:
+    #
+    # Es liegt NEBEN python/, nicht darin. Eine Liste in ihrem eigenen
+    # Pruefbereich enthielte sich selbst und aenderte damit ihren eigenen
+    # Hash - sie waere nach dem ersten Schreiben dauerhaft falsch.
+    #
+    # Und es entsteht hier, VOR add_tree(). Danach waere die Datei nicht
+    # mehr im Paket, und der Agent faende auf dem Host nichts zum
+    # Vergleichen vor.
+    verzeichnis = laufzeit_liste(work / "python", version)
+    (work / "laufzeit.json").write_text(
+        json.dumps(verzeichnis, indent=1, sort_keys=True), encoding="utf-8")
+    # Ins Bauprotokoll, aus demselben Grund wie bei den Bibliotheken: ohne
+    # diese Zeile gibt es auf "was hat der Bau erfasst" keine Antwort
+    # ausser nachsehen.
+    print(f"    Laufzeitverzeichnis: {len(verzeichnis['dateien'])} Dateien "
+          "(unsigniert - erkennt Unfaelle, keine Angreifer)")
 
     # ------------------------------------------------------------------
     # WiX-Beschreibung erzeugen

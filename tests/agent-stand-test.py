@@ -17,6 +17,7 @@ Teil 1 laeuft ohne Backend-Prozess und ohne Netz.
 
     python3 tests/agent-stand-test.py
 """
+import hashlib
 import os
 import sqlite3
 import sys
@@ -414,8 +415,11 @@ if all(hasattr(main, n) for n in
     # naechste Anhebung von PY_VERSION diese Reihe rot ohne Befund -
     # dieselbe Objektion wie oben bei SCHEMA_VERSION.
     import re as _re  # noqa: E402
-    _bm = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
-    PY_ERWARTET = _re.search(r'^PY_VERSION = "([^"]+)"', _bm, _re.M).group(1)
+    # Eigener Name: _bm ist oben das geladene Modul, und eine Zuweisung
+    # hier ueberschrieb es fuer alles, was danach kommt - ein spaeterer
+    # Teil fand dann eine Zeichenkette statt des Moduls vor.
+    _bm_quelle = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+    PY_ERWARTET = _re.search(r'^PY_VERSION = "([^"]+)"', _bm_quelle, _re.M).group(1)
     PINS_ERWARTET = len([z for z in
                          (WURZEL / "agent" / "requirements.txt")
                          .read_text(encoding="utf-8").splitlines()
@@ -645,6 +649,60 @@ if all(hasattr(main, n) for n in
           "bundled_state" in main.HostRead.model_fields)
     check("HostRead traegt bundled_diff",
           "bundled_diff" in main.HostRead.model_fields)
+
+print("\n--- Teil 5: der Bau schreibt die Laufzeitliste ---")
+
+# Die Liste ist die Vergleichsgrundlage, gegen die der Agent seine eigene
+# Laufzeit prueft. Sie entsteht beim Packen unter Linux, verglichen wird
+# unter Windows - Pfadtrenner und Schreibweise muessen deshalb schon hier
+# vereinheitlicht sein. Ohne das meldet jeder gesunde Host jede Datei als
+# fehlend, und das ist der Fehlalarm, der Waechter abschaltet.
+BAUM = TMP / "paketbaum" / "python"
+CERTIFI = BAUM / "Lib" / "site-packages" / "certifi"
+(CERTIFI / "__pycache__").mkdir(parents=True, exist_ok=True)
+(BAUM / "python314.dll").write_bytes(b"abc")
+(CERTIFI / "cacert.pem").write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+(CERTIFI / "__pycache__" / "core.cpython-314.pyc").write_bytes(b"\x00\x01")
+
+if not hasattr(_bm, "laufzeit_liste"):
+    # Bewusst kein Zugriff ins Leere: ein AttributeError wuerde die Reihe
+    # abbrechen und die Teile 1 bis 4 mit verschlucken.
+    check("laufzeit_liste() gibt es im Paketbau", False, "Funktion fehlt")
+    liste = {"version": None, "dateien": {}}
+else:
+    check("laufzeit_liste() gibt es im Paketbau", True)
+    liste = _bm.laufzeit_liste(BAUM, "0.52.0")
+
+check("Liste nennt die Paketfassung", liste["version"] == "0.52.0", liste["version"])
+check("Pfade mit / und klein geschrieben",
+      "python314.dll" in liste["dateien"]
+      and "lib/site-packages/certifi/cacert.pem" in liste["dateien"],
+      sorted(liste["dateien"]))
+check("Groesse und sha256 je Datei",
+      liste["dateien"].get("python314.dll", {}).get("groesse") == 3
+      and liste["dateien"].get("python314.dll", {}).get("sha256")
+          == hashlib.sha256(b"abc").hexdigest(),
+      liste["dateien"].get("python314.dll"))
+# Beide Pruefungen verlangen ausdruecklich eine nicht leere Liste: sonst
+# waeren sie gruen, weil nichts erfasst wurde - gruen aus dem falschen
+# Grund, genau die Sorte Pruefung aus dem Befund vom 2026-11-12.
+check("__pycache__ bleibt draussen",
+      bool(liste["dateien"])
+      and not any("__pycache__" in pfad for pfad in liste["dateien"]),
+      sorted(liste["dateien"]))
+check("die Liste enthaelt sich selbst nicht",
+      bool(liste["dateien"])
+      and not any("laufzeit.json" in pfad for pfad in liste["dateien"]),
+      sorted(liste["dateien"]))
+
+# Dass die Datei auch ins Paket kommt, prueft die Reihe am Quelltext: ein
+# vollstaendiger build()-Lauf braucht wixl und Netz. Die eigentliche
+# Gegenprobe ist der Bau auf dem Baurechner samt seiner Protokollzeile.
+bm_quelle = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+check("der Bau schreibt laufzeit.json", "laufzeit.json" in bm_quelle)
+check("und zwar vor add_tree",
+      "laufzeit.json" in bm_quelle and "tree = add_tree(work)" in bm_quelle
+      and bm_quelle.index("laufzeit.json") < bm_quelle.index("tree = add_tree(work)"))
 
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
