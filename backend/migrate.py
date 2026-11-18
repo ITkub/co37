@@ -295,18 +295,23 @@ def migrate(engine: Engine) -> dict:
         #
         # 'area' kam mit 0.36.1 dazu und fehlt in aelteren Datenbanken,
         # deshalb die Abfrage auf die Tabelle.
+        # Je Spalte der Vorgabewert, nicht pauschal '[]': bundled traegt
+        # ein Objekt. Mit der falschen Klammer waere die Spalte zwar
+        # gefuellt, aber jeder Leser bekaeme eine Liste, wo er ein
+        # Objekt erwartet - und der Fehler faellt erst beim Kunden auf.
         for tabelle, spalten in (
-                ("host", ("checkmk_hosts", "tags", "patch_days",
-                          "reboot_reasons")),
-                ("area", ("checkmk_hosts", "patch_days"))):
+                ("host", (("checkmk_hosts", "[]"), ("tags", "[]"),
+                          ("patch_days", "[]"), ("reboot_reasons", "[]"),
+                          ("bundled", "{}"))),
+                ("area", (("checkmk_hosts", "[]"), ("patch_days", "[]")))):
             if tabelle not in tables:
                 continue
             vorhanden = _columns(conn, tabelle)
-            for col in spalten:
+            for col, vorgabe in spalten:
                 if col not in vorhanden:
                     continue
                 conn.execute(text(
-                    f"UPDATE {tabelle} SET {col} = '[]' "
+                    f"UPDATE {tabelle} SET {col} = '{vorgabe}' "
                     f"WHERE {col} IS NULL OR {col} = '' OR {col} = 'null'"
                 ))
 

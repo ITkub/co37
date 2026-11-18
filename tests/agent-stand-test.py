@@ -105,6 +105,68 @@ check("Host.bundled steht im Modell",
       "bundled" in models.Host.model_fields,
       sorted(models.Host.model_fields)[:5])
 
+print("\n--- Teil 1b: die Spalte bleibt nicht als Abweichung stehen ---")
+
+# Gemessen am 2026-11-17 auf der Anlage: nach dem Aufstieg meldete
+# migrate.py --pruefen dauerhaft "host.bundled: Datenbank sagt NULL
+# erlaubt, Modell sagt NOT NULL".
+#
+# Der Grund: ALTER TABLE ADD COLUMN ergaenzt die Spalte ohne NOT NULL.
+# angleichen() baut die Tabelle bei jedem Start auf die Form des Modells
+# um - aber _tabelle_angleichen() weigert sich zu Recht, solange eine
+# Pflichtspalte leer ist. Vorbelegt werden sie an genau EINER Stelle in
+# migrate.py, und die zaehlte die Spalten fest auf; bundled fehlte dort.
+#
+# Die Vorrichtung von Teil 1 taugt dafuer nicht: sie ist absichtlich
+# duenn, und der Umbau scheitert dort an ganz anderen Spalten. Deshalb
+# hier die Lage der echten Anlage nachgebaut - vollstaendige Tabelle,
+# nur bundled nullbar, wie nach einem ALTER TABLE.
+DB2 = TMP / "angleichen.db"
+os.environ["CO37_DB"] = f"sqlite:///{DB2}"
+motor2 = create_engine(os.environ["CO37_DB"])
+SQLModel.metadata.create_all(motor2)
+
+SPALTEN = ("hostname, status, agent_token_hash, created_at, tags, "
+           "reboot_reasons, checkmk_hosts, patch_days, bundled, "
+           "updates_available, security_updates, reboot_required, "
+           "updates_require_reboot, downtime_minutes, checkmk_downtime_all, "
+           "auto_reboot, patch_enabled, patch_auto_reboot, "
+           "patch_grace_hours, patch_followup_left, sort_order, "
+           "approval_state, last_seen_secure")
+WERTE = ("'bestand','ok','h','2026-01-01 00:00:00','[]','[]','[]','[]',NULL,"
+         "0,0,0,0,30,0,0,0,0,4,0,1,'approved',0")
+
+conn = sqlite3.connect(DB2)
+ddl = [r[0] for r in conn.execute(
+    "SELECT sql FROM sqlite_master WHERE name='host'")][0]
+check("das Modell legt bundled als NOT NULL an",
+      "bundled JSON NOT NULL" in ddl, ddl[:80])
+conn.executescript(ddl.replace("CREATE TABLE host", "CREATE TABLE host_alt")
+                      .replace("bundled JSON NOT NULL", "bundled JSON") + ";")
+conn.executescript("DROP TABLE host;")
+conn.executescript("ALTER TABLE host_alt RENAME TO host;")
+conn.execute(f"INSERT INTO host ({SPALTEN}) VALUES ({WERTE})")
+conn.execute("UPDATE setting SET value='25' WHERE key='schema_version'")
+conn.commit()
+conn.close()
+
+vorher = [z for z in migrate.schema_abweichungen(motor2) if "bundled" in z]
+check("die Lage ist nachgebaut: bundled weicht vorher ab", bool(vorher), vorher)
+
+bericht = migrate.migrate(motor2)
+check("der Umbau meldet keine Probleme",
+      not bericht.get("problems"), bericht.get("problems"))
+check("host.bundled steht danach nicht mehr als Abweichung da",
+      not [z for z in migrate.schema_abweichungen(motor2) if "bundled" in z],
+      [z for z in migrate.schema_abweichungen(motor2) if "bundled" in z])
+
+conn = sqlite3.connect(DB2)
+check("und der Bestandshost traegt ein leeres Objekt, keine leere Liste",
+      conn.execute("SELECT bundled FROM host").fetchone()[0] == "{}",
+      conn.execute("SELECT bundled FROM host").fetchone())
+conn.close()
+
+
 print("\n--- Teil 2: der Agent sammelt seinen Stand ein ---")
 
 import importlib.util  # noqa: E402
