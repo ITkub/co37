@@ -2835,16 +2835,22 @@ def laufzeit_zustand(host) -> tuple[str, list[dict]]:
     if not isinstance(befund, dict) or befund.get("zustand") not in LAUFZEIT_ZUSTAENDE:
         return "unbekannt", []
     zustand = befund["zustand"]
-    if zustand != "unvollstaendig":
-        return zustand, []
-    eintraege = [{"art": "fehlt", "name": name}
-                 for name in befund.get("fehlend", []) if isinstance(name, str)]
-    eintraege += [{"art": "anders", "name": name}
-                  for name in befund.get("abweichend", []) if isinstance(name, str)]
-    mehr = befund.get("mehr") or 0
-    if isinstance(mehr, int) and not isinstance(mehr, bool) and mehr > 0:
-        # Die gekappten Treffer gehen nicht verloren, sie werden gezaehlt.
-        eintraege.append({"art": "mehr", "name": str(mehr)})
+    eintraege = []
+    if zustand == "unvollstaendig":
+        eintraege = [{"art": "fehlt", "name": name}
+                     for name in befund.get("fehlend", []) if isinstance(name, str)]
+        eintraege += [{"art": "anders", "name": name}
+                      for name in befund.get("abweichend", []) if isinstance(name, str)]
+        mehr = befund.get("mehr") or 0
+        if isinstance(mehr, int) and not isinstance(mehr, bool) and mehr > 0:
+            # Die gekappten Treffer gehen nicht verloren, sie werden gezaehlt.
+            eintraege.append({"art": "mehr", "name": str(mehr)})
+    # Der Rueckfall auf den Zertifikatsspeicher des Systems gehoert in die
+    # Einzelheiten, und zwar unabhaengig vom Zustand: er sagt, dass die
+    # Meldung nur auf Umwegen hereinkam. Ein BEFUND ist er nicht - sonst
+    # stuende in jeder Anlage mit eigener CA ein Dauerhinweis.
+    if befund.get("rueckfall") is True:
+        eintraege.append({"art": "rueckfall", "name": ""})
     return zustand, eintraege
 
 

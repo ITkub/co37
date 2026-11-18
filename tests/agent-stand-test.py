@@ -1020,6 +1020,16 @@ if hasattr(main, "laufzeit_zustand"):
                                           "liste": ""}))[0] == "unpruefbar")
     check("ohne Feld ist der Zustand unbekannt",
           main.laufzeit_zustand(host_mit(None))[0] == "unbekannt")
+    # Der Rueckfall auf den Zertifikatsspeicher des Systems gehoert in die
+    # Einzelheiten, aber er ist KEIN Befund: der Zustand bleibt, was er
+    # ist, und die Hostzeile bekommt davon keinen Hinweis. Sonst stuende
+    # ein Dauerhinweis bei jeder Anlage mit eigener CA.
+    _ok_rueckfall = {"zustand": "ok", "fehlend": [], "abweichend": [],
+                     "mehr": 0, "liste": "0.51.2", "rueckfall": True}
+    check("der Rueckfall erscheint als Eintrag",
+          main.laufzeit_zustand(host_mit(_ok_rueckfall))
+          == ("ok", [{"art": "rueckfall", "name": ""}]),
+          main.laufzeit_zustand(host_mit(_ok_rueckfall)))
     check("ein Linux-Host bleibt unbekannt",
           main.laufzeit_zustand(host_mit(befund, windows=False))[0] == "unbekannt")
 
