@@ -841,5 +841,113 @@ check("der Befund haengt am gemeldeten Stand",
 check("der Heartbeat traegt das Feld laufzeit nur mit Befund",
       '"laufzeit"' in agent_quelle)
 
+print("\n--- Teil 7: Rueckfall auf den Zertifikatsspeicher des Systems ---")
+
+# Der belegte Fall vom 2026-11-18: cacert.pem fehlt, der TLS-Aufbau
+# scheitert, und der Agent kommt mit seinem Befund nicht zum Server. Eine
+# Selbstpruefung, deren Meldung genau dann nicht ankommt, ist wirkungslos.
+#
+# Geprueft ohne Netz: requests im Agenten wird durch eine Attrappe
+# ersetzt, die beim ersten Aufruf SSLError wirft.
+_echte_requests = agent.requests
+
+
+class _Antwort:
+    status_code = 200
+    content = b"{}"
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {}
+
+
+class _SitzungAttrappe:
+    def __init__(self, ziel):
+        self.ziel = ziel
+        self.gemountet = []
+
+    def mount(self, prefix, adapter):
+        self.gemountet.append((prefix, adapter))
+
+    def request(self, method, url, **kw):
+        return self.ziel.request(method, url, **kw)
+
+
+class _ReqAttrappe:
+    exceptions = _echte_requests.exceptions
+    adapters = _echte_requests.adapters
+
+    def __init__(self, fehler_bei=(1,)):
+        self.aufrufe = 0
+        self.alle = []
+        self.sitzungen = []
+        self.fehler_bei = set(fehler_bei)
+
+    def request(self, method, url, **kw):
+        self.aufrufe += 1
+        self.alle.append({"method": method, "url": url, "kwargs": kw})
+        if self.aufrufe in self.fehler_bei:
+            raise self.exceptions.SSLError("Buendel unbrauchbar")
+        return _Antwort()
+
+    def Session(self):
+        s = _SitzungAttrappe(self)
+        self.sitzungen.append(s)
+        return s
+
+
+def mit_attrappe(fehler_bei):
+    """Einen api()-Aufruf gegen die Attrappe fahren. Gibt (Attrappe, Fehler) zurueck."""
+    attrappe = _ReqAttrappe(fehler_bei)
+    agent.requests = attrappe
+    agent.RUECKFALL_AKTIV = False
+    fehler = None
+    try:
+        agent.api("GET", "/api/v1/ping", auth=False)
+    except Exception as exc:  # noqa: BLE001
+        fehler = exc
+    finally:
+        agent.requests = _echte_requests
+    return attrappe, fehler
+
+
+if not hasattr(agent, "RUECKFALL_AKTIV"):
+    check("der Agent kennt einen Rueckfall", False, "RUECKFALL_AKTIV fehlt")
+else:
+    check("der Agent kennt einen Rueckfall", True)
+
+    a1, f1 = mit_attrappe((1,))
+    check("nach SSLError wird genau einmal wiederholt", a1.aufrufe == 2, a1.aufrufe)
+    check("die Wiederholung laeuft ueber eine eigene Sitzung",
+          len(a1.sitzungen) == 1 and any(p.startswith("https")
+                                         for p, _ in a1.sitzungen[0].gemountet),
+          [s.gemountet for s in a1.sitzungen])
+    # Die Kernbedingung: der Rueckfall darf die Pruefung nicht abschwaechen.
+    check("die Wiederholung prueft weiterhin",
+          all(auf["kwargs"].get("verify") is not False for auf in a1.alle),
+          [auf["kwargs"].get("verify") for auf in a1.alle])
+    check("der Rueckfall wird vermerkt", agent.RUECKFALL_AKTIV is True)
+    check("der erste Aufruf war erfolgreich beantwortet", f1 is None, f1)
+
+    a2, f2 = mit_attrappe(())
+    check("ohne SSLError kein Rueckfall",
+          agent.RUECKFALL_AKTIV is False and a2.aufrufe == 1,
+          (agent.RUECKFALL_AKTIV, a2.aufrufe))
+
+    a3, f3 = mit_attrappe((1, 2))
+    check("ein zweiter SSLError wird durchgelassen",
+          isinstance(f3, _echte_requests.exceptions.SSLError), f3)
+    check("und nicht ein drittes Mal versucht", a3.aufrufe == 2, a3.aufrufe)
+
+check("verify=False steht nirgends im Agenten",
+      "verify=False" not in agent_quelle and "verify = False" not in agent_quelle)
+# Der Rueckfall greift erst beim Senden, also traegt ihn der naechste
+# Heartbeat - geprueft am Quelltext, weil der Heartbeat ein Backend und
+# eine Anmeldung braucht. Die Wirkung ueber HTTP prueft Teil 3.
+check("der Heartbeat vermerkt einen Rueckfall",
+      '"rueckfall"' in agent_quelle)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

@@ -19,6 +19,7 @@ import platform
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ from typing import Optional
 
 import urllib3
 import requests
+from requests.adapters import HTTPAdapter
 
 AGENT_VERSION = "0.51.2"
 IS_WINDOWS = platform.system() == "Windows"
@@ -277,15 +279,72 @@ def set_token(token: str):
     sichere_rechte(CFG_PATH)
 
 
+# Hat der Rueckfall auf den Zertifikatsspeicher des Systems schon einmal
+# gegriffen? Wird mitgemeldet, damit er nicht still zur Dauerloesung wird.
+RUECKFALL_AKTIV = False
+
+
+class _SystemspeicherAdapter(HTTPAdapter):
+    """
+    Verbindet ueber die Wurzelzertifikate des BETRIEBSSYSTEMS statt ueber
+    das mitgelieferte Buendel.
+
+    Der Umweg ueber einen Adapter ist nicht Geschmackssache: requests
+    nimmt bei verify True, False oder einen Pfad - keinen SSLContext. Und
+    ein Pfad hilft hier nicht, denn der Windows-Zertifikatsspeicher ist
+    keine Datei. ssl.create_default_context() liest ihn (ROOT), und der
+    Kontext kommt nur ueber den PoolManager herein.
+
+    Geprueft wird weiter. Der Rueckfall wechselt die Vertrauensquelle, er
+    schaltet nichts ab.
+    """
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = ssl.create_default_context()
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def _systemspeicher_session():
+    """
+    Eine Sitzung fuer den Rueckfall. Bewusst ohne Zwischenspeicher: der
+    Fall tritt selten ein, und eine aufgehobene Sitzung waere Zustand,
+    der sich in den Pruefreihen zwischen zwei Faellen mitschleppt.
+    """
+    sitzung = requests.Session()
+    sitzung.mount("https://", _SystemspeicherAdapter())
+    return sitzung
+
+
 def api(method: str, path: str, payload=None, params=None, timeout=120, auth=True):
+    global RUECKFALL_AKTIV
     url = f"{SERVER}{path}"
     headers = dict(HEADERS)
     if auth:
         headers["X-Agent-Token"] = TOKEN
-    resp = requests.request(
-        method, url, json=payload, params=params,
-        headers=headers, verify=VERIFY, timeout=timeout,
-    )
+    argumente = dict(json=payload, params=params, headers=headers,
+                     verify=VERIFY, timeout=timeout)
+    try:
+        resp = requests.request(method, url, **argumente)
+    except requests.exceptions.SSLError:
+        # Am 2026-11-18 fehlte auf einem Host certifi/cacert.pem. Der
+        # Agent konnte damit nicht mehr melden, dass ihm etwas fehlt -
+        # die Selbstpruefung waere genau im belegten Fall wirkungslos
+        # gewesen. Deshalb EINMAL wiederholen, ueber die
+        # Wurzelzertifikate des Betriebssystems.
+        #
+        # Ausgeloest wird das am gescheiterten Aufbau und nicht an der
+        # Dateipruefung: eine abgeschnittene, aber lesbare PEM faellt
+        # durch jede Lesbarkeitspruefung und scheitert erst hier.
+        #
+        # Scheitert auch die Wiederholung, fliegt die Ausnahme weiter.
+        # Ein dritter Versuch waere nur eine Verzoegerung.
+        if not RUECKFALL_AKTIV:
+            log("TLS-Aufbau mit dem mitgelieferten Zertifikatsbuendel "
+                "gescheitert - Wiederholung ueber den Zertifikatsspeicher "
+                "des Systems. Die mitgelieferte Laufzeit ist vermutlich "
+                "unvollstaendig.", err=True)
+        RUECKFALL_AKTIV = True
+        resp = _systemspeicher_session().request(method, url, **argumente)
     resp.raise_for_status()
     return resp.json() if resp.content else {}
 
@@ -2489,6 +2548,12 @@ def main():
             # entscheidet, ob ein Host als unbekannt oder als abweichend
             # gilt.
             if BUNDLED:
+                # Der Rueckfall greift erst beim Senden, diese Nutzlast ist
+                # also schon unterwegs, wenn er zuschlaegt. Vermerkt wird er
+                # beim naechsten Heartbeat - und bis dahin steht die Ursache
+                # im lokalen Protokoll.
+                if RUECKFALL_AKTIV and isinstance(BUNDLED.get("laufzeit"), dict):
+                    BUNDLED["laufzeit"]["rueckfall"] = True
                 payload["bundled"] = BUNDLED
             resp = api("POST", "/api/v1/agent/heartbeat", payload, timeout=60)
             interval = resp.get("poll_interval", interval)
