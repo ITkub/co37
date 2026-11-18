@@ -584,9 +584,22 @@ Installation als Downgrade verweigerte. Eine Nummer für alles beseitigt beides.
 Nach jedem Release melden die Agents daher eine abweichende Version und lassen
 sich über *Alle veralteten Agents aktualisieren* mit einem Klick nachziehen.
 
-Bereits ausgerollte Agents brauchen kein neues Paket: sie aktualisieren sich
-über den Knopf **Agent** bzw. *Alle veralteten Agents aktualisieren*. Der
-Neubau ist nur für **neue** Installationen nötig.
+Bereits ausgerollte Agents holen sich den neuen Agent-Code selbst — über den
+Knopf **Agent** bzw. *Alle veralteten Agents aktualisieren*. Ersetzt wird
+dabei `agent.py`, und nur das.
+
+**Unter Windows genügt das nicht, wenn sich die mitgelieferte Laufzeit
+geändert hat.** Das MSI-Paket bringt ein eigenes CPython samt Bibliotheken
+unter `C:\Program Files\CO37\python` mit, und die Selbstaktualisierung fasst
+dieses Verzeichnis nicht an. Steigt dort eine Fassung — Python selbst,
+`certifi`, `requests`, `urllib3` —, muss die neue MSI auf jedem Host
+installiert werden, auch auf längst laufenden. Die Hostliste weist seit
+0.51.0 darauf hin: *Paketupdate - Agent muss neu installiert werden*. Unter
+Linux stellt sich die Frage nicht; dort nutzt der Agent das Python der
+Distribution.
+
+Der Neubau des Pakets ist also für **neue** Installationen nötig und immer
+dann, wenn sich die mitgelieferte Laufzeit ändert.
 
 ---
 
