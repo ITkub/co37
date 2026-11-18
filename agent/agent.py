@@ -569,10 +569,165 @@ def bundled_stand(site_dir: Optional[Path] = None) -> Optional[dict]:
     return {"python": platform.python_version(), "packages": pakete}
 
 
+LAUFZEIT_LISTE = "laufzeit.json"
+# Mehr Eintraege nuetzen niemandem und wuerden bei jedem Heartbeat
+# mitreisen: fehlt python\ ganz, sind es mehrere hundert.
+LAUFZEIT_MAX_MELDUNG = 10
+
+
+def _laufzeit_vorhanden(basis: Path) -> dict:
+    """
+    Was wirklich unter python\ liegt, mit denselben Schluesseln wie die
+    Liste: klein geschrieben, "/" als Trenner, __pycache__ ausgelassen.
+
+    Dieselbe Aufzaehlung steht als laufzeit_liste() in
+    packaging/build_msi.py. Doppelt, und das ist hier unvermeidlich: der
+    Agent bekommt packaging/ nicht mitgeliefert - dieselbe Lage wie bei
+    _normname(). Wer die eine aendert, aendert die andere mit, sonst
+    meldet jeder gesunde Host Abweichungen.
+
+    Verglichen wird ueber das AUFGEZAEHLTE Verzeichnis und nicht ueber
+    einen Pfadzugriff mit dem Schluessel: unter Windows findet ein
+    kleingeschriebener Pfad die Datei, auf jedem anderen System nicht -
+    und die Pruefreihen laufen unter Linux.
+    """
+    gefunden: dict[str, Path] = {}
+    try:
+        eintraege = sorted(basis.rglob("*"))
+    except OSError:
+        return gefunden
+    for pfad in eintraege:
+        try:
+            if not pfad.is_file():
+                continue
+            teile = pfad.relative_to(basis).parts
+        except OSError:
+            continue
+        if "__pycache__" in teile:
+            continue
+        gefunden["/".join(teile).lower()] = pfad
+    return gefunden
+
+
+def _cacert_brauchbar(pfad: Path) -> bool:
+    """
+    Fuer cacert.pem reicht Plausibilitaet, und zwar mit Absicht.
+
+    Eine interne CA an das mitgelieferte Buendel zu haengen ist ein
+    dokumentierter Eingriff (REVERSE-PROXY.md). Auf Groesse oder
+    Pruefsumme geprueft waere jede solche Anlage dauerhaft auffaellig -
+    und ein Hinweis, der immer steht, wird nicht gelesen.
+    """
+    try:
+        text = pfad.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "-----BEGIN CERTIFICATE-----" in text
+
+
+def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
+    """
+    Ist die mitgelieferte Laufzeit noch die, die das Paket hineingelegt
+    hat? Vergleicht python\ gegen laufzeit.json aus demselben Paket.
+
+    Anlass war der 2026-11-18: nach einem MSI-Upgrade fehlte
+    certifi/cacert.pem, der Agent lief in einen TLS-Fehler, und im
+    Backend war davon nur "seit X Minuten nicht gesehen" zu sehen. Die
+    Ursache ist bis heute nicht reproduziert; diese Pruefung behebt sie
+    nicht, sie macht den Schaden sichtbar - egal woher er kommt.
+
+    Die Liste ist UNSIGNIERT. Wer das Installationsverzeichnis
+    beschreiben kann, kann sie auch aendern: das hier erkennt Unfaelle,
+    keine Angreifer.
+
+    zustand ist eines von:
+      ok             - alles da und unveraendert
+      unvollstaendig - mindestens eine Datei fehlt oder weicht ab
+      unpruefbar     - keine oder keine lesbare Liste. Ausdruecklich
+                       NICHT "ok": eine Pruefung, die nichts angesehen
+                       hat, darf nicht gruen melden. Ausdruecklich auch
+                       kein Hinweis in der Hostzeile - am Tag der
+                       Veroeffentlichung hat kein Host die neue MSI.
+
+    Ohne wurzel unter Linux None: dort kommt Python aus der Distribution,
+    CO-37 liefert keine Laufzeit mit, und es gibt nichts zu melden.
+    wurzel ist nur fuer die Pruefung da.
+    """
+    if wurzel is None:
+        if not IS_WINDOWS:
+            return None
+        wurzel = Path(__file__).resolve().parent
+    wurzel = Path(wurzel)
+    leer = {"zustand": "unpruefbar", "fehlend": [], "abweichend": [],
+            "mehr": 0, "liste": ""}
+    try:
+        roh = json.loads((wurzel / LAUFZEIT_LISTE).read_text(encoding="utf-8"))
+        soll = roh["dateien"]
+        if not isinstance(soll, dict):
+            raise ValueError("dateien ist kein Verzeichnis")
+        fassung = str(roh.get("version", ""))
+    except Exception:  # noqa: BLE001
+        # Der Agent darf an seiner eigenen Pruefung nicht sterben.
+        return leer
+
+    vorhanden = _laufzeit_vorhanden(wurzel / "python")
+    fehlend, abweichend = [], []
+    for schluessel, erwartet in sorted(soll.items()):
+        name = str(schluessel).replace("\\", "/").lower()
+        pfad = vorhanden.get(name)
+        if pfad is None:
+            fehlend.append(name)
+            continue
+        if name.rsplit("/", 1)[-1] == "cacert.pem":
+            if not _cacert_brauchbar(pfad):
+                abweichend.append(name)
+            continue
+        if not isinstance(erwartet, dict):
+            abweichend.append(name)
+            continue
+        try:
+            if pfad.stat().st_size != erwartet.get("groesse"):
+                abweichend.append(name)
+                continue
+            summe = hashlib.sha256()
+            with pfad.open("rb") as fh:
+                for block in iter(lambda: fh.read(1024 * 1024), b""):
+                    summe.update(block)
+        except OSError:
+            abweichend.append(name)
+            continue
+        if summe.hexdigest() != erwartet.get("sha256"):
+            abweichend.append(name)
+
+    mehr = max(0, len(fehlend) - LAUFZEIT_MAX_MELDUNG) \
+        + max(0, len(abweichend) - LAUFZEIT_MAX_MELDUNG)
+    return {
+        "zustand": "unvollstaendig" if (fehlend or abweichend) else "ok",
+        "fehlend": fehlend[:LAUFZEIT_MAX_MELDUNG],
+        "abweichend": abweichend[:LAUFZEIT_MAX_MELDUNG],
+        "mehr": mehr,
+        "liste": fassung,
+    }
+
+
 # Einmal beim Start, nicht bei jedem Heartbeat: der Inhalt von
 # site-packages aendert sich nur durch eine Neuinstallation, und die
 # startet den Agenten ohnehin neu.
 BUNDLED = bundled_stand()
+LAUFZEIT = laufzeit_pruefen()
+if BUNDLED is not None and LAUFZEIT is not None:
+    BUNDLED["laufzeit"] = LAUFZEIT
+    if LAUFZEIT["zustand"] == "unvollstaendig":
+        # Im Klartext und ins Protokoll, nicht nur an den Server: am
+        # 2026-11-18 stand an dieser Stelle ein TLS-Fehler, und bis
+        # jemand ihn als fehlende Datei gelesen hatte, war eine Stunde
+        # vergangen.
+        log("Die mitgelieferte Laufzeit ist unvollstaendig. Fehlend: "
+            + (", ".join(LAUFZEIT["fehlend"]) or "-")
+            + "; abweichend: " + (", ".join(LAUFZEIT["abweichend"]) or "-")
+            + (f"; weitere {LAUFZEIT['mehr']}" if LAUFZEIT["mehr"] else "")
+            + ". Das Paket muss repariert werden: msiexec /fa <ProductCode> "
+              "/qn REBOOT=ReallySuppress", err=True)
 
 
 def _which(tool: str) -> bool:

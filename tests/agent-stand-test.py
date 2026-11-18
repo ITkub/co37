@@ -704,5 +704,142 @@ check("und zwar vor add_tree",
       "laufzeit.json" in bm_quelle and "tree = add_tree(work)" in bm_quelle
       and bm_quelle.index("laufzeit.json") < bm_quelle.index("tree = add_tree(work)"))
 
+print("\n--- Teil 6: der Agent prueft seine Laufzeit ---")
+
+import itertools  # noqa: E402
+
+_inst_zaehler = itertools.count(1)
+FUELLER = 14  # mehr als die Kappungsgrenze von 10, fuer den Massenfall
+
+
+def bau(loeschen=None, kuerzen=None, tauschen=None, anhaengen=None, leeren=None,
+        ohne_liste=False, liste_text=None, liste_version=None,
+        trenner="/", gross=False) -> Path:
+    """
+    Ein Installationsverzeichnis nachbauen, wie die MSI es hinterlaesst:
+    python/ mit Dateien, laufzeit.json daneben.
+
+    Die Liste entsteht ueber laufzeit_liste() aus dem Paketbau und nicht
+    von Hand - zwei verschieden gewonnene Listen zu vergleichen waere die
+    Sorte Unterschied, die erst beim Kunden auffaellt.
+    """
+    wurzel = TMP / f"inst{next(_inst_zaehler)}"
+    py = wurzel / "python"
+    certifi = py / "Lib" / "site-packages" / "certifi"
+    certifi.mkdir(parents=True)
+    (py / "python314.dll").write_bytes(b"abcdef")
+    (certifi / "cacert.pem").write_text(
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        encoding="utf-8")
+    for nr in range(FUELLER):
+        (py / f"modul{nr}.pyd").write_bytes(b"x" * (nr + 1))
+
+    verzeichnis = _bm.laufzeit_liste(py, liste_version or "0.52.0")
+
+    # Erst die Liste, dann der Schaden - sonst beschreibt die Liste
+    # bereits den beschaedigten Stand und es gibt nichts zu finden.
+    if loeschen:
+        ziel = wurzel / loeschen
+        shutil.rmtree(ziel) if ziel.is_dir() else ziel.unlink()
+    if kuerzen:
+        (wurzel / kuerzen).write_bytes(b"a")
+    if tauschen:
+        alt = (wurzel / tauschen).read_bytes()
+        (wurzel / tauschen).write_bytes(b"z" * len(alt))
+    if anhaengen:
+        with (wurzel / anhaengen).open("a", encoding="utf-8") as fh:
+            fh.write("-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n")
+    if leeren:
+        (wurzel / leeren).write_text("", encoding="utf-8")
+
+    if trenner != "/":
+        verzeichnis["dateien"] = {k.replace("/", trenner): v
+                                  for k, v in verzeichnis["dateien"].items()}
+    if gross:
+        verzeichnis["dateien"] = {k.upper(): v
+                                  for k, v in verzeichnis["dateien"].items()}
+
+    if not ohne_liste:
+        (wurzel / "laufzeit.json").write_text(
+            liste_text if liste_text is not None else json.dumps(verzeichnis),
+            encoding="utf-8")
+    return wurzel
+
+
+def pruef(wurzel):
+    if not hasattr(agent, "laufzeit_pruefen"):
+        return {"zustand": "(fehlt)", "fehlend": [], "abweichend": [], "mehr": 0}
+    return agent.laufzeit_pruefen(wurzel)
+
+
+import json  # noqa: E402
+
+check("laufzeit_pruefen() gibt es im Agenten", hasattr(agent, "laufzeit_pruefen"))
+check("vollstaendig ist ok", pruef(bau())["zustand"] == "ok", pruef(bau()))
+
+_fehlt = pruef(bau(loeschen="python/python314.dll"))
+check("fehlende Datei ist ein Befund", _fehlt["zustand"] == "unvollstaendig", _fehlt)
+check("die fehlende Datei wird benannt",
+      "python314.dll" in " ".join(_fehlt["fehlend"]), _fehlt["fehlend"])
+
+check("abgeschnittene Datei ist ein Befund",
+      pruef(bau(kuerzen="python/python314.dll"))["zustand"] == "unvollstaendig")
+# Gleiche Groesse, anderer Inhalt: das ist der Fall, den ein Vergleich
+# ohne Pruefsumme nicht sieht.
+check("veraenderte Datei bei gleicher Groesse ist ein Befund",
+      pruef(bau(tauschen="python/python314.dll"))["zustand"] == "unvollstaendig")
+
+check("fehlende Liste ist unpruefbar",
+      pruef(bau(ohne_liste=True))["zustand"] == "unpruefbar")
+check("kaputte Liste ist unpruefbar",
+      pruef(bau(liste_text="{kein json"))["zustand"] == "unpruefbar")
+check("Liste ohne dateien-Schluessel ist unpruefbar",
+      pruef(bau(liste_text='{"version": "0.52.0"}'))["zustand"] == "unpruefbar")
+
+# Der Normalfall nach einer Selbstaktualisierung: neuer Agent, alte
+# Liste. Das ist KEIN Befund - dafuer gibt es den Hinweis auf die
+# Paketfassung seit 0.51.0.
+check("aeltere Liste nach Selbstaktualisierung bleibt ok",
+      pruef(bau(liste_version="0.40.0"))["zustand"] == "ok")
+
+# Eine interne CA an das Buendel zu haengen ist ein dokumentierter
+# Eingriff (REVERSE-PROXY.md). Ein Dauerbefund dafuer waere der
+# Fehlalarm, der Waechter abschaltet.
+check("cacert.pem mit angehaengter CA bleibt ok",
+      pruef(bau(anhaengen="python/Lib/site-packages/certifi/cacert.pem"))["zustand"]
+      == "ok")
+check("fehlendes cacert.pem ist ein Befund",
+      pruef(bau(loeschen="python/Lib/site-packages/certifi/cacert.pem"))["zustand"]
+      == "unvollstaendig")
+check("leeres cacert.pem ist ein Befund",
+      pruef(bau(leeren="python/Lib/site-packages/certifi/cacert.pem"))["zustand"]
+      == "unvollstaendig")
+
+# Die Liste entsteht unter Linux, verglichen wird unter Windows: ohne
+# Vereinheitlichung meldete jeder gesunde Host jede Datei als fehlend.
+check("Pfadtrenner der Liste spielen keine Rolle",
+      pruef(bau(trenner="\\"))["zustand"] == "ok",
+      pruef(bau(trenner="\\")))
+check("Grossschreibung in der Liste spielt keine Rolle",
+      pruef(bau(gross=True))["zustand"] == "ok", pruef(bau(gross=True)))
+
+_viele = pruef(bau(loeschen="python"))
+check("viele Treffer werden gekappt",
+      len(_viele["fehlend"]) <= 10 and _viele["mehr"] > 0,
+      (len(_viele["fehlend"]), _viele["mehr"]))
+
+# Unter Linux liefert die Pruefung ohne Parameter None, und der Heartbeat
+# sendet dann nichts: sonst stuende bei jedem Linux-Host "unpruefbar".
+check("ohne Parameter meldet ein Nicht-Windows-Agent nichts",
+      not hasattr(agent, "laufzeit_pruefen") and False
+      or (agent.laufzeit_pruefen() is None if (hasattr(agent, "laufzeit_pruefen")
+                                               and not agent.IS_WINDOWS) else
+          hasattr(agent, "laufzeit_pruefen")))
+
+check("der Befund haengt am gemeldeten Stand",
+      not agent.IS_WINDOWS or "laufzeit" in (agent.BUNDLED or {}))
+check("der Heartbeat traegt das Feld laufzeit nur mit Befund",
+      '"laufzeit"' in agent_quelle)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
