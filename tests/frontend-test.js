@@ -1904,6 +1904,17 @@ global.setTimeout = origSetTimeout;
     check("der Hinweis traegt kein data-act",
           !/data-act/.test(hinweis), hinweis);
 
+    // Laenge festgenagelt: der Hinweis steht in der Hostzeile hinter dem
+    // Namen. Die erste Fassung war 83 Zeichen lang und schob die Zeile
+    // ab - was abweicht, steht ohnehin im Verlauf, die Zeile braucht
+    // nur die Handlung zu nennen.
+    for (const sprache of ["de", "en"]) {
+      api.setzeSprache(sprache);
+      const text = api.bundledNote({ bundled_state: "abweichend" });
+      check(`der Hinweis bleibt kurz (${sprache}, <= 50 Zeichen)`,
+            text.length <= 50, `${text.length}: ${text}`);
+    }
+
     // Die Einzelheiten kommen strukturiert vom Backend und werden HIER
     // formatiert - sonst stuende deutsche Prosa im englischen Dialog.
     const faelle = [
