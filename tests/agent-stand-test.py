@@ -399,6 +399,38 @@ with TestClient(main.app) as klient:
         check("ein Heartbeat ohne das Feld laesst den Stand stehen",
               gespeichert() == gut, gespeichert())
 
+        # Der Laufzeitbefund reist im selben Feld mit. Missgebildet darf
+        # er NUR sich selbst verwerfen: ein Host mit krummem Befund soll
+        # nicht auch seine Paketliste verlieren. Und keine 422 - ein
+        # Agent, der an seinem eigenen Heartbeat scheitert, meldet auch
+        # nichts anderes mehr (Befund C-1 vom 2026-11-17).
+        for was, wert in (("Liste", ["a"]),
+                          ("Zeichenkette", "kaputt"),
+                          ("Zahl", 7),
+                          ("null", None),
+                          ("unbekannter Zustand", {"zustand": "kaputt"}),
+                          ("fehlend als Zeichenkette",
+                           {"zustand": "ok", "fehlend": "a"}),
+                          ("zu viele Eintraege",
+                           {"zustand": "unvollstaendig",
+                            "fehlend": [f"d{i}" for i in range(99)]})):
+            r = heartbeat({**gut, "laufzeit": wert})
+            check(f"Heartbeat bleibt 200 mit krummer Laufzeit: {was}",
+                  r.status_code == 200, (r.status_code, r.text[:120]))
+            check(f"die Paketliste bleibt erhalten: {was}",
+                  (gespeichert() or {}).get("packages") == gut["packages"],
+                  gespeichert())
+            check(f"der krumme Befund wird verworfen: {was}",
+                  "laufzeit" not in (gespeichert() or {}), gespeichert())
+
+        befund = {"zustand": "unvollstaendig",
+                  "fehlend": ["lib/site-packages/certifi/cacert.pem"],
+                  "abweichend": [], "mehr": 0, "liste": "0.51.2",
+                  "rueckfall": True}
+        r = heartbeat({**gut, "laufzeit": befund})
+        check("ein gueltiger Laufzeitbefund landet am Host",
+              (gespeichert() or {}).get("laufzeit") == befund, gespeichert())
+
 print("\n--- Teil 4: Vergleich gegen das aktuelle Paket ---")
 
 for name in ("paket_soll", "paket_gebaut_aktuell", "bundled_abweichungen",
@@ -948,6 +980,102 @@ check("verify=False steht nirgends im Agenten",
 # eine Anmeldung braucht. Die Wirkung ueber HTTP prueft Teil 3.
 check("der Heartbeat vermerkt einen Rueckfall",
       '"rueckfall"' in agent_quelle)
+
+print("\n--- Teil 8: das Backend urteilt nicht selbst, es prueft Grenzen ---")
+
+
+def host_mit(laufzeit, windows=True):
+    """Ein Host-Doppel. Mehr braucht laufzeit_zustand() nicht."""
+    bundled = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+    if laufzeit is not None:
+        bundled["laufzeit"] = laufzeit
+    return type("HostDoppel", (), {
+        "os_type": main.OSType.windows if windows else main.OSType.linux,
+        "bundled": bundled})()
+
+
+GUT = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+
+check("laufzeit_zustand() gibt es", hasattr(main, "laufzeit_zustand"))
+
+if hasattr(main, "laufzeit_zustand"):
+    befund = {"zustand": "unvollstaendig",
+              "fehlend": ["lib/site-packages/certifi/cacert.pem"],
+              "abweichend": ["python314.dll"], "mehr": 3, "liste": "0.51.2"}
+    zustand, eintraege = main.laufzeit_zustand(host_mit(befund))
+    check("unvollstaendig kommt durch", zustand == "unvollstaendig", zustand)
+    check("fehlende und abweichende Dateien werden benannt",
+          any(e["art"] == "fehlt" and "cacert.pem" in e["name"] for e in eintraege)
+          and any(e["art"] == "anders" and e["name"] == "python314.dll"
+                  for e in eintraege), eintraege)
+    check("die gekappten Treffer tauchen als eigener Eintrag auf",
+          any(e["art"] == "mehr" for e in eintraege), eintraege)
+    check("ok ergibt keinen Eintrag",
+          main.laufzeit_zustand(host_mit({"zustand": "ok", "fehlend": [],
+                                          "abweichend": [], "mehr": 0,
+                                          "liste": "0.51.2"})) == ("ok", []))
+    check("unpruefbar bleibt unpruefbar",
+          main.laufzeit_zustand(host_mit({"zustand": "unpruefbar", "fehlend": [],
+                                          "abweichend": [], "mehr": 0,
+                                          "liste": ""}))[0] == "unpruefbar")
+    check("ohne Feld ist der Zustand unbekannt",
+          main.laufzeit_zustand(host_mit(None))[0] == "unbekannt")
+    check("ein Linux-Host bleibt unbekannt",
+          main.laufzeit_zustand(host_mit(befund, windows=False))[0] == "unbekannt")
+
+    # Der Befund ist host-lokale Wahrheit: er braucht KEINE
+    # Vergleichsgrundlage auf dem Server. Sonst waere er auf jedem Server
+    # ohne frisch gebaute MSI unsichtbar - und das sind genau die Server,
+    # auf denen etwas im Argen ist.
+    echt_soll = main.paket_soll
+    try:
+        main.paket_soll = lambda *a, **k: None
+        check("der Zustand haengt nicht an paket_soll()",
+              main.laufzeit_zustand(host_mit(befund))[0] == "unvollstaendig")
+    finally:
+        main.paket_soll = echt_soll
+
+if hasattr(main, "bundled_sauber"):
+    laufzeit_gut = {"zustand": "unvollstaendig", "fehlend": ["a"],
+                    "abweichend": [], "mehr": 0, "liste": "0.51.2",
+                    "rueckfall": False}
+    check("ein gueltiger Befund kommt durch bundled_sauber()",
+          main.bundled_sauber({**GUT, "laufzeit": laufzeit_gut})
+          .get("laufzeit") == laufzeit_gut,
+          main.bundled_sauber({**GUT, "laufzeit": laufzeit_gut}))
+    check("ohne Befund bleibt das Feld weg",
+          main.bundled_sauber(GUT) == GUT, main.bundled_sauber(GUT))
+    krumm = {
+        "unbekannter Zustand": {"zustand": "halbgut"},
+        "fehlend keine Liste": {"zustand": "ok", "fehlend": "a"},
+        "Eintrag keine Zeichenkette": {"zustand": "ok", "fehlend": [7]},
+        "Eintrag zu lang": {"zustand": "ok", "fehlend": ["x" * 300]},
+        "zu viele Eintraege": {"zustand": "ok",
+                               "fehlend": [f"d{i}" for i in range(11)]},
+        "mehr als Zeichenkette": {"zustand": "ok", "mehr": "viele"},
+        "rueckfall als Zeichenkette": {"zustand": "ok", "rueckfall": "ja"},
+        "Liste statt Verzeichnis": ["ok"],
+        "Zeichenkette": "ok",
+    }
+    for was, wert in krumm.items():
+        ergebnis = main.bundled_sauber({**GUT, "laufzeit": wert})
+        check(f"verworfen, aber nur die Laufzeit: {was}",
+              "laufzeit" not in ergebnis
+              and ergebnis.get("packages") == GUT["packages"], ergebnis)
+    # Die Grenze selbst, nicht nur ein Stueck weit daneben.
+    check("genau zehn Eintraege sind erlaubt",
+          "laufzeit" in main.bundled_sauber(
+              {**GUT, "laufzeit": {"zustand": "unvollstaendig",
+                                   "fehlend": [f"d{i}" for i in range(10)]}}))
+
+check("HostRead traegt laufzeit_state", "laufzeit_state" in main.HostRead.model_fields)
+check("HostRead traegt laufzeit_diff", "laufzeit_diff" in main.HostRead.model_fields)
+check("die Hostliste fuellt die beiden Felder",
+      "laufzeit_state" in (WURZEL / "backend" / "main.py").read_text(encoding="utf-8"))
+check("die Diagnoseseite nennt die Laufzeitpruefung",
+      any("aufzeit" in c["name"] and "Vergleichsgrundlage" not in c["name"]
+          for c in main.diagnostics()["checks"]),
+      [c["name"] for c in main.diagnostics()["checks"]])
 
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

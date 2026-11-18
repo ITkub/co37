@@ -2294,6 +2294,13 @@ class HostRead(BaseModel):
     # Strukturiert, nicht als Satz - die Oberflaeche formatiert und
     # uebersetzt. Je Eintrag: art, name, ist, soll.
     bundled_diff: list[dict] = []
+    # Der Laufzeitbefund, und zwar als EIGENES Feld. Ein Host kann
+    # gleichzeitig eine veraltete Paketfassung und eine unvollstaendige
+    # Laufzeit haben; ein gemeinsames Feld haette den einen Hinweis den
+    # anderen verdecken lassen.
+    laufzeit_state: str = "unbekannt"
+    # Je Eintrag: art (fehlt, anders, mehr), name.
+    laufzeit_diff: list[dict] = []
 
     model_config = {"from_attributes": True}
 
@@ -2551,6 +2558,56 @@ BUNDLED_MAX = 20
 BUNDLED_NAME = re.compile(r"^[A-Za-z0-9._-]{1,50}$")
 BUNDLED_FASSUNG = re.compile(r"^[A-Za-z0-9.+_-]{1,30}$")
 
+# Grenzen fuer den Laufzeitbefund. Der Agent kappt seine Listen selbst auf
+# zehn Eintraege je Richtung; hier steht dieselbe Zahl, weil ein
+# uebernommener Host den Heartbeat frei bestimmt und die Grenze nicht beim
+# Absender liegen darf.
+LAUFZEIT_ZUSTAENDE = {"ok", "unvollstaendig", "unpruefbar"}
+LAUFZEIT_MAX = 10
+LAUFZEIT_PFAD = re.compile(r"^[A-Za-z0-9 ._/\\+-]{1,200}$")
+LAUFZEIT_MEHR_MAX = 100000
+
+
+def laufzeit_sauber(raw) -> dict:
+    """
+    Prueft den gemeldeten Laufzeitbefund. Gibt ihn zurueck oder {}.
+
+    Das Backend urteilt NICHT selbst: ob die Laufzeit vollstaendig ist,
+    kann nur der Host wissen, der seine Dateien sieht. Hier werden
+    ausschliesslich Grenzen geprueft.
+
+    {} verwirft genau dieses Feld und nicht die ganze Meldung - ein Host
+    mit krummem Befund soll nicht auch seine Paketliste verlieren.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    zustand = raw.get("zustand")
+    if zustand not in LAUFZEIT_ZUSTAENDE:
+        return {}
+    listen = {}
+    for schluessel in ("fehlend", "abweichend"):
+        werte = raw.get(schluessel, [])
+        if not isinstance(werte, list) or len(werte) > LAUFZEIT_MAX:
+            return {}
+        for wert in werte:
+            if not isinstance(wert, str) or not LAUFZEIT_PFAD.match(wert):
+                return {}
+        listen[schluessel] = list(werte)
+    mehr = raw.get("mehr", 0)
+    # bool ist in Python ein int - ohne diese Zeile kaeme True als 1 durch.
+    if isinstance(mehr, bool) or not isinstance(mehr, int) \
+            or not 0 <= mehr <= LAUFZEIT_MEHR_MAX:
+        return {}
+    liste = raw.get("liste", "")
+    if not isinstance(liste, str) or (liste and not BUNDLED_FASSUNG.match(liste)):
+        return {}
+    rueckfall = raw.get("rueckfall", False)
+    if not isinstance(rueckfall, bool):
+        return {}
+    return {"zustand": zustand, "fehlend": listen["fehlend"],
+            "abweichend": listen["abweichend"], "mehr": mehr,
+            "liste": liste, "rueckfall": rueckfall}
+
 
 def bundled_sauber(raw) -> dict:
     """
@@ -2572,7 +2629,13 @@ def bundled_sauber(raw) -> dict:
             return {}
         if not isinstance(fassung, str) or not BUNDLED_FASSUNG.match(fassung):
             return {}
-    return {"python": python, "packages": dict(pakete)}
+    ergebnis = {"python": python, "packages": dict(pakete)}
+    # Nur wenn etwas Verwertbares gemeldet wurde. Ein leeres Feld waere
+    # von "alter Agent, meldet noch nichts" nicht zu unterscheiden.
+    laufzeit = laufzeit_sauber(raw.get("laufzeit"))
+    if laufzeit:
+        ergebnis["laufzeit"] = laufzeit
+    return ergebnis
 
 
 # ----------------------------------------------------------------------
@@ -2747,6 +2810,42 @@ def bundled_vergleich(host) -> tuple[str, list[str]]:
         eintraege.insert(0, {"art": "python", "name": "python",
                              "ist": ist_python, "soll": soll_python})
     return ("abweichend" if eintraege else "gleich"), eintraege
+
+
+def laufzeit_zustand(host) -> tuple[str, list[dict]]:
+    """
+    Der Laufzeitbefund des Hosts, fuer die Oberflaeche aufbereitet.
+
+    Anders als bundled_vergleich() wird hier NICHT verglichen: der Host
+    hat schon geurteilt, und dieses Urteil braucht keine
+    Vergleichsgrundlage auf dem Server. Die Sperre aus bundled_vergleich()
+    ("unbekannt, solange paket_soll() nichts hergibt") gehoert deshalb
+    ausdruecklich NICHT hierher - sie wuerde den Befund auf jedem Server
+    ohne frisch gebaute MSI verschlucken, und das sind genau die Server,
+    auf denen etwas im Argen ist. Wer hier aus Symmetrie eine Sperre
+    nachzieht, nimmt die Funktion zurueck.
+
+    Eintraege strukturiert, nicht als Satz - die Oberflaeche uebersetzt.
+    art ist eines von: fehlt, anders, mehr.
+    """
+    if getattr(host, "os_type", None) != OSType.windows:
+        return "unbekannt", []
+    bundled = host.bundled if isinstance(host.bundled, dict) else {}
+    befund = bundled.get("laufzeit")
+    if not isinstance(befund, dict) or befund.get("zustand") not in LAUFZEIT_ZUSTAENDE:
+        return "unbekannt", []
+    zustand = befund["zustand"]
+    if zustand != "unvollstaendig":
+        return zustand, []
+    eintraege = [{"art": "fehlt", "name": name}
+                 for name in befund.get("fehlend", []) if isinstance(name, str)]
+    eintraege += [{"art": "anders", "name": name}
+                  for name in befund.get("abweichend", []) if isinstance(name, str)]
+    mehr = befund.get("mehr") or 0
+    if isinstance(mehr, int) and not isinstance(mehr, bool) and mehr > 0:
+        # Die gekappten Treffer gehen nicht verloren, sie werden gezaehlt.
+        eintraege.append({"art": "mehr", "name": str(mehr)})
+    return zustand, eintraege
 
 
 # ----------------------------------------------------------------------
@@ -4152,6 +4251,7 @@ def list_hosts(session: Session = Depends(get_session)):
         data = HostRead.model_validate(h)
         data.next_patch_run = next_patch_run(h)
         data.bundled_state, data.bundled_diff = bundled_vergleich(h)
+        data.laufzeit_state, data.laufzeit_diff = laufzeit_zustand(h)
         out.append(data)
     return out
 
@@ -5416,6 +5516,26 @@ def diagnostics():
         None if _soll else
         "Beide Dateien pruefen: python3 tools/pin-hashes.py zeigt, ob "
         "sie lesbar sind.")
+    # Der Laufzeitbefund der Hosts, und zwar getrennt von der Zeile
+    # darueber: diese Pruefung braucht keine Vergleichsgrundlage, sie
+    # gibt nur weiter, was die Hosts selbst gemeldet haben. Stehen hier
+    # Hosts, fehlen dort Dateien aus dem Paket - der Fall vom
+    # 2026-11-18, bei dem certifi/cacert.pem nach einem Upgrade weg war.
+    try:
+        with Session(engine) as _s:
+            _hosts = _s.exec(select(Host)).all()
+        _kaputt = [h.hostname for h in _hosts
+                   if laufzeit_zustand(h)[0] == "unvollstaendig"]
+        _lesbar = True
+    except Exception:  # noqa: BLE001
+        _kaputt, _lesbar = [], False
+    add("Laufzeit der Windows-Agenten", _lesbar and not _kaputt,
+        "kein Host meldet eine unvollstaendige Laufzeit" if _lesbar and not _kaputt
+        else ("Datenbank nicht lesbar" if not _lesbar
+              else "unvollstaendig bei: " + ", ".join(_kaputt[:10])),
+        None if _lesbar and not _kaputt else
+        "Auf dem Host reparieren: msiexec /fa <ProductCode> /qn "
+        "REBOOT=ReallySuppress - den ProductCode aus der Registry lesen.")
     add("Keine veralteten Pakete", not stale,
         "aufgeraeumt" if not stale else f"veraltet: {', '.join(stale)}",
         None if not stale else "cd /opt/co37 && bash build_packages.sh")
