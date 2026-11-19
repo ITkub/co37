@@ -806,6 +806,46 @@ def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
     }
 
 
+def installierte_python(wurzel: Optional[Path] = None) -> Optional[str]:
+    """
+    Die Python-Fassung, die auf der PLATTE liegt - nicht die, mit der
+    dieser Prozess laeuft.
+
+    Der Unterschied ist der Anlass fuer diese Funktion. Am 2026-11-19
+    meldete ein Host nach einer MSI-Installation weiter eine veraltete
+    Laufzeit, obwohl alles richtig installiert war:
+    platform.python_version() sagt, mit welchem Interpreter der Prozess
+    GESTARTET ist, und das laesst sich durch erneutes Lesen nicht
+    aktualisieren. Ein laufender Python-Prozess kann seine eigene
+    Interpreter-DLL nicht tauschen.
+
+    Deshalb wird die installierte Fassung beim Interpreter selbst
+    erfragt. None heisst "nicht ermittelbar" - dann gilt weiter die
+    laufende Zahl. Lieber die alte Wahrheit als eine geratene.
+    """
+    if wurzel is None:
+        wurzel = Path(__file__).resolve().parent
+    exe = Path(wurzel) / "python" / ("python.exe" if IS_WINDOWS else "python")
+    if not exe.is_file():
+        return None
+    try:
+        res = subprocess.run([str(exe), "-V"], capture_output=True, text=True,
+                             timeout=30)
+    except Exception:  # noqa: BLE001
+        return None
+    treffer = re.search(r"Python\s+([0-9][0-9.a-zA-Z+]*)",
+                        (res.stdout or "") + (res.stderr or ""))
+    return treffer.group(1) if treffer else None
+
+
+# Die Momentaufnahme des eigenen Prozesses, EINMAL beim Laden des Moduls.
+#
+# Das ist die einzige Stelle, an der sie entstehen kann: die Platte laesst
+# sich jederzeit erneut lesen, der Speicher des laufenden Prozesses nicht.
+# Wer diese Zeile in stand_melden() verschiebt, nimmt der Funktion ihren
+# Sinn - dann meldet der Agent zweimal die Platte und nie, was er fuehrt.
+LAUFT = bundled_stand()
+
 # Wie oft die Dateipruefung hoechstens laeuft. Sie liest rund 40 MB;
 # das gehoert nicht in einen Minutentakt.
 LAUFZEIT_TAKT = 3600
@@ -829,6 +869,7 @@ _STAND_PAKETE = None     # der zuletzt gelesene Paketstand
 _STAND_LAUFZEIT = None   # der zuletzt gebildete Laufzeitbefund
 _STAND_GEPRUEFT = None   # monotone Zeit der letzten Dateipruefung
 _STAND_ZUSTAND = None    # Zustand beim letzten Protokolleintrag
+_STAND_PY_PLATTE = None  # die zuletzt ermittelte installierte Python-Fassung
 
 
 def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
@@ -857,6 +898,7 @@ def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
     Takt sonst beliebig weit, in beide Richtungen.
     """
     global _STAND_PAKETE, _STAND_LAUFZEIT, _STAND_GEPRUEFT, _STAND_ZUSTAND
+    global _STAND_PY_PLATTE
     if jetzt is None:
         jetzt = time.monotonic()
     try:
@@ -882,10 +924,23 @@ def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
             _STAND_LAUFZEIT = laufzeit_pruefen()
         except Exception:  # noqa: BLE001
             _STAND_LAUFZEIT = None
+        # Im selben Takt: ein Unterprozess, rund 50 ms. Nicht bei jedem
+        # Heartbeat, aber bei jedem, der ohnehin die Dateien liest.
+        try:
+            _STAND_PY_PLATTE = installierte_python()
+        except Exception:  # noqa: BLE001
+            _STAND_PY_PLATTE = None
         _STAND_GEPRUEFT = jetzt
     _STAND_PAKETE = pakete
 
     stand = dict(pakete)
+    # Die Bibliotheken kommen schon von der Platte; die Python-Fassung
+    # muss ausdruecklich von dort geholt werden, sonst stuende hier die
+    # des laufenden Prozesses.
+    if _STAND_PY_PLATTE:
+        stand["python"] = _STAND_PY_PLATTE
+    if LAUFT:
+        stand["laeuft"] = dict(LAUFT)
     if _STAND_LAUFZEIT is not None:
         stand["laufzeit"] = dict(_STAND_LAUFZEIT)
         zustand = _STAND_LAUFZEIT["zustand"]

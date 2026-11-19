@@ -1361,5 +1361,82 @@ check("der Heartbeat ruft stand_melden()", "stand_melden(" in agent_quelle)
 check("es gibt keine Modulkonstante BUNDLED mehr",
       "\nBUNDLED = " not in agent_quelle)
 
+_echt_lauft = getattr(agent, "LAUFT", None)
+_echt_inst_py = getattr(agent, "installierte_python", None)
+
+print("\n--- Teil 10: was laeuft gegen was installiert ist ---")
+
+# Anlass, am 2026-11-19 im Feld gemessen: nach einer MSI-Installation
+# meldete ein Host weiter "Paketupdate - Agent muss neu installiert
+# werden", obwohl Platte, Paketfassung und Agent-Code stimmten. In der
+# Detailansicht stand der Grund: "Python: 3.14.7, package has 3.14.10".
+#
+# bundled_stand() liest zwei Dinge aus zwei Quellen - die Bibliotheken
+# von der PLATTE, die Python-Fassung aus dem LAUFENDEN PROZESS. Die
+# zweite laesst sich durch erneutes Lesen nicht aktualisieren: ein
+# Prozess kann seine eigene Interpreter-DLL nicht tauschen.
+
+check("LAUFT ist die Momentaufnahme vom Prozessstart",
+      hasattr(agent, "LAUFT")
+      and (agent.LAUFT == agent.bundled_stand() if agent.IS_WINDOWS
+           else agent.LAUFT is None),
+      getattr(agent, "LAUFT", "fehlt"))
+
+check("installierte_python() gibt es", hasattr(agent, "installierte_python"))
+
+if hasattr(agent, "installierte_python"):
+    # Ohne Windows und ohne python.exe im Pfad: nicht ermittelbar, und
+    # dann wird das Feld weggelassen statt geraten.
+    check("ohne python.exe liefert sie None",
+          agent.installierte_python(TMP / "gibtsnicht") is None,
+          agent.installierte_python(TMP / "gibtsnicht"))
+
+    # Eine Attrappe, die sich wie python.exe -V verhaelt.
+    PYDIR = TMP / "pyattrappe" / "python"
+    PYDIR.mkdir(parents=True, exist_ok=True)
+    attrappe = PYDIR / ("python.exe" if agent.IS_WINDOWS else "python")
+    attrappe.write_text("#!/bin/sh\necho 'Python 3.14.10'\n", encoding="utf-8")
+    attrappe.chmod(0o755)
+    check("sie liest die Fassung aus der Ausgabe",
+          agent.installierte_python(TMP / "pyattrappe") == "3.14.10",
+          agent.installierte_python(TMP / "pyattrappe"))
+
+if hasattr(agent, "stand_melden") and hasattr(agent, "LAUFT"):
+    try:
+        # Platte sagt 3.14.10, der Prozess faehrt 3.14.7.
+        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(OK))
+        agent.LAUFT = {"python": "3.14.7",
+                       "packages": {"certifi": "2026.7.22"}}
+        agent.installierte_python = lambda *a, **k: "3.14.10"
+        stand = agent.stand_melden(jetzt=100.0)
+        check("der gemeldete Stand traegt laeuft", "laeuft" in stand, stand)
+        check("laeuft bleibt der Stand des Prozesses",
+              stand["laeuft"]["python"] == "3.14.7", stand["laeuft"])
+        check("python ist die INSTALLIERTE Fassung",
+              stand["python"] == "3.14.10", stand["python"])
+
+        # Ist die installierte Fassung nicht zu ermitteln, bleibt es bei
+        # der laufenden - lieber die alte Wahrheit als eine geratene.
+        # Mit ALT auf der Platte, damit die beiden Zahlen sich
+        # unterscheiden - sonst waere die Pruefung gruen, ohne etwas zu
+        # unterscheiden.
+        pakete.wert = lambda: dict(ALT)
+        agent.installierte_python = lambda *a, **k: None
+        agent._STAND_GEPRUEFT = None
+        agent._STAND_PY_PLATTE = None
+        stand2 = agent.stand_melden(jetzt=200.0)
+        check("ohne installierte Fassung gilt die laufende",
+              stand2["python"] == "3.14.7" and ALT["python"] != "3.14.10",
+              stand2["python"])
+
+        agent.LAUFT = None
+        agent._STAND_GEPRUEFT = None
+        check("ohne Momentaufnahme kein Feld",
+              "laeuft" not in agent.stand_melden(jetzt=300.0))
+    finally:
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+        agent.LAUFT = _echt_lauft
+        agent.installierte_python = _echt_inst_py
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
