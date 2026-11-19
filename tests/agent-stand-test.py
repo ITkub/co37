@@ -1556,5 +1556,85 @@ for teil in ("neustart_faellig(", "ziel_vermerken(", "restart_self_detached()"):
 check("ohne Windows ist der Rueckweg bestaetigt",
       agent.rueckweg_bestaetigt() is True if not agent.IS_WINDOWS else True)
 
+print("\n--- Teil 12: das Backend nimmt den Prozessstand auf ---")
+
+LAEUFT_ALT = {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}}
+
+if hasattr(main, "bundled_sauber"):
+    check("laeuft kommt durch",
+          main.bundled_sauber({**GUT, "laeuft": LAEUFT_ALT}).get("laeuft")
+          == LAEUFT_ALT,
+          main.bundled_sauber({**GUT, "laeuft": LAEUFT_ALT}))
+    check("ein Grund kommt durch",
+          main.bundled_sauber({**GUT, "neustart": "rueckweg"}).get("neustart")
+          == "rueckweg")
+    krumm_lauft = {
+        "Liste": ["3.14.7"],
+        "Zeichenkette": "3.14.7",
+        "Zahl": 7,
+        "packages als Zeichenkette": {"python": "3.14.7", "packages": "viele"},
+        "Name mit Leerzeichen": {"python": "3.14.7",
+                                 "packages": {"cer tifi": "1.0"}},
+        "zu viele Eintraege": {"python": "3.14.7",
+                               "packages": {f"p{i}": "1.0" for i in range(21)}},
+    }
+    for was, wert in krumm_lauft.items():
+        ergebnis = main.bundled_sauber({**GUT, "laeuft": wert})
+        check(f"verworfen, aber nur laeuft: {was}",
+              "laeuft" not in ergebnis
+              and ergebnis.get("packages") == GUT["packages"], ergebnis)
+    check("ein unbekannter Grund wird verworfen",
+          "neustart" not in main.bundled_sauber({**GUT, "neustart": "erfunden"}))
+    check("ein Grund als Zahl wird verworfen",
+          "neustart" not in main.bundled_sauber({**GUT, "neustart": 7}))
+
+if hasattr(main, "laufzeit_zustand"):
+    def host_lauft(laeuft, laufzeit=None, neustart=None):
+        bundled = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+        if laeuft is not None:
+            bundled["laeuft"] = laeuft
+        bundled["laufzeit"] = laufzeit or dict(
+            {"zustand": "ok", "fehlend": [], "abweichend": [], "mehr": 0,
+             "liste": "0.51.4"})
+        if neustart:
+            bundled["neustart"] = neustart
+        return type("H", (), {"os_type": main.OSType.windows,
+                              "bundled": bundled})()
+
+    check("abweichender Prozessstand ergibt prozess_alt",
+          main.laufzeit_zustand(host_lauft(LAEUFT_ALT))[0] == "prozess_alt",
+          main.laufzeit_zustand(host_lauft(LAEUFT_ALT)))
+    # Der Name traegt den Wert, die Art sagt, worum es geht - dasselbe
+    # Muster wie bei bundled_diff.
+    _eintr = main.laufzeit_zustand(host_lauft(LAEUFT_ALT))[1]
+    check("und nennt, was abweicht",
+          any(e.get("art") == "prozess_python" and e.get("name") == "3.14.7"
+              for e in _eintr)
+          and any(e.get("art") == "prozess_paket" and e.get("name") == "certifi"
+                  for e in _eintr), _eintr)
+    check("gleicher Prozessstand bleibt ok",
+          main.laufzeit_zustand(host_lauft(
+              {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}))[0]
+          == "ok")
+    # Eine unvollstaendige Laufzeit ist der dringendere Befund.
+    check("unvollstaendig hat Vorrang vor prozess_alt",
+          main.laufzeit_zustand(host_lauft(
+              LAEUFT_ALT, {"zustand": "unvollstaendig", "fehlend": ["x"],
+                           "abweichend": [], "mehr": 0, "liste": "0.51.4"}
+          ))[0] == "unvollstaendig")
+    check("der verbrauchte Versuch reist nach aussen",
+          any(e.get("art") == "neustart" for e in main.laufzeit_zustand(
+              host_lauft(LAEUFT_ALT, neustart="zweiter"))[1]),
+          main.laufzeit_zustand(host_lauft(LAEUFT_ALT, neustart="zweiter"))[1])
+
+check("der Schalter steht in den Vorgaben mit true",
+      main.ROLL_DEFAULTS.get("agent_laufzeit_neustart") == "true",
+      main.ROLL_DEFAULTS.get("agent_laufzeit_neustart"))
+check("RollConfig kennt ihn",
+      "laufzeit_neustart" in main.RollConfig.model_fields)
+check("die Heartbeat-Antwort traegt ihn",
+      "agent_laufzeit_neustart" in (main.__dict__ and
+      (WURZEL / "backend" / "main.py").read_text(encoding="utf-8")))
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
