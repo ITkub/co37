@@ -1438,5 +1438,123 @@ if hasattr(agent, "stand_melden") and hasattr(agent, "LAUFT"):
         agent.LAUFT = _echt_lauft
         agent.installierte_python = _echt_inst_py
 
+print("\n--- Teil 11: die sechs Sicherungen vor dem Selbstneustart ---")
+
+# Ein Agent, der sich beendet und nicht wiederkommt, ist schlimmer als
+# ein falscher Hinweis: der Host geht dunkel, und sichtbar ist nur "seit
+# X Minuten nicht gesehen". Jede der sechs Sicherungen hat hier ihre
+# eigene Pruefung, und jede ist einzeln abschaltbar gemacht.
+
+GLEICH = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"},
+          "laeuft": {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}},
+          "laufzeit": dict(OK)}
+ABW = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"},
+       "laeuft": {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}},
+       "laufzeit": dict(OK)}
+
+
+def grund(stand, antwort=None, versucht=None, rueckweg=True, zweimal=True):
+    """
+    Einmal durch neustart_faellig(). zweimal=True heisst: die Abweichung
+    gilt als beim vorigen Heartbeat schon gesehen (Sicherung 6).
+    """
+    if not hasattr(agent, "neustart_faellig"):
+        return "(fehlt)"
+    echt = agent.rueckweg_bestaetigt
+    agent.rueckweg_bestaetigt = lambda: rueckweg
+    agent._NEUSTART_GESEHEN = None
+    try:
+        if zweimal:
+            agent.neustart_faellig(stand, antwort or {}, versucht)
+        return agent.neustart_faellig(stand, antwort or {}, versucht)[1]
+    finally:
+        agent.rueckweg_bestaetigt = echt
+
+
+check("neustart_faellig() gibt es", hasattr(agent, "neustart_faellig"))
+check("rueckweg_bestaetigt() gibt es", hasattr(agent, "rueckweg_bestaetigt"))
+
+if hasattr(agent, "neustart_faellig"):
+    check("gleicher Stand: kein Neustart", grund(GLEICH) == "gleich",
+          grund(GLEICH))
+    # Sicherung 5
+    check("Schalter aus: kein Neustart",
+          grund(ABW, {"agent_laufzeit_neustart": False}) == "aus",
+          grund(ABW, {"agent_laufzeit_neustart": False}))
+    # Sicherung 1
+    check("Auftrag in der Antwort: kein Neustart",
+          grund(ABW, {"jobs": [{"id": 1}]}) == "auftrag",
+          grund(ABW, {"jobs": [{"id": 1}]}))
+    # Sicherung 6, erste Haelfte
+    for zustand in ("unvollstaendig", "unpruefbar"):
+        st = {**ABW, "laufzeit": {**OK, "zustand": zustand}}
+        check(f"Laufzeit {zustand}: kein Neustart", grund(st) == "laufzeit",
+              grund(st))
+    # Sicherung 6, zweite Haelfte: erst beim zweiten Sehen
+    check("beim ersten Sehen wird gewartet",
+          grund(ABW, zweimal=False) == "warten", grund(ABW, zweimal=False))
+    # Sicherung 2
+    ziel = agent._neustart_ziel(ABW)
+    check("Ziel schon erfolglos versucht: kein zweiter Neustart",
+          grund(ABW, versucht=ziel) == "zweiter", grund(ABW, versucht=ziel))
+    check("ein ANDERES Ziel ist kein verbrauchter Versuch",
+          grund(ABW, versucht="deadbeefdeadbeef") == "ok",
+          grund(ABW, versucht="deadbeefdeadbeef"))
+    # Sicherung 3
+    check("Rueckweg nicht bestaetigt: kein Neustart",
+          grund(ABW, rueckweg=False) == "rueckweg", grund(ABW, rueckweg=False))
+    # alles erfuellt
+    check("alles erfuellt: Neustart", grund(ABW) == "ok", grund(ABW))
+
+    # Der Grund reist beim naechsten Heartbeat mit.
+    try:
+        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(OK))
+        agent.LAUFT = {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}}
+        agent.installierte_python = lambda *a, **k: "3.14.10"
+        echt_rw = agent.rueckweg_bestaetigt
+        agent.rueckweg_bestaetigt = lambda: False
+        agent._NEUSTART_GESEHEN = None
+        agent._NEUSTART_GRUND = None
+        try:
+            s1 = agent.stand_melden(jetzt=400.0)
+            agent.neustart_faellig(s1, {}, None)
+            agent.neustart_faellig(s1, {}, None)
+            s2 = agent.stand_melden(jetzt=460.0)
+            check("der Grund reist im Stand mit",
+                  s2.get("neustart") == "rueckweg", s2.get("neustart"))
+        finally:
+            agent.rueckweg_bestaetigt = echt_rw
+    finally:
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+        agent.LAUFT = _echt_lauft
+        agent.installierte_python = _echt_inst_py
+
+# rueckweg_bestaetigt() prueft die Aufgabe im Detail: vorhanden,
+# eingeschaltet, und ihr Aufruf zeigt auf Dateien, die es gibt. Eine
+# Aufgabe kann vorhanden und aktiv sein und nach einer halb
+# durchgelaufenen Installation ins Leere zeigen - dann darf nicht
+# beendet werden. Geprueft wird am Quelltext, weil die Abfrage Windows
+# braucht.
+import inspect  # noqa: E402
+
+# Die Abfrage steht als Konstante neben der Funktion - dort wird
+# geprueft, und zusaetzlich, dass die Funktion sie wirklich benutzt.
+rw_quelle = getattr(agent, "PS_AUFGABE_PRUEFEN", "")
+check("die Funktion benutzt die Abfrage",
+      hasattr(agent, "rueckweg_bestaetigt")
+      and "PS_AUFGABE_PRUEFEN" in inspect.getsource(agent.rueckweg_bestaetigt))
+for teil, was in (("CO37Agent", "die Aufgabe beim Namen"),
+                  ("Disabled", "den ausgeschalteten Zustand"),
+                  ("Test-Path", "die Existenz der Dateien")):
+    check(f"rueckweg_bestaetigt() prueft {was}", teil in rw_quelle)
+# Die Schleife muss die Entscheidung auch wirklich treffen und
+# handeln. Geprueft am Quelltext, weil die Schleife ein Backend und eine
+# Anmeldung braucht; die Logik selbst ist oben behandelt.
+for teil in ("neustart_faellig(", "ziel_vermerken(", "restart_self_detached()"):
+    check(f"die Heartbeat-Schleife ruft {teil}", teil in agent_quelle)
+
+check("ohne Windows ist der Rueckweg bestaetigt",
+      agent.rueckweg_bestaetigt() is True if not agent.IS_WINDOWS else True)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
