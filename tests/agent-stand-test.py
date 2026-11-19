@@ -1404,7 +1404,11 @@ if hasattr(agent, "installierte_python"):
 if hasattr(agent, "stand_melden") and hasattr(agent, "LAUFT"):
     try:
         # Platte sagt 3.14.10, der Prozess faehrt 3.14.7.
-        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(OK))
+        # Die Platte meldet ueber bundled_stand() die Zahl des LAUFENDEN
+        # Interpreters (3.14.7) - genau das war der Fehler. Die
+        # installierte Fassung muss sie ueberschreiben, und das ist nur
+        # unterscheidbar, wenn beide Zahlen verschieden sind.
+        pakete, lauf = mit_stand(lambda: dict(ALT), lambda *a, **k: dict(OK))
         agent.LAUFT = {"python": "3.14.7",
                        "packages": {"certifi": "2026.7.22"}}
         agent.installierte_python = lambda *a, **k: "3.14.10"
@@ -1545,8 +1549,10 @@ check("die Funktion benutzt die Abfrage",
       and "PS_AUFGABE_PRUEFEN" in inspect.getsource(agent.rueckweg_bestaetigt))
 for teil, was in (("CO37Agent", "die Aufgabe beim Namen"),
                   ("Disabled", "den ausgeschalteten Zustand"),
-                  ("Test-Path", "die Existenz der Dateien")):
-    check(f"rueckweg_bestaetigt() prueft {was}", teil in rw_quelle)
+                  ("Test-Path -LiteralPath $exe", "die Datei des Aufrufs"),
+                  ("Test-Path -LiteralPath $arg", "die Datei des Arguments")):
+    check(f"rueckweg_bestaetigt() prueft {was}", teil in rw_quelle,
+          None if teil in rw_quelle else rw_quelle[:0])
 # Die Schleife muss die Entscheidung auch wirklich treffen und
 # handeln. Geprueft am Quelltext, weil die Schleife ein Backend und eine
 # Anmeldung braucht; die Logik selbst ist oben behandelt.
