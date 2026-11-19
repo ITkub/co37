@@ -806,24 +806,84 @@ def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
     }
 
 
-# Einmal beim Start, nicht bei jedem Heartbeat: der Inhalt von
-# site-packages aendert sich nur durch eine Neuinstallation, und die
-# startet den Agenten ohnehin neu.
-BUNDLED = bundled_stand()
-LAUFZEIT = laufzeit_pruefen()
-if BUNDLED is not None and LAUFZEIT is not None:
-    BUNDLED["laufzeit"] = LAUFZEIT
-    if LAUFZEIT["zustand"] == "unvollstaendig":
-        # Im Klartext und ins Protokoll, nicht nur an den Server: am
-        # 2026-11-18 stand an dieser Stelle ein TLS-Fehler, und bis
-        # jemand ihn als fehlende Datei gelesen hatte, war eine Stunde
-        # vergangen.
-        log("Die mitgelieferte Laufzeit ist unvollstaendig. Fehlend: "
-            + (", ".join(LAUFZEIT["fehlend"]) or "-")
-            + "; abweichend: " + (", ".join(LAUFZEIT["abweichend"]) or "-")
-            + (f"; weitere {LAUFZEIT['mehr']}" if LAUFZEIT["mehr"] else "")
-            + ". Das Paket muss repariert werden: msiexec /fa <ProductCode> "
-              "/qn REBOOT=ReallySuppress", err=True)
+# Wie oft die Dateipruefung hoechstens laeuft. Sie liest rund 40 MB;
+# das gehoert nicht in einen Minutentakt.
+LAUFZEIT_TAKT = 3600
+
+_STAND_PAKETE = None     # der zuletzt gelesene Paketstand
+_STAND_LAUFZEIT = None   # der zuletzt gebildete Laufzeitbefund
+_STAND_GEPRUEFT = None   # monotone Zeit der letzten Dateipruefung
+_STAND_ZUSTAND = None    # Zustand beim letzten Protokolleintrag
+
+
+def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
+    """
+    Der gemeldete Stand, bei JEDEM Heartbeat gebildet.
+
+    Bis 0.51.3 stand hier eine Modulkonstante, gesetzt beim Start, mit
+    der Begruendung, eine Neuinstallation starte den Agenten ohnehin neu.
+    Am 2026-11-19 im Feld widerlegt: ein Agent, der sich selbst
+    aktualisiert hat, haengt nicht mehr am Aufgabenplaner, und
+    claim_single_instance() haelt jeden geplanten Start fern. Der Prozess
+    laeuft damit bis zum naechsten Systemneustart durch - und meldete den
+    Stand, den er irgendwann einmal gelesen hatte. Nach einer
+    MSI-Installation blieb "Agent muss neu installiert werden" deshalb
+    dauerhaft stehen, obwohl auf der Platte alles stimmte. Dieselbe
+    Falle, derentwegen es own_version() gibt.
+
+    Der Paketstand wird jedes Mal neu gelesen - das sind acht
+    Ordnernamen. Die Dateipruefung laeuft nur getaktet, ABER sofort,
+    sobald sich der Paketstand geaendert hat: eine Installation aendert
+    ihn immer, und damit ist der Befund binnen eines Heartbeats aktuell,
+    statt bis zu einer Stunde alt.
+
+    jetzt ist eine monotone Zeit in Sekunden und nur fuer die Pruefung
+    da. Monoton und nicht time.time(): eine NTP-Korrektur verschoebe den
+    Takt sonst beliebig weit, in beide Richtungen.
+    """
+    global _STAND_PAKETE, _STAND_LAUFZEIT, _STAND_GEPRUEFT, _STAND_ZUSTAND
+    if jetzt is None:
+        jetzt = time.monotonic()
+    try:
+        pakete = bundled_stand()
+    except Exception:  # noqa: BLE001
+        # Ein Agent, der an seiner eigenen Standmeldung stirbt, meldet
+        # auch keine Updates mehr.
+        return None
+    if pakete is None:
+        return None
+
+    faellig = (_STAND_GEPRUEFT is None
+               or pakete != _STAND_PAKETE
+               or jetzt - _STAND_GEPRUEFT >= LAUFZEIT_TAKT)
+    if faellig:
+        try:
+            _STAND_LAUFZEIT = laufzeit_pruefen()
+        except Exception:  # noqa: BLE001
+            _STAND_LAUFZEIT = None
+        _STAND_GEPRUEFT = jetzt
+    _STAND_PAKETE = pakete
+
+    stand = dict(pakete)
+    if _STAND_LAUFZEIT is not None:
+        stand["laufzeit"] = dict(_STAND_LAUFZEIT)
+        zustand = _STAND_LAUFZEIT["zustand"]
+        if zustand == "unvollstaendig" and zustand != _STAND_ZUSTAND:
+            # Im Klartext und ins Protokoll, nicht nur an den Server: am
+            # 2026-11-18 stand an dieser Stelle ein TLS-Fehler, und bis
+            # jemand ihn als fehlende Datei gelesen hatte, war eine
+            # Stunde vergangen. Nur beim WECHSEL, sonst stuende die
+            # Zeile im Minutentakt und erschluege alles andere.
+            log("Die mitgelieferte Laufzeit ist unvollstaendig. Fehlend: "
+                + (", ".join(_STAND_LAUFZEIT["fehlend"]) or "-")
+                + "; abweichend: "
+                + (", ".join(_STAND_LAUFZEIT["abweichend"]) or "-")
+                + (f"; weitere {_STAND_LAUFZEIT['mehr']}"
+                   if _STAND_LAUFZEIT["mehr"] else "")
+                + ". Das Paket muss repariert werden: msiexec /fa "
+                  "<ProductCode> /qn REBOOT=ReallySuppress", err=True)
+        _STAND_ZUSTAND = zustand
+    return stand
 
 
 def _which(tool: str) -> bool:
@@ -2584,14 +2644,15 @@ def main():
             # noch nichts" zu unterscheiden, und der Unterschied
             # entscheidet, ob ein Host als unbekannt oder als abweichend
             # gilt.
-            if BUNDLED:
+            stand = stand_melden()
+            if stand:
                 # Der Rueckfall greift erst beim Senden, diese Nutzlast ist
                 # also schon unterwegs, wenn er zuschlaegt. Vermerkt wird er
                 # beim naechsten Heartbeat - und bis dahin steht die Ursache
                 # im lokalen Protokoll.
-                if RUECKFALL_AKTIV and isinstance(BUNDLED.get("laufzeit"), dict):
-                    BUNDLED["laufzeit"]["rueckfall"] = True
-                payload["bundled"] = BUNDLED
+                if RUECKFALL_AKTIV and isinstance(stand.get("laufzeit"), dict):
+                    stand["laufzeit"]["rueckfall"] = True
+                payload["bundled"] = stand
             resp = api("POST", "/api/v1/agent/heartbeat", payload, timeout=60)
             interval = resp.get("poll_interval", interval)
 

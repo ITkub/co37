@@ -1160,5 +1160,122 @@ check("die Diagnoseseite nennt die Laufzeitpruefung",
           for c in main.diagnostics()["checks"]),
       [c["name"] for c in main.diagnostics()["checks"]])
 
+print("\n--- Teil 9: der gemeldete Stand altert nicht mit dem Prozess ---")
+
+# Anlass, am 2026-11-19 im Feld gemessen: ein Agent, der sich selbst
+# aktualisiert hat, haengt nicht mehr am Aufgabenplaner, und die
+# Einzelinstanz-Sperre haelt jeden geplanten Start fern. Der Prozess
+# laeuft damit bis zum naechsten Systemneustart durch - und meldete den
+# Paketstand, den er beim Start gelesen hatte. Nach einer
+# MSI-Installation blieb der Hinweis "Agent muss neu installiert werden"
+# deshalb dauerhaft stehen, obwohl auf der Platte alles stimmte.
+
+
+class Zaehler:
+    """Eine Attrappe, die mitzaehlt und einen vorgebbaren Wert liefert."""
+
+    def __init__(self, wert):
+        self.n = 0
+        self.wert = wert
+
+    def __call__(self, *a, **k):
+        self.n += 1
+        return self.wert() if callable(self.wert) else self.wert
+
+
+def mit_stand(pakete_wert, lauf_wert):
+    """bundled_stand und laufzeit_pruefen durch Zaehler ersetzen."""
+    pakete = Zaehler(pakete_wert)
+    lauf = Zaehler(lauf_wert)
+    agent.bundled_stand = pakete
+    agent.laufzeit_pruefen = lauf
+    agent._STAND_PAKETE = None
+    agent._STAND_LAUFZEIT = None
+    agent._STAND_GEPRUEFT = None
+    agent._STAND_ZUSTAND = None
+    return pakete, lauf
+
+
+_echt_bundled, _echt_lauf = agent.bundled_stand, agent.laufzeit_pruefen
+ALT = {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}}
+NEU = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+OK = {"zustand": "ok", "fehlend": [], "abweichend": [], "mehr": 0,
+      "liste": "0.51.3"}
+
+check("stand_melden() gibt es", hasattr(agent, "stand_melden"))
+
+if hasattr(agent, "stand_melden"):
+    try:
+        # --- Takt: teure Pruefung nicht bei jedem Heartbeat ------------
+        pakete, lauf = mit_stand(lambda: dict(ALT), lambda *a, **k: dict(OK))
+        erst = agent.stand_melden(jetzt=1000.0)
+        check("erster Aufruf liest beides genau einmal",
+              (pakete.n, lauf.n) == (1, 1), (pakete.n, lauf.n))
+        check("und meldet den gelesenen Stand",
+              erst["python"] == "3.14.7" and "laufzeit" in erst, erst)
+
+        agent.stand_melden(jetzt=1060.0)
+        check("zweiter Aufruf liest den Paketstand neu", pakete.n == 2, pakete.n)
+        check("aber nicht die Dateien", lauf.n == 1, lauf.n)
+
+        # --- Aenderung schlaegt den Takt ------------------------------
+        pakete.wert = lambda: dict(NEU)
+        zweit = agent.stand_melden(jetzt=1120.0)
+        check("ein geaenderter Paketstand erzwingt die Dateipruefung",
+              lauf.n == 2, lauf.n)
+        check("und der gemeldete Stand ist der neue",
+              zweit["python"] == "3.14.10", zweit)
+
+        # --- nach dem Takt wieder --------------------------------------
+        agent.stand_melden(jetzt=1120.0 + agent.LAUFZEIT_TAKT)
+        check("nach dem Takt wird wieder geprueft", lauf.n == 3, lauf.n)
+
+        # --- Lesefehler darf den Heartbeat nicht beenden ---------------
+        def kaputt(*a, **k):
+            raise OSError("site-packages weg")
+
+        agent.bundled_stand = kaputt
+        agent._STAND_PAKETE = None
+        check("ein Lesefehler beendet den Heartbeat nicht",
+              agent.stand_melden(jetzt=2000.0) is None)
+
+        # --- Protokollzeile nur beim Wechsel ---------------------------
+        kaputt_lauf = {"zustand": "unvollstaendig",
+                       "fehlend": ["lib/site-packages/certifi/cacert.pem"],
+                       "abweichend": [], "mehr": 0, "liste": "0.51.3"}
+        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(kaputt_lauf))
+        gesammelt = []
+        echt_log = agent.log
+        agent.log = lambda nachricht, err=False: gesammelt.append(nachricht)
+        try:
+            agent.stand_melden(jetzt=3000.0)
+            agent.stand_melden(jetzt=3060.0)
+            agent.stand_melden(jetzt=3120.0)
+        finally:
+            agent.log = echt_log
+        zeilen = [z for z in gesammelt if "unvollstaendig" in z]
+        check("die Klartextzeile erscheint nur beim Wechsel",
+              len(zeilen) == 1, len(zeilen))
+    finally:
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+
+# Der Takt haengt an einer monotonen Uhr: mit time.time() verschoebe eine
+# NTP-Korrektur die naechste Pruefung beliebig weit, in beide Richtungen.
+# Gegen den Bytecode der FUNKTION, nicht gegen den Dateiinhalt:
+# time.monotonic steht in agent.py schon an anderer Stelle, und eine
+# Pruefung am Text waere hier gruen, ohne etwas gesehen zu haben. Wird
+# monotonic durch time.time ersetzt, verschwindet der Name hier.
+check("der Takt haengt an einer monotonen Uhr",
+      hasattr(agent, "stand_melden")
+      and "monotonic" in agent.stand_melden.__code__.co_names,
+      getattr(agent, "stand_melden", None)
+      and agent.stand_melden.__code__.co_names)
+
+# Und der Heartbeat holt den Stand bei jedem Durchlauf, statt eine
+# Modulkonstante zu senden.
+check("der Heartbeat ruft stand_melden()", "stand_melden(" in agent_quelle)
+check("es gibt keine Modulkonstante BUNDLED mehr",
+      "\nBUNDLED = " not in agent_quelle)
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
