@@ -810,6 +810,21 @@ def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
 # das gehoert nicht in einen Minutentakt.
 LAUFZEIT_TAKT = 3600
 
+# Solange etwas nicht stimmt, wird haeufiger nachgesehen. Zwei Gruende,
+# beide aus der Pruefung vom 2026-11-19:
+#
+# Eine Reparatur mit "msiexec /fa" schreibt DIESELBEN Fassungen zurueck.
+# Der Paketstand aendert sich dabei nicht, der Aenderungsvergleich
+# schlaegt also nicht an - mit dem langen Takt stuende der Hinweis bis zu
+# eine Stunde weiter, obwohl auf der Platte alles stimmt. Das waere
+# genau die Beschwerde, derentwegen es diese Funktion gibt.
+#
+# Und ein Befund, der mitten in einer laufenden Installation entsteht -
+# die .dist-info sind schon geschrieben, python\ noch nicht fertig -,
+# waere ein Fehlalarm, der eine Stunde haelt. So verschwindet er von
+# selbst, sobald die Installation durch ist.
+LAUFZEIT_TAKT_KURZ = 120
+
 _STAND_PAKETE = None     # der zuletzt gelesene Paketstand
 _STAND_LAUFZEIT = None   # der zuletzt gebildete Laufzeitbefund
 _STAND_GEPRUEFT = None   # monotone Zeit der letzten Dateipruefung
@@ -853,9 +868,15 @@ def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
     if pakete is None:
         return None
 
+    # Nach einem Befund - und auch, wenn die Pruefung gar nicht erst
+    # zustande kam - gilt der kurze Takt, sonst der lange.
+    takt = (LAUFZEIT_TAKT
+            if isinstance(_STAND_LAUFZEIT, dict)
+            and _STAND_LAUFZEIT.get("zustand") == "ok"
+            else LAUFZEIT_TAKT_KURZ)
     faellig = (_STAND_GEPRUEFT is None
                or pakete != _STAND_PAKETE
-               or jetzt - _STAND_GEPRUEFT >= LAUFZEIT_TAKT)
+               or jetzt - _STAND_GEPRUEFT >= takt)
     if faellig:
         try:
             _STAND_LAUFZEIT = laufzeit_pruefen()

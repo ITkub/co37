@@ -874,8 +874,14 @@ check("ohne Parameter meldet ein Nicht-Windows-Agent nichts",
                                                and not agent.IS_WINDOWS) else
           hasattr(agent, "laufzeit_pruefen")))
 
-check("der Befund haengt am gemeldeten Stand",
-      not agent.IS_WINDOWS or "laufzeit" in (agent.BUNDLED or {}))
+# Frueher stand hier ein Zugriff auf die Modulkonstante BUNDLED. Die
+# gibt es seit 0.51.4 nicht mehr: unter Windows waere die ganze Reihe an
+# dieser Zeile abgebrochen, unter Linux war sie durch das vorangestellte
+# "not IS_WINDOWS or" ohnehin inhaltsleer. Pruefungen dieser Form
+# verrotten still - den Zusammenhang prueft jetzt Teil 9.
+check("der gemeldete Stand traegt den Laufzeitbefund",
+      not agent.IS_WINDOWS
+      or "laufzeit" in (agent.stand_melden() or {}))
 check("der Heartbeat traegt das Feld laufzeit nur mit Befund",
       '"laufzeit"' in agent_quelle)
 
@@ -1261,6 +1267,84 @@ if hasattr(agent, "stand_melden"):
 
 # Der Takt haengt an einer monotonen Uhr: mit time.time() verschoebe eine
 # NTP-Korrektur die naechste Pruefung beliebig weit, in beide Richtungen.
+if hasattr(agent, "stand_melden"):
+    try:
+        # --- Important 2 und 3: nach einem Befund kuerzer takten -------
+        #
+        # Eine Reparatur mit msiexec /fa schreibt DIESELBEN Fassungen
+        # zurueck - der Paketstand aendert sich also nicht, und der lange
+        # Takt liesse den Hinweis bis zu eine Stunde stehen, obwohl auf
+        # der Platte alles stimmt. Genau die Beschwerde, die diese
+        # Aenderung beheben soll. Dasselbe gilt fuer einen Fehlalarm, der
+        # mitten in einer laufenden Installation entsteht.
+        kaputt = {"zustand": "unvollstaendig", "fehlend": ["x"],
+                  "abweichend": [], "mehr": 0, "liste": "0.51.4"}
+        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(kaputt))
+        agent.stand_melden(jetzt=5000.0)
+        check("nach einem Befund wird frueh wieder geprueft",
+              agent.stand_melden(jetzt=5000.0 + agent.LAUFZEIT_TAKT_KURZ)
+              is not None and lauf.n == 2, lauf.n)
+        check("und der kurze Takt ist deutlich kuerzer als der lange",
+              agent.LAUFZEIT_TAKT_KURZ < agent.LAUFZEIT_TAKT / 10,
+              (agent.LAUFZEIT_TAKT_KURZ, agent.LAUFZEIT_TAKT))
+
+        # Repariert, ohne dass sich der Paketstand aendert: der Befund
+        # muss trotzdem von selbst auf ok gehen.
+        lauf.wert = lambda *a, **k: dict(OK)
+        geheilt = agent.stand_melden(jetzt=5000.0 + 2 * agent.LAUFZEIT_TAKT_KURZ)
+        check("eine Reparatur ohne Paketwechsel wird bemerkt",
+              geheilt["laufzeit"]["zustand"] == "ok", geheilt)
+        check("danach gilt wieder der lange Takt",
+              agent.stand_melden(jetzt=5000.0 + 3 * agent.LAUFZEIT_TAKT_KURZ)
+              is not None and lauf.n == 3, lauf.n)
+
+        # --- Important 5: Ausnahme in der Dateipruefung ---------------
+        def lauf_kaputt(*a, **k):
+            raise OSError("python-Verzeichnis weg")
+
+        pakete, lauf = mit_stand(lambda: dict(NEU), None)
+        agent.laufzeit_pruefen = lauf_kaputt
+        ergebnis = agent.stand_melden(jetzt=6000.0)
+        check("eine Ausnahme in der Dateipruefung kostet nur das Feld",
+              ergebnis is not None and "laufzeit" not in ergebnis, ergebnis)
+        gezaehlt = Zaehler(dict(OK))
+        agent.laufzeit_pruefen = gezaehlt
+        agent.stand_melden(jetzt=6000.0 + agent.LAUFZEIT_TAKT_KURZ)
+        check("und wird frueh erneut versucht", gezaehlt.n == 1, gezaehlt.n)
+
+        # --- Important 4: Heilung, dann erneuter Schaden --------------
+        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(kaputt))
+        gesammelt2 = []
+        echt_log2 = agent.log
+        agent.log = lambda nachricht, err=False: gesammelt2.append(nachricht)
+        try:
+            agent.stand_melden(jetzt=7000.0)
+            lauf.wert = lambda *a, **k: dict(OK)
+            agent.stand_melden(jetzt=7000.0 + agent.LAUFZEIT_TAKT_KURZ)
+            lauf.wert = lambda *a, **k: dict(kaputt)
+            # Nach der Heilung gilt wieder der LANGE Takt - der erneute
+            # Schaden faellt also erst dann auf. Genau so ist es gemeint:
+            # haeufig nachsehen, solange etwas nicht stimmt, sparsam,
+            # wenn alles in Ordnung ist.
+            agent.stand_melden(jetzt=7000.0 + agent.LAUFZEIT_TAKT_KURZ
+                               + agent.LAUFZEIT_TAKT)
+        finally:
+            agent.log = echt_log2
+        check("nach Heilung und erneutem Schaden kommt die Zeile wieder",
+              len([z for z in gesammelt2 if "unvollstaendig" in z]) == 2,
+              len([z for z in gesammelt2 if "unvollstaendig" in z]))
+
+        # --- Minor 6 hochgestuft: Linux meldet nichts -----------------
+        # Mit den ECHTEN Funktionen, sonst prueft man die Attrappe.
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+        agent._STAND_PAKETE = None
+        agent._STAND_GEPRUEFT = None
+        check("ohne Windows liefert stand_melden() None",
+              agent.stand_melden() is None if not agent.IS_WINDOWS else True,
+              agent.stand_melden())
+    finally:
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+
 # Gegen den Bytecode der FUNKTION, nicht gegen den Dateiinhalt:
 # time.monotonic steht in agent.py schon an anderer Stelle, und eine
 # Pruefung am Text waere hier gruen, ohne etwas gesehen zu haben. Wird
