@@ -600,6 +600,37 @@ const BUNDLED_ART = {
   python: "note.bundled_diff_python",
 };
 
+function laufzeitNote(h){
+  // Der Hinweis steht NUR bei "unvollstaendig".
+  //
+  // "unpruefbar" heisst: die installierte MSI ist aelter als diese
+  // Funktion und bringt keine Vergleichsliste mit. Das trifft am Tag der
+  // Veroeffentlichung jeden Host, und fuer die gibt es den Hinweis auf
+  // die Paketfassung schon. Ein Hinweis, der ueberall steht, wird
+  // nirgends gelesen.
+  //
+  // Auch hier bewusst OHNE Knopf: die Selbstaktualisierung behebt es
+  // nicht. Das Paket muss repariert werden, und wie, steht im Verlauf.
+  if (!h || h.laufzeit_state !== "unvollstaendig") return null;
+  return t("note.laufzeit_broken");
+}
+
+// Ein Eintrag aus laufzeit_diff als uebersetzte Zeile - dasselbe Muster
+// wie bei bundled_diff: das Backend schickt art und name, nicht den
+// fertigen Satz.
+const LAUFZEIT_ART = {
+  fehlt: "note.laufzeit_diff_missing",
+  anders: "note.laufzeit_diff_changed",
+  mehr: "note.laufzeit_more",
+  rueckfall: "note.laufzeit_fallback",
+};
+
+function laufzeitDiffText(e){
+  const key = LAUFZEIT_ART[e && e.art];
+  if (!key) return null;
+  return t(key, { name: (e && e.name) || "" });
+}
+
 function bundledDiffText(e){
   const key = BUNDLED_ART[e && e.art];
   // Eine Art, die diese Fassung der Oberflaeche nicht kennt, wird
@@ -803,6 +834,10 @@ function renderUnit(h, i, admin, level = 0){
   if (stale) notes.push(t("note.agent_outdated", { version: h.agent_version }));
   const bn = bundledNote(h);
   if (bn) notes.push(bn);
+  // Zwei eigene Hinweise, keine Rangfolge: ein Host kann gleichzeitig ein
+  // veraltetes Paket und eine beschaedigte Laufzeit haben.
+  const ln = laufzeitNote(h);
+  if (ln) notes.push(ln);
   if (PLANNED[h.id]) notes.push(t("note.reboot_planned", {
     zeit: PLANNED[h.id].toLocaleString(zeitSprache(),
       {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) }));
@@ -1327,6 +1362,17 @@ async function detail(id){
     if (zeilen.length){
       L.push("", t("note.bundled_detail") + ":");
       zeilen.forEach(z => L.push("  " + z));
+    }
+  }
+  // Was an der mitgelieferten Laufzeit fehlt oder abweicht, samt dem
+  // Befehl, der es behebt. Auch das ueber textContent weiter unten: die
+  // Dateinamen kommen vom Host.
+  if ((h.laufzeit_diff || []).length){
+    const zeilen = h.laufzeit_diff.map(laufzeitDiffText).filter(Boolean);
+    if (zeilen.length){
+      L.push("", t("note.laufzeit_detail") + ":");
+      zeilen.forEach(z => L.push("  " + z));
+      if (h.laufzeit_state === "unvollstaendig") L.push("  " + t("note.laufzeit_fix"));
     }
   }
   L.push("", t("history.open_updates", { anzahl: ups.length }));

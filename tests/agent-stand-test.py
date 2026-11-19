@@ -17,6 +17,7 @@ Teil 1 laeuft ohne Backend-Prozess und ohne Netz.
 
     python3 tests/agent-stand-test.py
 """
+import hashlib
 import os
 import sqlite3
 import sys
@@ -398,6 +399,38 @@ with TestClient(main.app) as klient:
         check("ein Heartbeat ohne das Feld laesst den Stand stehen",
               gespeichert() == gut, gespeichert())
 
+        # Der Laufzeitbefund reist im selben Feld mit. Missgebildet darf
+        # er NUR sich selbst verwerfen: ein Host mit krummem Befund soll
+        # nicht auch seine Paketliste verlieren. Und keine 422 - ein
+        # Agent, der an seinem eigenen Heartbeat scheitert, meldet auch
+        # nichts anderes mehr (Befund C-1 vom 2026-11-17).
+        for was, wert in (("Liste", ["a"]),
+                          ("Zeichenkette", "kaputt"),
+                          ("Zahl", 7),
+                          ("null", None),
+                          ("unbekannter Zustand", {"zustand": "kaputt"}),
+                          ("fehlend als Zeichenkette",
+                           {"zustand": "ok", "fehlend": "a"}),
+                          ("zu viele Eintraege",
+                           {"zustand": "unvollstaendig",
+                            "fehlend": [f"d{i}" for i in range(99)]})):
+            r = heartbeat({**gut, "laufzeit": wert})
+            check(f"Heartbeat bleibt 200 mit krummer Laufzeit: {was}",
+                  r.status_code == 200, (r.status_code, r.text[:120]))
+            check(f"die Paketliste bleibt erhalten: {was}",
+                  (gespeichert() or {}).get("packages") == gut["packages"],
+                  gespeichert())
+            check(f"der krumme Befund wird verworfen: {was}",
+                  "laufzeit" not in (gespeichert() or {}), gespeichert())
+
+        befund = {"zustand": "unvollstaendig",
+                  "fehlend": ["lib/site-packages/certifi/cacert.pem"],
+                  "abweichend": [], "mehr": 0, "liste": "0.51.2",
+                  "rueckfall": True}
+        r = heartbeat({**gut, "laufzeit": befund})
+        check("ein gueltiger Laufzeitbefund landet am Host",
+              (gespeichert() or {}).get("laufzeit") == befund, gespeichert())
+
 print("\n--- Teil 4: Vergleich gegen das aktuelle Paket ---")
 
 for name in ("paket_soll", "paket_gebaut_aktuell", "bundled_abweichungen",
@@ -414,8 +447,11 @@ if all(hasattr(main, n) for n in
     # naechste Anhebung von PY_VERSION diese Reihe rot ohne Befund -
     # dieselbe Objektion wie oben bei SCHEMA_VERSION.
     import re as _re  # noqa: E402
-    _bm = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
-    PY_ERWARTET = _re.search(r'^PY_VERSION = "([^"]+)"', _bm, _re.M).group(1)
+    # Eigener Name: _bm ist oben das geladene Modul, und eine Zuweisung
+    # hier ueberschrieb es fuer alles, was danach kommt - ein spaeterer
+    # Teil fand dann eine Zeichenkette statt des Moduls vor.
+    _bm_quelle = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+    PY_ERWARTET = _re.search(r'^PY_VERSION = "([^"]+)"', _bm_quelle, _re.M).group(1)
     PINS_ERWARTET = len([z for z in
                          (WURZEL / "agent" / "requirements.txt")
                          .read_text(encoding="utf-8").splitlines()
@@ -645,6 +681,484 @@ if all(hasattr(main, n) for n in
           "bundled_state" in main.HostRead.model_fields)
     check("HostRead traegt bundled_diff",
           "bundled_diff" in main.HostRead.model_fields)
+
+print("\n--- Teil 5: der Bau schreibt die Laufzeitliste ---")
+
+# Die Liste ist die Vergleichsgrundlage, gegen die der Agent seine eigene
+# Laufzeit prueft. Sie entsteht beim Packen unter Linux, verglichen wird
+# unter Windows - Pfadtrenner und Schreibweise muessen deshalb schon hier
+# vereinheitlicht sein. Ohne das meldet jeder gesunde Host jede Datei als
+# fehlend, und das ist der Fehlalarm, der Waechter abschaltet.
+BAUM = TMP / "paketbaum" / "python"
+CERTIFI = BAUM / "Lib" / "site-packages" / "certifi"
+(CERTIFI / "__pycache__").mkdir(parents=True, exist_ok=True)
+(BAUM / "python314.dll").write_bytes(b"abc")
+(CERTIFI / "cacert.pem").write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+(CERTIFI / "__pycache__" / "core.cpython-314.pyc").write_bytes(b"\x00\x01")
+
+if not hasattr(_bm, "laufzeit_liste"):
+    # Bewusst kein Zugriff ins Leere: ein AttributeError wuerde die Reihe
+    # abbrechen und die Teile 1 bis 4 mit verschlucken.
+    check("laufzeit_liste() gibt es im Paketbau", False, "Funktion fehlt")
+    liste = {"version": None, "dateien": {}}
+else:
+    check("laufzeit_liste() gibt es im Paketbau", True)
+    liste = _bm.laufzeit_liste(BAUM, "0.52.0")
+
+check("Liste nennt die Paketfassung", liste["version"] == "0.52.0", liste["version"])
+check("Pfade mit / und klein geschrieben",
+      "python314.dll" in liste["dateien"]
+      and "lib/site-packages/certifi/cacert.pem" in liste["dateien"],
+      sorted(liste["dateien"]))
+check("Groesse und sha256 je Datei",
+      liste["dateien"].get("python314.dll", {}).get("groesse") == 3
+      and liste["dateien"].get("python314.dll", {}).get("sha256")
+          == hashlib.sha256(b"abc").hexdigest(),
+      liste["dateien"].get("python314.dll"))
+# Beide Pruefungen verlangen ausdruecklich eine nicht leere Liste: sonst
+# waeren sie gruen, weil nichts erfasst wurde - gruen aus dem falschen
+# Grund, genau die Sorte Pruefung aus dem Befund vom 2026-11-12.
+check("__pycache__ bleibt draussen",
+      bool(liste["dateien"])
+      and not any("__pycache__" in pfad for pfad in liste["dateien"]),
+      sorted(liste["dateien"]))
+check("die Liste enthaelt sich selbst nicht",
+      bool(liste["dateien"])
+      and not any("laufzeit.json" in pfad for pfad in liste["dateien"]),
+      sorted(liste["dateien"]))
+
+# Dass die Datei auch ins Paket kommt, prueft die Reihe am Quelltext: ein
+# vollstaendiger build()-Lauf braucht wixl und Netz. Die eigentliche
+# Gegenprobe ist der Bau auf dem Baurechner samt seiner Protokollzeile.
+bm_quelle = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
+check("der Bau schreibt laufzeit.json", "laufzeit.json" in bm_quelle)
+# wixl laesst Eintraege stillschweigend weg - deshalb gibt es
+# MUSS_ENTHALTEN. Fehlte laufzeit.json im Paket, meldete JEDER Host
+# dauerhaft "unpruefbar", und die Funktion waere lautlos aus.
+check("laufzeit.json steht in MUSS_ENTHALTEN",
+      "laufzeit.json" in getattr(_bm, "MUSS_ENTHALTEN", ()),
+      getattr(_bm, "MUSS_ENTHALTEN", None))
+check("und zwar vor add_tree",
+      "laufzeit.json" in bm_quelle and "tree = add_tree(work)" in bm_quelle
+      and bm_quelle.index("laufzeit.json") < bm_quelle.index("tree = add_tree(work)"))
+
+print("\n--- Teil 6: der Agent prueft seine Laufzeit ---")
+
+import itertools  # noqa: E402
+
+_inst_zaehler = itertools.count(1)
+FUELLER = 14  # mehr als die Kappungsgrenze von 10, fuer den Massenfall
+
+
+def bau(loeschen=None, kuerzen=None, tauschen=None, anhaengen=None, leeren=None,
+        ohne_liste=False, liste_text=None, liste_version=None,
+        trenner="/", gross=False) -> Path:
+    """
+    Ein Installationsverzeichnis nachbauen, wie die MSI es hinterlaesst:
+    python/ mit Dateien, laufzeit.json daneben.
+
+    Die Liste entsteht ueber laufzeit_liste() aus dem Paketbau und nicht
+    von Hand - zwei verschieden gewonnene Listen zu vergleichen waere die
+    Sorte Unterschied, die erst beim Kunden auffaellt.
+    """
+    wurzel = TMP / f"inst{next(_inst_zaehler)}"
+    py = wurzel / "python"
+    certifi = py / "Lib" / "site-packages" / "certifi"
+    certifi.mkdir(parents=True)
+    (py / "python314.dll").write_bytes(b"abcdef")
+    (certifi / "cacert.pem").write_text(
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        encoding="utf-8")
+    for nr in range(FUELLER):
+        (py / f"modul{nr}.pyd").write_bytes(b"x" * (nr + 1))
+
+    verzeichnis = _bm.laufzeit_liste(py, liste_version or "0.52.0")
+
+    # Erst die Liste, dann der Schaden - sonst beschreibt die Liste
+    # bereits den beschaedigten Stand und es gibt nichts zu finden.
+    if loeschen:
+        ziel = wurzel / loeschen
+        shutil.rmtree(ziel) if ziel.is_dir() else ziel.unlink()
+    if kuerzen:
+        (wurzel / kuerzen).write_bytes(b"a")
+    if tauschen:
+        alt = (wurzel / tauschen).read_bytes()
+        (wurzel / tauschen).write_bytes(b"z" * len(alt))
+    if anhaengen:
+        with (wurzel / anhaengen).open("a", encoding="utf-8") as fh:
+            fh.write("-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n")
+    if leeren:
+        (wurzel / leeren).write_text("", encoding="utf-8")
+
+    if trenner != "/":
+        verzeichnis["dateien"] = {k.replace("/", trenner): v
+                                  for k, v in verzeichnis["dateien"].items()}
+    if gross:
+        verzeichnis["dateien"] = {k.upper(): v
+                                  for k, v in verzeichnis["dateien"].items()}
+
+    if not ohne_liste:
+        (wurzel / "laufzeit.json").write_text(
+            liste_text if liste_text is not None else json.dumps(verzeichnis),
+            encoding="utf-8")
+    return wurzel
+
+
+def pruef(wurzel):
+    if not hasattr(agent, "laufzeit_pruefen"):
+        return {"zustand": "(fehlt)", "fehlend": [], "abweichend": [], "mehr": 0}
+    return agent.laufzeit_pruefen(wurzel)
+
+
+import json  # noqa: E402
+
+check("laufzeit_pruefen() gibt es im Agenten", hasattr(agent, "laufzeit_pruefen"))
+check("vollstaendig ist ok", pruef(bau())["zustand"] == "ok", pruef(bau()))
+
+_fehlt = pruef(bau(loeschen="python/python314.dll"))
+check("fehlende Datei ist ein Befund", _fehlt["zustand"] == "unvollstaendig", _fehlt)
+check("die fehlende Datei wird benannt",
+      "python314.dll" in " ".join(_fehlt["fehlend"]), _fehlt["fehlend"])
+
+check("abgeschnittene Datei ist ein Befund",
+      pruef(bau(kuerzen="python/python314.dll"))["zustand"] == "unvollstaendig")
+# Gleiche Groesse, anderer Inhalt: das ist der Fall, den ein Vergleich
+# ohne Pruefsumme nicht sieht.
+check("veraenderte Datei bei gleicher Groesse ist ein Befund",
+      pruef(bau(tauschen="python/python314.dll"))["zustand"] == "unvollstaendig")
+
+check("fehlende Liste ist unpruefbar",
+      pruef(bau(ohne_liste=True))["zustand"] == "unpruefbar")
+check("kaputte Liste ist unpruefbar",
+      pruef(bau(liste_text="{kein json"))["zustand"] == "unpruefbar")
+check("Liste ohne dateien-Schluessel ist unpruefbar",
+      pruef(bau(liste_text='{"version": "0.52.0"}'))["zustand"] == "unpruefbar")
+
+# Der Normalfall nach einer Selbstaktualisierung: neuer Agent, alte
+# Liste. Das ist KEIN Befund - dafuer gibt es den Hinweis auf die
+# Paketfassung seit 0.51.0.
+check("aeltere Liste nach Selbstaktualisierung bleibt ok",
+      pruef(bau(liste_version="0.40.0"))["zustand"] == "ok")
+
+# Eine interne CA an das Buendel zu haengen ist ein dokumentierter
+# Eingriff (REVERSE-PROXY.md). Ein Dauerbefund dafuer waere der
+# Fehlalarm, der Waechter abschaltet.
+check("cacert.pem mit angehaengter CA bleibt ok",
+      pruef(bau(anhaengen="python/Lib/site-packages/certifi/cacert.pem"))["zustand"]
+      == "ok")
+check("fehlendes cacert.pem ist ein Befund",
+      pruef(bau(loeschen="python/Lib/site-packages/certifi/cacert.pem"))["zustand"]
+      == "unvollstaendig")
+check("leeres cacert.pem ist ein Befund",
+      pruef(bau(leeren="python/Lib/site-packages/certifi/cacert.pem"))["zustand"]
+      == "unvollstaendig")
+
+# Die Liste entsteht unter Linux, verglichen wird unter Windows: ohne
+# Vereinheitlichung meldete jeder gesunde Host jede Datei als fehlend.
+check("Pfadtrenner der Liste spielen keine Rolle",
+      pruef(bau(trenner="\\"))["zustand"] == "ok",
+      pruef(bau(trenner="\\")))
+check("Grossschreibung in der Liste spielt keine Rolle",
+      pruef(bau(gross=True))["zustand"] == "ok", pruef(bau(gross=True)))
+
+_viele = pruef(bau(loeschen="python"))
+check("viele Treffer werden gekappt",
+      len(_viele["fehlend"]) <= 10 and _viele["mehr"] > 0,
+      (len(_viele["fehlend"]), _viele["mehr"]))
+
+# Unter Linux liefert die Pruefung ohne Parameter None, und der Heartbeat
+# sendet dann nichts: sonst stuende bei jedem Linux-Host "unpruefbar".
+check("ohne Parameter meldet ein Nicht-Windows-Agent nichts",
+      not hasattr(agent, "laufzeit_pruefen") and False
+      or (agent.laufzeit_pruefen() is None if (hasattr(agent, "laufzeit_pruefen")
+                                               and not agent.IS_WINDOWS) else
+          hasattr(agent, "laufzeit_pruefen")))
+
+check("der Befund haengt am gemeldeten Stand",
+      not agent.IS_WINDOWS or "laufzeit" in (agent.BUNDLED or {}))
+check("der Heartbeat traegt das Feld laufzeit nur mit Befund",
+      '"laufzeit"' in agent_quelle)
+
+print("\n--- Teil 7: Rueckfall auf den Zertifikatsspeicher des Systems ---")
+
+# Der belegte Fall vom 2026-11-18: cacert.pem fehlt, der TLS-Aufbau
+# scheitert, und der Agent kommt mit seinem Befund nicht zum Server. Eine
+# Selbstpruefung, deren Meldung genau dann nicht ankommt, ist wirkungslos.
+#
+# Geprueft ohne Netz: requests im Agenten wird durch eine Attrappe
+# ersetzt, die beim ersten Aufruf SSLError wirft.
+_echte_requests = agent.requests
+
+
+class _Antwort:
+    status_code = 200
+    content = b"{}"
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {}
+
+
+class _SitzungAttrappe:
+    def __init__(self, ziel):
+        self.ziel = ziel
+        self.gemountet = []
+
+    def mount(self, prefix, adapter):
+        self.gemountet.append((prefix, adapter))
+
+    def request(self, method, url, **kw):
+        return self.ziel.request(method, url, **kw)
+
+
+class _ReqAttrappe:
+    exceptions = _echte_requests.exceptions
+    adapters = _echte_requests.adapters
+
+    def __init__(self, fehler_bei=(1,), art=None):
+        self.aufrufe = 0
+        self.alle = []
+        self.sitzungen = []
+        self.fehler_bei = set(fehler_bei)
+        # Welche Ausnahme geworfen wird, ist der Kern dieser Pruefung:
+        # requests wirft NICHT immer SSLError. Siehe unten.
+        self.art = art or (lambda: _echte_requests.exceptions.SSLError(
+            "Buendel unbrauchbar"))
+
+    def request(self, method, url, **kw):
+        self.aufrufe += 1
+        self.alle.append({"method": method, "url": url, "kwargs": kw})
+        if self.aufrufe in self.fehler_bei:
+            raise self.art()
+        return _Antwort()
+
+    def Session(self):
+        s = _SitzungAttrappe(self)
+        self.sitzungen.append(s)
+        return s
+
+
+def mit_attrappe(fehler_bei, art=None):
+    """Einen api()-Aufruf gegen die Attrappe fahren. Gibt (Attrappe, Fehler) zurueck."""
+    attrappe = _ReqAttrappe(fehler_bei, art)
+    agent.requests = attrappe
+    agent.RUECKFALL_AKTIV = False
+    fehler = None
+    try:
+        agent.api("GET", "/api/v1/ping", auth=False)
+    except Exception as exc:  # noqa: BLE001
+        fehler = exc
+    finally:
+        agent.requests = _echte_requests
+    return attrappe, fehler
+
+
+if not hasattr(agent, "RUECKFALL_AKTIV"):
+    check("der Agent kennt einen Rueckfall", False, "RUECKFALL_AKTIV fehlt")
+else:
+    check("der Agent kennt einen Rueckfall", True)
+
+    a1, f1 = mit_attrappe((1,))
+    check("nach SSLError wird genau einmal wiederholt", a1.aufrufe == 2, a1.aufrufe)
+    check("die Wiederholung laeuft ueber eine eigene Sitzung",
+          len(a1.sitzungen) == 1 and any(p.startswith("https")
+                                         for p, _ in a1.sitzungen[0].gemountet),
+          [s.gemountet for s in a1.sitzungen])
+    # Die Kernbedingung: der Rueckfall darf die Pruefung nicht abschwaechen.
+    check("die Wiederholung prueft weiterhin",
+          all(auf["kwargs"].get("verify") is not False for auf in a1.alle),
+          [auf["kwargs"].get("verify") for auf in a1.alle])
+    check("der Rueckfall wird vermerkt", agent.RUECKFALL_AKTIV is True)
+    check("der erste Aufruf war erfolgreich beantwortet", f1 is None, f1)
+
+    a2, f2 = mit_attrappe(())
+    check("ohne SSLError kein Rueckfall",
+          agent.RUECKFALL_AKTIV is False and a2.aufrufe == 1,
+          (agent.RUECKFALL_AKTIV, a2.aufrufe))
+
+    a3, f3 = mit_attrappe((1, 2))
+    check("ein zweiter SSLError wird durchgelassen",
+          isinstance(f3, _echte_requests.exceptions.SSLError), f3)
+    check("und nicht ein drittes Mal versucht", a3.aufrufe == 2, a3.aufrufe)
+
+# ----------------------------------------------------------------------
+# Der Fall, den die Attrappe oben NICHT abdeckt - und der eigentliche
+# Schadensfall vom 2026-11-18.
+#
+# requests prueft die Existenz des Zertifikatsbuendels in
+# HTTPAdapter.cert_verify(), VOR jedem Verbindungsaufbau und ausserhalb
+# seiner Ausnahmeumwandlung. FEHLT die Datei, wirft es ein nacktes
+# OSError - keine SSLError. Eine Pruefung, die nur SSLError wirft, setzt
+# damit voraus, was zu zeigen war.
+#
+# Deshalb hier zuerst eine Festschreibung der Bibliothek selbst: ohne
+# Netz, ohne Server, nur ueber einen Pfad, der nicht existiert.
+try:
+    _echte_requests.request("GET", "https://127.0.0.1:1/x",
+                            verify="/nicht/vorhanden.pem", timeout=1)
+    _bibliothek = None
+except Exception as exc:  # noqa: BLE001
+    _bibliothek = exc
+check("fehlendes Buendel ergibt OSError, nicht SSLError",
+      isinstance(_bibliothek, OSError)
+      and not isinstance(_bibliothek, _echte_requests.exceptions.SSLError),
+      type(_bibliothek).__name__)
+check("und auch keine RequestException",
+      not isinstance(_bibliothek, _echte_requests.exceptions.RequestException),
+      type(_bibliothek).__name__)
+
+if hasattr(agent, "RUECKFALL_AKTIV"):
+    _fehlt_buendel = lambda: OSError(  # noqa: E731
+        "Could not find a suitable TLS CA certificate bundle, invalid path: "
+        "C:\\Program Files\\CO37\\python\\Lib\\site-packages\\certifi\\cacert.pem")
+    a4, f4 = mit_attrappe((1,), _fehlt_buendel)
+    check("auch bei fehlendem Buendel wird wiederholt", a4.aufrufe == 2, a4.aufrufe)
+    check("und der Rueckfall wird vermerkt", agent.RUECKFALL_AKTIV is True)
+    check("der Aufruf kommt durch", f4 is None, f4)
+
+    # Gegenprobe, damit der Rueckfall nicht bei JEDEM Fehler greift:
+    # requests.exceptions.RequestException erbt selbst von OSError, ein
+    # Verbindungsfehler ist also auch ein OSError. Wiederholt wuerde er
+    # nur eine zweite, genauso aussichtslose Verbindung kosten - und
+    # jeden Host, der offline ist, als "ueber den Systemspeicher
+    # gemeldet" ausweisen.
+    a5, f5 = mit_attrappe((1, 2), lambda: _echte_requests.exceptions.ConnectionError(
+        "Verbindung abgelehnt"))
+    check("ein Verbindungsfehler loest keinen Rueckfall aus",
+          a5.aufrufe == 1 and agent.RUECKFALL_AKTIV is False,
+          (a5.aufrufe, agent.RUECKFALL_AKTIV))
+    check("und fliegt unveraendert weiter",
+          isinstance(f5, _echte_requests.exceptions.ConnectionError), f5)
+
+# Der Agent muss sich ohne Warnung uebersetzen lassen. Ungueltige
+# Escape-Sequenzen sind seit Python 3.12 eine Warnung und sollen
+# SyntaxError werden - dann laedt agent.py nicht mehr. Unter Windows
+# laeuft er als pythonw.exe ohne Konsole; die Warnung waere dort
+# unsichtbar und die spaetere Fehlermeldung ebenso.
+import warnings  # noqa: E402
+
+with warnings.catch_warnings(record=True) as _warnungen:
+    warnings.simplefilter("always")
+    compile(agent_quelle, "agent.py", "exec")
+_syntax = [f"Zeile {w.lineno}" for w in _warnungen
+           if issubclass(w.category, SyntaxWarning)]
+check("agent.py uebersetzt ohne SyntaxWarning", not _syntax, _syntax)
+
+check("verify=False steht nirgends im Agenten",
+      "verify=False" not in agent_quelle and "verify = False" not in agent_quelle)
+# Der Rueckfall greift erst beim Senden, also traegt ihn der naechste
+# Heartbeat - geprueft am Quelltext, weil der Heartbeat ein Backend und
+# eine Anmeldung braucht. Die Wirkung ueber HTTP prueft Teil 3.
+check("der Heartbeat vermerkt einen Rueckfall",
+      '"rueckfall"' in agent_quelle)
+
+print("\n--- Teil 8: das Backend urteilt nicht selbst, es prueft Grenzen ---")
+
+
+def host_mit(laufzeit, windows=True):
+    """Ein Host-Doppel. Mehr braucht laufzeit_zustand() nicht."""
+    bundled = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+    if laufzeit is not None:
+        bundled["laufzeit"] = laufzeit
+    return type("HostDoppel", (), {
+        "os_type": main.OSType.windows if windows else main.OSType.linux,
+        "bundled": bundled})()
+
+
+GUT = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+
+check("laufzeit_zustand() gibt es", hasattr(main, "laufzeit_zustand"))
+
+if hasattr(main, "laufzeit_zustand"):
+    befund = {"zustand": "unvollstaendig",
+              "fehlend": ["lib/site-packages/certifi/cacert.pem"],
+              "abweichend": ["python314.dll"], "mehr": 3, "liste": "0.51.2"}
+    zustand, eintraege = main.laufzeit_zustand(host_mit(befund))
+    check("unvollstaendig kommt durch", zustand == "unvollstaendig", zustand)
+    check("fehlende und abweichende Dateien werden benannt",
+          any(e["art"] == "fehlt" and "cacert.pem" in e["name"] for e in eintraege)
+          and any(e["art"] == "anders" and e["name"] == "python314.dll"
+                  for e in eintraege), eintraege)
+    check("die gekappten Treffer tauchen als eigener Eintrag auf",
+          any(e["art"] == "mehr" for e in eintraege), eintraege)
+    check("ok ergibt keinen Eintrag",
+          main.laufzeit_zustand(host_mit({"zustand": "ok", "fehlend": [],
+                                          "abweichend": [], "mehr": 0,
+                                          "liste": "0.51.2"})) == ("ok", []))
+    check("unpruefbar bleibt unpruefbar",
+          main.laufzeit_zustand(host_mit({"zustand": "unpruefbar", "fehlend": [],
+                                          "abweichend": [], "mehr": 0,
+                                          "liste": ""}))[0] == "unpruefbar")
+    check("ohne Feld ist der Zustand unbekannt",
+          main.laufzeit_zustand(host_mit(None))[0] == "unbekannt")
+    # Der Rueckfall auf den Zertifikatsspeicher des Systems gehoert in die
+    # Einzelheiten, aber er ist KEIN Befund: der Zustand bleibt, was er
+    # ist, und die Hostzeile bekommt davon keinen Hinweis. Sonst stuende
+    # ein Dauerhinweis bei jeder Anlage mit eigener CA.
+    _ok_rueckfall = {"zustand": "ok", "fehlend": [], "abweichend": [],
+                     "mehr": 0, "liste": "0.51.2", "rueckfall": True}
+    check("der Rueckfall erscheint als Eintrag",
+          main.laufzeit_zustand(host_mit(_ok_rueckfall))
+          == ("ok", [{"art": "rueckfall", "name": ""}]),
+          main.laufzeit_zustand(host_mit(_ok_rueckfall)))
+    check("ein Linux-Host bleibt unbekannt",
+          main.laufzeit_zustand(host_mit(befund, windows=False))[0] == "unbekannt")
+
+    # Der Befund ist host-lokale Wahrheit: er braucht KEINE
+    # Vergleichsgrundlage auf dem Server. Sonst waere er auf jedem Server
+    # ohne frisch gebaute MSI unsichtbar - und das sind genau die Server,
+    # auf denen etwas im Argen ist.
+    echt_soll = main.paket_soll
+    try:
+        main.paket_soll = lambda *a, **k: None
+        check("der Zustand haengt nicht an paket_soll()",
+              main.laufzeit_zustand(host_mit(befund))[0] == "unvollstaendig")
+    finally:
+        main.paket_soll = echt_soll
+
+if hasattr(main, "bundled_sauber"):
+    laufzeit_gut = {"zustand": "unvollstaendig", "fehlend": ["a"],
+                    "abweichend": [], "mehr": 0, "liste": "0.51.2",
+                    "rueckfall": False}
+    check("ein gueltiger Befund kommt durch bundled_sauber()",
+          main.bundled_sauber({**GUT, "laufzeit": laufzeit_gut})
+          .get("laufzeit") == laufzeit_gut,
+          main.bundled_sauber({**GUT, "laufzeit": laufzeit_gut}))
+    check("ohne Befund bleibt das Feld weg",
+          main.bundled_sauber(GUT) == GUT, main.bundled_sauber(GUT))
+    krumm = {
+        "unbekannter Zustand": {"zustand": "halbgut"},
+        "fehlend keine Liste": {"zustand": "ok", "fehlend": "a"},
+        "Eintrag keine Zeichenkette": {"zustand": "ok", "fehlend": [7]},
+        "Eintrag zu lang": {"zustand": "ok", "fehlend": ["x" * 300]},
+        "zu viele Eintraege": {"zustand": "ok",
+                               "fehlend": [f"d{i}" for i in range(11)]},
+        "mehr als Zeichenkette": {"zustand": "ok", "mehr": "viele"},
+        "rueckfall als Zeichenkette": {"zustand": "ok", "rueckfall": "ja"},
+        "Liste statt Verzeichnis": ["ok"],
+        "Zeichenkette": "ok",
+    }
+    for was, wert in krumm.items():
+        ergebnis = main.bundled_sauber({**GUT, "laufzeit": wert})
+        check(f"verworfen, aber nur die Laufzeit: {was}",
+              "laufzeit" not in ergebnis
+              and ergebnis.get("packages") == GUT["packages"], ergebnis)
+    # Die Grenze selbst, nicht nur ein Stueck weit daneben.
+    check("genau zehn Eintraege sind erlaubt",
+          "laufzeit" in main.bundled_sauber(
+              {**GUT, "laufzeit": {"zustand": "unvollstaendig",
+                                   "fehlend": [f"d{i}" for i in range(10)]}}))
+
+check("HostRead traegt laufzeit_state", "laufzeit_state" in main.HostRead.model_fields)
+check("HostRead traegt laufzeit_diff", "laufzeit_diff" in main.HostRead.model_fields)
+check("die Hostliste fuellt die beiden Felder",
+      "laufzeit_state" in (WURZEL / "backend" / "main.py").read_text(encoding="utf-8"))
+check("die Diagnoseseite nennt die Laufzeitpruefung",
+      any("aufzeit" in c["name"] and "Vergleichsgrundlage" not in c["name"]
+          for c in main.diagnostics()["checks"]),
+      [c["name"] for c in main.diagnostics()["checks"]])
 
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)

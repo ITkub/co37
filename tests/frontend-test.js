@@ -239,7 +239,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "loadAreasTab, editArea, moveArea, scanArea, patchArea, rebootArea, "
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
-  + "bundledNote, bundledDiffText, "
+  + "bundledNote, bundledDiffText, laufzeitNote, laufzeitDiffText, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
@@ -1895,6 +1895,55 @@ global.setTimeout = origSetTimeout;
           api.bundledNote({ bundled_state: "gleich" }) === null);
     check("bundledNote: unbekannt ergibt keinen",
           api.bundledNote({ bundled_state: "unbekannt" }) === null);
+  }
+
+  // --- Laufzeitbefund ------------------------------------------------
+  // Der Hinweis darf NUR bei "unvollstaendig" stehen. "unpruefbar" trifft
+  // am Tag der Veroeffentlichung jeden Host, der die neue MSI noch nicht
+  // hat - ein Hinweis, der ueberall steht, wird nirgends gelesen.
+  if (typeof api.laufzeitNote === "function") {
+    check("laufzeitNote: unvollstaendig ergibt einen Hinweis",
+          typeof api.laufzeitNote({ laufzeit_state: "unvollstaendig" }) === "string"
+          && api.laufzeitNote({ laufzeit_state: "unvollstaendig" }).length > 0,
+          api.laufzeitNote({ laufzeit_state: "unvollstaendig" }));
+    ["ok", "unpruefbar", "unbekannt", undefined].forEach(z =>
+      check("laufzeitNote: " + z + " ergibt keinen",
+            api.laufzeitNote({ laufzeit_state: z }) === null,
+            api.laufzeitNote({ laufzeit_state: z })));
+    // Ein Host kann beides gleichzeitig haben: veraltetes Paket UND
+    // beschaedigte Laufzeit. Beide Hinweise muessen nebeneinander stehen
+    // koennen, deshalb zwei Felder und nicht ein gemeinsamer Zustand.
+    check("beide Hinweise koennen zugleich stehen",
+          api.bundledNote({ bundled_state: "abweichend" }) !== null
+          && api.laufzeitNote({ laufzeit_state: "unvollstaendig" }) !== null);
+    ["de", "en"].forEach(spr => {
+      api.setzeSprache(spr);
+      const txt = api.laufzeitNote({ laufzeit_state: "unvollstaendig" });
+      check("Hinweis bleibt unter 50 Zeichen (" + spr + ")",
+            txt.length <= 50, txt.length + ": " + txt);
+    });
+    api.setzeSprache("de");
+    check("laufzeitDiffText: fehlende Datei wird benannt",
+          (api.laufzeitDiffText({ art: "fehlt", name: "certifi/cacert.pem" }) || "")
+            .indexOf("cacert.pem") >= 0,
+          api.laufzeitDiffText({ art: "fehlt", name: "certifi/cacert.pem" }));
+    check("laufzeitDiffText: gekappte Treffer werden genannt",
+          (api.laufzeitDiffText({ art: "mehr", name: "7" }) || "").indexOf("7") >= 0,
+          api.laufzeitDiffText({ art: "mehr", name: "7" }));
+    // Eine neuere Art aus einem neueren Server wird weggelassen statt als
+    // Schluessel angezeigt - dieselbe Regel wie bei bundledDiffText.
+    check("laufzeitDiffText: unbekannte art wird weggelassen",
+          api.laufzeitDiffText({ art: "voelligneu", name: "x" }) === null);
+    check("laufzeitDiffText: der Rueckfall wird benannt",
+          typeof api.laufzeitDiffText({ art: "rueckfall", name: "" }) === "string",
+          api.laufzeitDiffText({ art: "rueckfall", name: "" }));
+    // Die Hostzeile sagt, DASS etwas fehlt; was fehlt, steht im Verlauf.
+    check("die Detailansicht zeigt laufzeit_diff",
+          appjs.indexOf("laufzeit_diff") >= 0);
+    check("und nennt den Reparaturbefehl",
+          appjs.indexOf("note.laufzeit_fix") >= 0);
+    check("die Hostzeile zeigt den Hinweis",
+          appjs.indexOf("laufzeitNote(h)") >= 0);
     check("bundledNote: ein Host ohne das Feld ergibt keinen",
           api.bundledNote({}) === null);
     // Kein Knopf: die Selbstaktualisierung behebt das gerade NICHT, und

@@ -19,6 +19,7 @@ import platform
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ from typing import Optional
 
 import urllib3
 import requests
+from requests.adapters import HTTPAdapter
 
 AGENT_VERSION = "0.51.2"
 IS_WINDOWS = platform.system() == "Windows"
@@ -277,15 +279,102 @@ def set_token(token: str):
     sichere_rechte(CFG_PATH)
 
 
+# Hat der Rueckfall auf den Zertifikatsspeicher des Systems schon einmal
+# gegriffen? Wird mitgemeldet, damit er nicht still zur Dauerloesung wird.
+RUECKFALL_AKTIV = False
+
+
+class _SystemspeicherAdapter(HTTPAdapter):
+    """
+    Verbindet ueber die Wurzelzertifikate des BETRIEBSSYSTEMS statt ueber
+    das mitgelieferte Buendel.
+
+    Der Umweg ueber einen Adapter ist nicht Geschmackssache: requests
+    nimmt bei verify True, False oder einen Pfad - keinen SSLContext. Und
+    ein Pfad hilft hier nicht, denn der Windows-Zertifikatsspeicher ist
+    keine Datei. ssl.create_default_context() liest ihn (ROOT), und der
+    Kontext kommt nur ueber den PoolManager herein.
+
+    Geprueft wird weiter. Der Rueckfall wechselt die Vertrauensquelle, er
+    schaltet nichts ab.
+    """
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = ssl.create_default_context()
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def _buendel_defekt(exc: BaseException) -> bool:
+    """
+    Liegt dieser Fehler am mitgelieferten Zertifikatsbuendel?
+
+    Zwei Formen, und die zweite ist die, um die es ueberhaupt geht:
+
+    FEHLT die Datei, prueft requests das in HTTPAdapter.cert_verify() -
+    vor jedem Verbindungsaufbau und ausserhalb seiner
+    Ausnahmeumwandlung - und wirft ein nacktes OSError
+    ("Could not find a suitable TLS CA certificate bundle"). Das ist
+    KEINE SSLError. Genau dieser Fall ist am 2026-11-18 eingetreten; eine
+    Behandlung, die nur SSLError faengt, haette ihn verfehlt.
+
+    IST die Datei da, aber unbrauchbar (abgeschnitten, verfaelscht),
+    scheitert erst der Aufbau, und dann ist es eine SSLError.
+
+    Der Ausschluss von RequestException ist nicht Zierde:
+    requests.exceptions.RequestException erbt selbst von OSError. Ohne
+    diese Zeile wuerde jeder Verbindungs- und Zeitfehler eine zweite,
+    genauso aussichtslose Verbindung kosten - und jeden Host, der nur
+    offline ist, als "ueber den Systemspeicher gemeldet" ausweisen.
+    """
+    if isinstance(exc, requests.exceptions.SSLError):
+        return True
+    return (isinstance(exc, OSError)
+            and not isinstance(exc, requests.exceptions.RequestException))
+
+
+def _systemspeicher_session():
+    """
+    Eine Sitzung fuer den Rueckfall. Bewusst ohne Zwischenspeicher: der
+    Fall tritt selten ein, und eine aufgehobene Sitzung waere Zustand,
+    der sich in den Pruefreihen zwischen zwei Faellen mitschleppt.
+    """
+    sitzung = requests.Session()
+    sitzung.mount("https://", _SystemspeicherAdapter())
+    return sitzung
+
+
 def api(method: str, path: str, payload=None, params=None, timeout=120, auth=True):
+    global RUECKFALL_AKTIV
     url = f"{SERVER}{path}"
     headers = dict(HEADERS)
     if auth:
         headers["X-Agent-Token"] = TOKEN
-    resp = requests.request(
-        method, url, json=payload, params=params,
-        headers=headers, verify=VERIFY, timeout=timeout,
-    )
+    argumente = dict(json=payload, params=params, headers=headers,
+                     verify=VERIFY, timeout=timeout)
+    try:
+        resp = requests.request(method, url, **argumente)
+    except OSError as exc:
+        if not _buendel_defekt(exc):
+            raise
+        # Am 2026-11-18 fehlte auf einem Host certifi/cacert.pem. Der
+        # Agent konnte damit nicht mehr melden, dass ihm etwas fehlt -
+        # die Selbstpruefung waere genau im belegten Fall wirkungslos
+        # gewesen. Deshalb EINMAL wiederholen, ueber die
+        # Wurzelzertifikate des Betriebssystems.
+        #
+        # Ausgeloest wird das am gescheiterten Aufbau und nicht an der
+        # Dateipruefung: eine abgeschnittene, aber lesbare PEM faellt
+        # durch jede Lesbarkeitspruefung und scheitert erst hier.
+        #
+        # Scheitert auch die Wiederholung, fliegt die Ausnahme weiter.
+        # Ein dritter Versuch waere nur eine Verzoegerung.
+        if not RUECKFALL_AKTIV:
+            log("TLS-Aufbau mit dem mitgelieferten Zertifikatsbuendel "
+                "gescheitert - Wiederholung ueber den Zertifikatsspeicher "
+                "des Systems. Die mitgelieferte Laufzeit ist vermutlich "
+                "unvollstaendig.", err=True)
+        RUECKFALL_AKTIV = True
+        resp = _systemspeicher_session().request(method, url, **argumente)
     resp.raise_for_status()
     return resp.json() if resp.content else {}
 
@@ -569,10 +658,172 @@ def bundled_stand(site_dir: Optional[Path] = None) -> Optional[dict]:
     return {"python": platform.python_version(), "packages": pakete}
 
 
+LAUFZEIT_LISTE = "laufzeit.json"
+# Mehr Eintraege nuetzen niemandem und wuerden bei jedem Heartbeat
+# mitreisen: fehlt python\ ganz, sind es mehrere hundert.
+LAUFZEIT_MAX_MELDUNG = 10
+
+
+def _laufzeit_vorhanden(basis: Path) -> dict:
+    """
+    Was wirklich unter python\\ liegt, mit denselben Schluesseln wie die
+    Liste: klein geschrieben, "/" als Trenner, __pycache__ ausgelassen.
+
+    Dieselbe Aufzaehlung steht als laufzeit_liste() in
+    packaging/build_msi.py. Doppelt, und das ist hier unvermeidlich: der
+    Agent bekommt packaging/ nicht mitgeliefert - dieselbe Lage wie bei
+    _normname(). Wer die eine aendert, aendert die andere mit, sonst
+    meldet jeder gesunde Host Abweichungen.
+
+    Verglichen wird ueber das AUFGEZAEHLTE Verzeichnis und nicht ueber
+    einen Pfadzugriff mit dem Schluessel: unter Windows findet ein
+    kleingeschriebener Pfad die Datei, auf jedem anderen System nicht -
+    und die Pruefreihen laufen unter Linux.
+    """
+    gefunden: dict[str, Path] = {}
+    try:
+        eintraege = sorted(basis.rglob("*"))
+    except OSError:
+        return gefunden
+    for pfad in eintraege:
+        try:
+            if not pfad.is_file():
+                continue
+            teile = pfad.relative_to(basis).parts
+        except OSError:
+            continue
+        if "__pycache__" in teile:
+            continue
+        gefunden["/".join(teile).lower()] = pfad
+    return gefunden
+
+
+def _cacert_brauchbar(pfad: Path) -> bool:
+    """
+    Fuer cacert.pem reicht Plausibilitaet, und zwar mit Absicht.
+
+    In Anlagen mit eigener Zertifizierungsstelle wird die interne CA an
+    das mitgelieferte Buendel gehaengt - der einzige Weg, dem
+    mitgelieferten Python eine solche CA beizubringen, ohne verify
+    abzuschalten. Auf Groesse oder Pruefsumme geprueft waere jede solche
+    Anlage dauerhaft auffaellig, und ein Hinweis, der immer steht, wird
+    nicht gelesen.
+
+    (Bis zum 2026-11-19 stand hier ein Verweis auf REVERSE-PROXY.md. Dort
+    ist dieser Eingriff NICHT beschrieben - der Verweis war falsch, und
+    eine Begruendung, die auf eine nicht vorhandene Anleitung zeigt,
+    haelt der Frage "kann das weg?" nicht stand.)
+    """
+    try:
+        text = pfad.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "-----BEGIN CERTIFICATE-----" in text
+
+
+def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
+    """
+    Ist die mitgelieferte Laufzeit noch die, die das Paket hineingelegt
+    hat? Vergleicht python\\ gegen laufzeit.json aus demselben Paket.
+
+    Anlass war der 2026-11-18: nach einem MSI-Upgrade fehlte
+    certifi/cacert.pem, der Agent lief in einen TLS-Fehler, und im
+    Backend war davon nur "seit X Minuten nicht gesehen" zu sehen. Die
+    Ursache ist bis heute nicht reproduziert; diese Pruefung behebt sie
+    nicht, sie macht den Schaden sichtbar - egal woher er kommt.
+
+    Die Liste ist UNSIGNIERT. Wer das Installationsverzeichnis
+    beschreiben kann, kann sie auch aendern: das hier erkennt Unfaelle,
+    keine Angreifer.
+
+    zustand ist eines von:
+      ok             - alles da und unveraendert
+      unvollstaendig - mindestens eine Datei fehlt oder weicht ab
+      unpruefbar     - keine oder keine lesbare Liste. Ausdruecklich
+                       NICHT "ok": eine Pruefung, die nichts angesehen
+                       hat, darf nicht gruen melden. Ausdruecklich auch
+                       kein Hinweis in der Hostzeile - am Tag der
+                       Veroeffentlichung hat kein Host die neue MSI.
+
+    Ohne wurzel unter Linux None: dort kommt Python aus der Distribution,
+    CO-37 liefert keine Laufzeit mit, und es gibt nichts zu melden.
+    wurzel ist nur fuer die Pruefung da.
+    """
+    if wurzel is None:
+        if not IS_WINDOWS:
+            return None
+        wurzel = Path(__file__).resolve().parent
+    wurzel = Path(wurzel)
+    leer = {"zustand": "unpruefbar", "fehlend": [], "abweichend": [],
+            "mehr": 0, "liste": ""}
+    try:
+        roh = json.loads((wurzel / LAUFZEIT_LISTE).read_text(encoding="utf-8"))
+        soll = roh["dateien"]
+        if not isinstance(soll, dict):
+            raise ValueError("dateien ist kein Verzeichnis")
+        fassung = str(roh.get("version", ""))
+    except Exception:  # noqa: BLE001
+        # Der Agent darf an seiner eigenen Pruefung nicht sterben.
+        return leer
+
+    vorhanden = _laufzeit_vorhanden(wurzel / "python")
+    fehlend, abweichend = [], []
+    for schluessel, erwartet in sorted(soll.items()):
+        name = str(schluessel).replace("\\", "/").lower()
+        pfad = vorhanden.get(name)
+        if pfad is None:
+            fehlend.append(name)
+            continue
+        if name.rsplit("/", 1)[-1] == "cacert.pem":
+            if not _cacert_brauchbar(pfad):
+                abweichend.append(name)
+            continue
+        if not isinstance(erwartet, dict):
+            abweichend.append(name)
+            continue
+        try:
+            if pfad.stat().st_size != erwartet.get("groesse"):
+                abweichend.append(name)
+                continue
+            summe = hashlib.sha256()
+            with pfad.open("rb") as fh:
+                for block in iter(lambda: fh.read(1024 * 1024), b""):
+                    summe.update(block)
+        except OSError:
+            abweichend.append(name)
+            continue
+        if summe.hexdigest() != erwartet.get("sha256"):
+            abweichend.append(name)
+
+    mehr = max(0, len(fehlend) - LAUFZEIT_MAX_MELDUNG) \
+        + max(0, len(abweichend) - LAUFZEIT_MAX_MELDUNG)
+    return {
+        "zustand": "unvollstaendig" if (fehlend or abweichend) else "ok",
+        "fehlend": fehlend[:LAUFZEIT_MAX_MELDUNG],
+        "abweichend": abweichend[:LAUFZEIT_MAX_MELDUNG],
+        "mehr": mehr,
+        "liste": fassung,
+    }
+
+
 # Einmal beim Start, nicht bei jedem Heartbeat: der Inhalt von
 # site-packages aendert sich nur durch eine Neuinstallation, und die
 # startet den Agenten ohnehin neu.
 BUNDLED = bundled_stand()
+LAUFZEIT = laufzeit_pruefen()
+if BUNDLED is not None and LAUFZEIT is not None:
+    BUNDLED["laufzeit"] = LAUFZEIT
+    if LAUFZEIT["zustand"] == "unvollstaendig":
+        # Im Klartext und ins Protokoll, nicht nur an den Server: am
+        # 2026-11-18 stand an dieser Stelle ein TLS-Fehler, und bis
+        # jemand ihn als fehlende Datei gelesen hatte, war eine Stunde
+        # vergangen.
+        log("Die mitgelieferte Laufzeit ist unvollstaendig. Fehlend: "
+            + (", ".join(LAUFZEIT["fehlend"]) or "-")
+            + "; abweichend: " + (", ".join(LAUFZEIT["abweichend"]) or "-")
+            + (f"; weitere {LAUFZEIT['mehr']}" if LAUFZEIT["mehr"] else "")
+            + ". Das Paket muss repariert werden: msiexec /fa <ProductCode> "
+              "/qn REBOOT=ReallySuppress", err=True)
 
 
 def _which(tool: str) -> bool:
@@ -2334,6 +2585,12 @@ def main():
             # entscheidet, ob ein Host als unbekannt oder als abweichend
             # gilt.
             if BUNDLED:
+                # Der Rueckfall greift erst beim Senden, diese Nutzlast ist
+                # also schon unterwegs, wenn er zuschlaegt. Vermerkt wird er
+                # beim naechsten Heartbeat - und bis dahin steht die Ursache
+                # im lokalen Protokoll.
+                if RUECKFALL_AKTIV and isinstance(BUNDLED.get("laufzeit"), dict):
+                    BUNDLED["laufzeit"]["rueckfall"] = True
                 payload["bundled"] = BUNDLED
             resp = api("POST", "/api/v1/agent/heartbeat", payload, timeout=60)
             interval = resp.get("poll_interval", interval)
