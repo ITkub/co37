@@ -1079,6 +1079,9 @@ MUSS_ENTHALTEN = (
     "UPGRADINGPRODUCTCODE",   # die Bedingung an RemoveTask (F-48, gross)
     "install_task.py",
     "agent.py",
+    # Ohne diese Datei im Paket meldet JEDER Host dauerhaft "unpruefbar",
+    # und die Selbstpruefung der Laufzeit ist lautlos aus.
+    "laufzeit.json",
 )
 
 

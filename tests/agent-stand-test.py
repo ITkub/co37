@@ -732,6 +732,12 @@ check("die Liste enthaelt sich selbst nicht",
 # Gegenprobe ist der Bau auf dem Baurechner samt seiner Protokollzeile.
 bm_quelle = (WURZEL / "packaging" / "build_msi.py").read_text(encoding="utf-8")
 check("der Bau schreibt laufzeit.json", "laufzeit.json" in bm_quelle)
+# wixl laesst Eintraege stillschweigend weg - deshalb gibt es
+# MUSS_ENTHALTEN. Fehlte laufzeit.json im Paket, meldete JEDER Host
+# dauerhaft "unpruefbar", und die Funktion waere lautlos aus.
+check("laufzeit.json steht in MUSS_ENTHALTEN",
+      "laufzeit.json" in getattr(_bm, "MUSS_ENTHALTEN", ()),
+      getattr(_bm, "MUSS_ENTHALTEN", None))
 check("und zwar vor add_tree",
       "laufzeit.json" in bm_quelle and "tree = add_tree(work)" in bm_quelle
       and bm_quelle.index("laufzeit.json") < bm_quelle.index("tree = add_tree(work)"))
@@ -911,17 +917,21 @@ class _ReqAttrappe:
     exceptions = _echte_requests.exceptions
     adapters = _echte_requests.adapters
 
-    def __init__(self, fehler_bei=(1,)):
+    def __init__(self, fehler_bei=(1,), art=None):
         self.aufrufe = 0
         self.alle = []
         self.sitzungen = []
         self.fehler_bei = set(fehler_bei)
+        # Welche Ausnahme geworfen wird, ist der Kern dieser Pruefung:
+        # requests wirft NICHT immer SSLError. Siehe unten.
+        self.art = art or (lambda: _echte_requests.exceptions.SSLError(
+            "Buendel unbrauchbar"))
 
     def request(self, method, url, **kw):
         self.aufrufe += 1
         self.alle.append({"method": method, "url": url, "kwargs": kw})
         if self.aufrufe in self.fehler_bei:
-            raise self.exceptions.SSLError("Buendel unbrauchbar")
+            raise self.art()
         return _Antwort()
 
     def Session(self):
@@ -930,9 +940,9 @@ class _ReqAttrappe:
         return s
 
 
-def mit_attrappe(fehler_bei):
+def mit_attrappe(fehler_bei, art=None):
     """Einen api()-Aufruf gegen die Attrappe fahren. Gibt (Attrappe, Fehler) zurueck."""
-    attrappe = _ReqAttrappe(fehler_bei)
+    attrappe = _ReqAttrappe(fehler_bei, art)
     agent.requests = attrappe
     agent.RUECKFALL_AKTIV = False
     fehler = None
@@ -972,6 +982,69 @@ else:
     check("ein zweiter SSLError wird durchgelassen",
           isinstance(f3, _echte_requests.exceptions.SSLError), f3)
     check("und nicht ein drittes Mal versucht", a3.aufrufe == 2, a3.aufrufe)
+
+# ----------------------------------------------------------------------
+# Der Fall, den die Attrappe oben NICHT abdeckt - und der eigentliche
+# Schadensfall vom 2026-11-18.
+#
+# requests prueft die Existenz des Zertifikatsbuendels in
+# HTTPAdapter.cert_verify(), VOR jedem Verbindungsaufbau und ausserhalb
+# seiner Ausnahmeumwandlung. FEHLT die Datei, wirft es ein nacktes
+# OSError - keine SSLError. Eine Pruefung, die nur SSLError wirft, setzt
+# damit voraus, was zu zeigen war.
+#
+# Deshalb hier zuerst eine Festschreibung der Bibliothek selbst: ohne
+# Netz, ohne Server, nur ueber einen Pfad, der nicht existiert.
+try:
+    _echte_requests.request("GET", "https://127.0.0.1:1/x",
+                            verify="/nicht/vorhanden.pem", timeout=1)
+    _bibliothek = None
+except Exception as exc:  # noqa: BLE001
+    _bibliothek = exc
+check("fehlendes Buendel ergibt OSError, nicht SSLError",
+      isinstance(_bibliothek, OSError)
+      and not isinstance(_bibliothek, _echte_requests.exceptions.SSLError),
+      type(_bibliothek).__name__)
+check("und auch keine RequestException",
+      not isinstance(_bibliothek, _echte_requests.exceptions.RequestException),
+      type(_bibliothek).__name__)
+
+if hasattr(agent, "RUECKFALL_AKTIV"):
+    _fehlt_buendel = lambda: OSError(  # noqa: E731
+        "Could not find a suitable TLS CA certificate bundle, invalid path: "
+        "C:\\Program Files\\CO37\\python\\Lib\\site-packages\\certifi\\cacert.pem")
+    a4, f4 = mit_attrappe((1,), _fehlt_buendel)
+    check("auch bei fehlendem Buendel wird wiederholt", a4.aufrufe == 2, a4.aufrufe)
+    check("und der Rueckfall wird vermerkt", agent.RUECKFALL_AKTIV is True)
+    check("der Aufruf kommt durch", f4 is None, f4)
+
+    # Gegenprobe, damit der Rueckfall nicht bei JEDEM Fehler greift:
+    # requests.exceptions.RequestException erbt selbst von OSError, ein
+    # Verbindungsfehler ist also auch ein OSError. Wiederholt wuerde er
+    # nur eine zweite, genauso aussichtslose Verbindung kosten - und
+    # jeden Host, der offline ist, als "ueber den Systemspeicher
+    # gemeldet" ausweisen.
+    a5, f5 = mit_attrappe((1, 2), lambda: _echte_requests.exceptions.ConnectionError(
+        "Verbindung abgelehnt"))
+    check("ein Verbindungsfehler loest keinen Rueckfall aus",
+          a5.aufrufe == 1 and agent.RUECKFALL_AKTIV is False,
+          (a5.aufrufe, agent.RUECKFALL_AKTIV))
+    check("und fliegt unveraendert weiter",
+          isinstance(f5, _echte_requests.exceptions.ConnectionError), f5)
+
+# Der Agent muss sich ohne Warnung uebersetzen lassen. Ungueltige
+# Escape-Sequenzen sind seit Python 3.12 eine Warnung und sollen
+# SyntaxError werden - dann laedt agent.py nicht mehr. Unter Windows
+# laeuft er als pythonw.exe ohne Konsole; die Warnung waere dort
+# unsichtbar und die spaetere Fehlermeldung ebenso.
+import warnings  # noqa: E402
+
+with warnings.catch_warnings(record=True) as _warnungen:
+    warnings.simplefilter("always")
+    compile(agent_quelle, "agent.py", "exec")
+_syntax = [f"Zeile {w.lineno}" for w in _warnungen
+           if issubclass(w.category, SyntaxWarning)]
+check("agent.py uebersetzt ohne SyntaxWarning", not _syntax, _syntax)
 
 check("verify=False steht nirgends im Agenten",
       "verify=False" not in agent_quelle and "verify = False" not in agent_quelle)

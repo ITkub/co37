@@ -304,6 +304,34 @@ class _SystemspeicherAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
+def _buendel_defekt(exc: BaseException) -> bool:
+    """
+    Liegt dieser Fehler am mitgelieferten Zertifikatsbuendel?
+
+    Zwei Formen, und die zweite ist die, um die es ueberhaupt geht:
+
+    FEHLT die Datei, prueft requests das in HTTPAdapter.cert_verify() -
+    vor jedem Verbindungsaufbau und ausserhalb seiner
+    Ausnahmeumwandlung - und wirft ein nacktes OSError
+    ("Could not find a suitable TLS CA certificate bundle"). Das ist
+    KEINE SSLError. Genau dieser Fall ist am 2026-11-18 eingetreten; eine
+    Behandlung, die nur SSLError faengt, haette ihn verfehlt.
+
+    IST die Datei da, aber unbrauchbar (abgeschnitten, verfaelscht),
+    scheitert erst der Aufbau, und dann ist es eine SSLError.
+
+    Der Ausschluss von RequestException ist nicht Zierde:
+    requests.exceptions.RequestException erbt selbst von OSError. Ohne
+    diese Zeile wuerde jeder Verbindungs- und Zeitfehler eine zweite,
+    genauso aussichtslose Verbindung kosten - und jeden Host, der nur
+    offline ist, als "ueber den Systemspeicher gemeldet" ausweisen.
+    """
+    if isinstance(exc, requests.exceptions.SSLError):
+        return True
+    return (isinstance(exc, OSError)
+            and not isinstance(exc, requests.exceptions.RequestException))
+
+
 def _systemspeicher_session():
     """
     Eine Sitzung fuer den Rueckfall. Bewusst ohne Zwischenspeicher: der
@@ -325,7 +353,9 @@ def api(method: str, path: str, payload=None, params=None, timeout=120, auth=Tru
                      verify=VERIFY, timeout=timeout)
     try:
         resp = requests.request(method, url, **argumente)
-    except requests.exceptions.SSLError:
+    except OSError as exc:
+        if not _buendel_defekt(exc):
+            raise
         # Am 2026-11-18 fehlte auf einem Host certifi/cacert.pem. Der
         # Agent konnte damit nicht mehr melden, dass ihm etwas fehlt -
         # die Selbstpruefung waere genau im belegten Fall wirkungslos
@@ -636,7 +666,7 @@ LAUFZEIT_MAX_MELDUNG = 10
 
 def _laufzeit_vorhanden(basis: Path) -> dict:
     """
-    Was wirklich unter python\ liegt, mit denselben Schluesseln wie die
+    Was wirklich unter python\\ liegt, mit denselben Schluesseln wie die
     Liste: klein geschrieben, "/" als Trenner, __pycache__ ausgelassen.
 
     Dieselbe Aufzaehlung steht als laufzeit_liste() in
@@ -672,10 +702,17 @@ def _cacert_brauchbar(pfad: Path) -> bool:
     """
     Fuer cacert.pem reicht Plausibilitaet, und zwar mit Absicht.
 
-    Eine interne CA an das mitgelieferte Buendel zu haengen ist ein
-    dokumentierter Eingriff (REVERSE-PROXY.md). Auf Groesse oder
-    Pruefsumme geprueft waere jede solche Anlage dauerhaft auffaellig -
-    und ein Hinweis, der immer steht, wird nicht gelesen.
+    In Anlagen mit eigener Zertifizierungsstelle wird die interne CA an
+    das mitgelieferte Buendel gehaengt - der einzige Weg, dem
+    mitgelieferten Python eine solche CA beizubringen, ohne verify
+    abzuschalten. Auf Groesse oder Pruefsumme geprueft waere jede solche
+    Anlage dauerhaft auffaellig, und ein Hinweis, der immer steht, wird
+    nicht gelesen.
+
+    (Bis zum 2026-11-19 stand hier ein Verweis auf REVERSE-PROXY.md. Dort
+    ist dieser Eingriff NICHT beschrieben - der Verweis war falsch, und
+    eine Begruendung, die auf eine nicht vorhandene Anleitung zeigt,
+    haelt der Frage "kann das weg?" nicht stand.)
     """
     try:
         text = pfad.read_text(encoding="utf-8", errors="replace")
@@ -687,7 +724,7 @@ def _cacert_brauchbar(pfad: Path) -> bool:
 def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
     """
     Ist die mitgelieferte Laufzeit noch die, die das Paket hineingelegt
-    hat? Vergleicht python\ gegen laufzeit.json aus demselben Paket.
+    hat? Vergleicht python\\ gegen laufzeit.json aus demselben Paket.
 
     Anlass war der 2026-11-18: nach einem MSI-Upgrade fehlte
     certifi/cacert.pem, der Agent lief in einen TLS-Fehler, und im
