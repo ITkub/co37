@@ -602,7 +602,7 @@ const BUNDLED_ART = {
 
 // Gruende, bei denen die Automatik NICHT mehr handeln wird. Alle anderen
 // sind voruebergehend: dann kommt der Neustart von selbst.
-const LAUFZEIT_VON_HAND = ["aus", "zweiter", "rueckweg"];
+const LAUFZEIT_VON_HAND = ["aus", "zweiter", "rueckweg", "gescheitert"];
 
 function laufzeitNote(h){
   // Der Hinweis steht NUR bei "unvollstaendig".
@@ -654,6 +654,7 @@ const LAUFZEIT_GRUND = {
   auftrag: "note.laufzeit_reason_job",
   warten: "note.laufzeit_reason_wait",
   laufzeit: "note.laufzeit_reason_incomplete",
+  gescheitert: "note.laufzeit_reason_failed",
 };
 
 function laufzeitDiffText(e){

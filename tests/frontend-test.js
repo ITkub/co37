@@ -240,6 +240,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
   + "bundledNote, bundledDiffText, laufzeitNote, laufzeitDiffText, "
+  + "LAUFZEIT_VON_HAND, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
@@ -1902,6 +1903,15 @@ global.setTimeout = origSetTimeout;
   // am Tag der Veroeffentlichung jeden Host, der die neue MSI noch nicht
   // hat - ein Hinweis, der ueberall steht, wird nirgends gelesen.
   if (typeof api.laufzeitNote === "function") {
+    // Ein gescheiterter Neustart kommt nicht von selbst wieder: der
+    // Hinweis muss eine Hand verlangen, nicht "startet neu" sagen.
+    check("ein gescheitertes Handeln verlangt eine Hand",
+          (api.LAUFZEIT_VON_HAND || []).indexOf("gescheitert") >= 0,
+          api.LAUFZEIT_VON_HAND);
+    check("der Grund 'gescheitert' ist uebersetzt",
+          typeof api.laufzeitDiffText(
+            { art: "neustart", name: "gescheitert" }) === "string",
+          api.laufzeitDiffText({ art: "neustart", name: "gescheitert" }));
     check("laufzeitNote: unvollstaendig ergibt einen Hinweis",
           typeof api.laufzeitNote({ laufzeit_state: "unvollstaendig" }) === "string"
           && api.laufzeitNote({ laufzeit_state: "unvollstaendig" }).length > 0,

@@ -2567,7 +2567,7 @@ LAUFZEIT_ZUSTAENDE = {"ok", "unvollstaendig", "unpruefbar"}
 # nennen kann. Dieselbe Menge steht als NEUSTART_GRUENDE im Agenten; ein
 # Grund, den der Server nicht kennt, wird verworfen statt angezeigt.
 NEUSTART_GRUENDE = {"gleich", "aus", "auftrag", "laufzeit", "warten",
-                    "zweiter", "rueckweg", "ok"}
+                    "zweiter", "rueckweg", "gescheitert", "ok"}
 LAUFZEIT_MAX = 10
 LAUFZEIT_PFAD = re.compile(r"^[A-Za-z0-9 ._/\\+-]{1,200}$")
 LAUFZEIT_MEHR_MAX = 100000
