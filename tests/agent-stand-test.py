@@ -1733,8 +1733,29 @@ rw_quelle = getattr(agent, "PS_AUFGABE_PRUEFEN", "")
 check("die Funktion benutzt die Abfrage",
       hasattr(agent, "rueckweg_bestaetigt")
       and "PS_AUFGABE_PRUEFEN" in inspect.getsource(agent.rueckweg_bestaetigt))
+# Am 2026-11-20 auf einem Windows-Testhost gemessen, nicht angenommen:
+#
+#   Execute   : "C:\Program Files\CO37\python\pythonw.exe"
+#   Arguments : "C:\Program Files\CO37\agent.py"
+#   Interval  : PT5M   Duration : (leer)   StopAtDurationEnd : False
+#
+# Zwei Dinge daran sind tragend. Erstens zerlegt schtasks das /TR
+# wirklich in Execute und Arguments - sonst stuende die ganze
+# Befehlszeile in Execute und Test-Path scheiterte auf jedem gesunden
+# Host. Zweitens stehen die ANFUEHRUNGSZEICHEN im Wert: ohne Trim('"')
+# zeigt der Pfad auf "C:\...pythonw.exe" samt Zeichen, Test-Path sagt
+# nein, und rueckweg_bestaetigt() ergibt ueberall False - das Merkmal
+# waere lautlos wirkungslos, sichtbar nur als Grund "rueckweg".
+#
+# Geprueft wird am Quelltext, weil die Abfrage Windows braucht. Das ist
+# die schwaechere Sorte Pruefung; sie steht hier mit der Messung daneben,
+# damit niemand das Trim fuer Zierat haelt und herausnimmt.
 for teil, was in (("CO37Agent", "die Aufgabe beim Namen"),
                   ("Disabled", "den ausgeschalteten Zustand"),
+                  ("$exe = $exe.Trim('\"')",
+                   "die Anfuehrungszeichen um den Aufruf"),
+                  ("$arg = $arg.Trim('\"')",
+                   "die Anfuehrungszeichen um das Argument"),
                   ("Test-Path -LiteralPath $exe", "die Datei des Aufrufs"),
                   ("Test-Path -LiteralPath $arg", "die Datei des Arguments"),
                   ("pythonw.exe", "dass der Aufruf pythonw.exe ist"),
