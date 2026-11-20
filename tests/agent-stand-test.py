@@ -1457,20 +1457,27 @@ ABW = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"},
        "laufzeit": dict(OK)}
 
 
+ERLAUBT = {"agent_laufzeit_neustart": True}
+
+
 def grund(stand, antwort=None, versucht=None, rueckweg=True, zweimal=True):
     """
     Einmal durch neustart_faellig(). zweimal=True heisst: die Abweichung
     gilt als beim vorigen Heartbeat schon gesehen (Sicherung 6).
+
+    Die Erlaubnis muss ausdruecklich in der Antwort stehen - ein
+    Schweigen des Servers ist KEINE Zustimmung.
     """
     if not hasattr(agent, "neustart_faellig"):
         return "(fehlt)"
     echt = agent.rueckweg_bestaetigt
     agent.rueckweg_bestaetigt = lambda: rueckweg
     agent._NEUSTART_GESEHEN = None
+    antwort = dict(ERLAUBT, **(antwort or {}))
     try:
         if zweimal:
-            agent.neustart_faellig(stand, antwort or {}, versucht)
-        return agent.neustart_faellig(stand, antwort or {}, versucht)[1]
+            agent.neustart_faellig(stand, antwort, versucht)
+        return agent.neustart_faellig(stand, antwort, versucht)[1]
     finally:
         agent.rueckweg_bestaetigt = echt
 
@@ -1510,6 +1517,37 @@ if hasattr(agent, "neustart_faellig"):
     # alles erfuellt
     check("alles erfuellt: Neustart", grund(ABW) == "ok", grund(ABW))
 
+    # I2: ein Schweigen des Servers ist keine Zustimmung. Ein aelteres
+    # Backend kennt den Schluessel nicht und schickt ihn nicht - dort
+    # darf sich kein Agent von selbst beenden, und es gibt dort auch
+    # keinen Schalter, mit dem man es verhindern koennte.
+    check("ohne ausdrueckliche Erlaubnis kein Neustart",
+          grund(ABW, {"agent_laufzeit_neustart": None}) == "aus",
+          grund(ABW, {"agent_laufzeit_neustart": None}))
+
+    # I1: der zweite Blick muss zweimal MESSEN, nicht zweimal dieselbe
+    # Messung auswerten. Dafuer wird der Takt zurueckgesetzt.
+    agent._NEUSTART_GESEHEN = None
+    agent._STAND_GEPRUEFT = 12345.0
+    agent.neustart_faellig(ABW, dict(ERLAUBT), None)
+    check("nach 'warten' wird neu gemessen", agent._STAND_GEPRUEFT is None,
+          agent._STAND_GEPRUEFT)
+
+    # Kleinigkeit 5: ein gleicher Stand loescht den Merker - der Neustart
+    # hat gewirkt, und dieselbe Fassung soll spaeter wieder duerfen.
+    gemerkt = []
+    echt_vergessen = getattr(agent, "ziel_vergessen", None)
+    if echt_vergessen:
+        agent.ziel_vergessen = lambda: gemerkt.append("weg")
+        try:
+            agent.neustart_faellig(GLEICH, dict(ERLAUBT), None)
+        finally:
+            agent.ziel_vergessen = echt_vergessen
+        check("ein gleicher Stand loescht den Merker", gemerkt == ["weg"],
+              gemerkt)
+    else:
+        check("ziel_vergessen() gibt es", False, "fehlt")
+
     # Der Grund reist beim naechsten Heartbeat mit.
     try:
         pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(OK))
@@ -1521,8 +1559,8 @@ if hasattr(agent, "neustart_faellig"):
         agent._NEUSTART_GRUND = None
         try:
             s1 = agent.stand_melden(jetzt=400.0)
-            agent.neustart_faellig(s1, {}, None)
-            agent.neustart_faellig(s1, {}, None)
+            agent.neustart_faellig(s1, dict(ERLAUBT), None)
+            agent.neustart_faellig(s1, dict(ERLAUBT), None)
             s2 = agent.stand_melden(jetzt=460.0)
             check("der Grund reist im Stand mit",
                   s2.get("neustart") == "rueckweg", s2.get("neustart"))
@@ -1541,6 +1579,41 @@ if hasattr(agent, "neustart_faellig"):
 # braucht.
 import inspect  # noqa: E402
 
+# C1, I3 und I4: die HANDLUNG, nicht nur die Entscheidung.
+check("neustart_ausfuehren() gibt es", hasattr(agent, "neustart_ausfuehren"))
+
+if hasattr(agent, "neustart_ausfuehren"):
+    def ausfuehren(merker_ok=True, neustart_ok=True):
+        ruf = []
+        e1, e2 = agent.ziel_vermerken, agent.restart_self_detached
+        agent.ziel_vermerken = lambda z: (ruf.append("merker"), merker_ok)[1]
+        agent.restart_self_detached = lambda: (ruf.append("neustart"),
+                                               neustart_ok)[1]
+        try:
+            return agent.neustart_ausfuehren(ABW), ruf
+        finally:
+            agent.ziel_vermerken, agent.restart_self_detached = e1, e2
+
+    ok, ruf = ausfuehren()
+    check("im guten Fall wird vermerkt und dann neu gestartet",
+          ok is True and ruf == ["merker", "neustart"], (ok, ruf))
+    # C1: ohne Merker kein Neustart. Der Merker ist die EINZIGE Sicherung
+    # gegen eine Schleife; er ueberlebt den Neustart, der Speicher nicht.
+    ok, ruf = ausfuehren(merker_ok=False)
+    check("ohne vermerktes Ziel wird NICHT neu gestartet",
+          ok is False and ruf == ["merker"], (ok, ruf))
+    # I3: scheitert der Neustart selbst, darf sich der Agent nicht
+    # beenden - sonst ist er weg und niemand holt ihn.
+    ok, ruf = ausfuehren(neustart_ok=False)
+    check("scheitert der Neustart, wird nicht beendet", ok is False, (ok, ruf))
+
+check("restart_self_detached() sagt, ob es gelungen ist",
+      "return True" in inspect.getsource(agent.restart_self_detached))
+check("ziel_vermerken() sagt, ob es gelungen ist",
+      "return False" in inspect.getsource(agent.ziel_vermerken))
+check("der Merker wird atomar geschrieben",
+      ".replace(" in inspect.getsource(agent.ziel_vermerken))
+
 # Die Abfrage steht als Konstante neben der Funktion - dort wird
 # geprueft, und zusaetzlich, dass die Funktion sie wirklich benutzt.
 rw_quelle = getattr(agent, "PS_AUFGABE_PRUEFEN", "")
@@ -1550,7 +1623,9 @@ check("die Funktion benutzt die Abfrage",
 for teil, was in (("CO37Agent", "die Aufgabe beim Namen"),
                   ("Disabled", "den ausgeschalteten Zustand"),
                   ("Test-Path -LiteralPath $exe", "die Datei des Aufrufs"),
-                  ("Test-Path -LiteralPath $arg", "die Datei des Arguments")):
+                  ("Test-Path -LiteralPath $arg", "die Datei des Arguments"),
+                  ("pythonw.exe", "dass der Aufruf pythonw.exe ist"),
+                  ("agent.py", "dass das Argument agent.py ist")):
     check(f"rueckweg_bestaetigt() prueft {was}", teil in rw_quelle,
           None if teil in rw_quelle else rw_quelle[:0])
 # Die Schleife muss die Entscheidung auch wirklich treffen und
@@ -1558,6 +1633,29 @@ for teil, was in (("CO37Agent", "die Aufgabe beim Namen"),
 # Anmeldung braucht; die Logik selbst ist oben behandelt.
 for teil in ("neustart_faellig(", "ziel_vermerken(", "restart_self_detached()"):
     check(f"die Heartbeat-Schleife ruft {teil}", teil in agent_quelle)
+
+# Und sie muss danach AUFHOEREN. Ohne das return laeuft der alte Prozess
+# weiter, haelt die Einzelinstanz-Sperre, und der angestossene Neustart
+# beendet sich sofort wieder ("Es laeuft bereits ein Agent") - der Host
+# bliebe auf der alten Laufzeit stehen, und der Merker haette den
+# zweiten Versuch schon verbraucht. Genau der Fehlschlag, wegen dem es
+# 0.51.4 und 0.51.5 gab. Geprueft wird am Baum, nicht an Zeichenketten:
+# ein "return" irgendwo in der Naehe beweist nichts.
+import ast as _ast  # noqa: E402
+
+_baum = _ast.parse(agent_quelle)
+_main = next((k for k in _ast.walk(_baum)
+              if isinstance(k, _ast.FunctionDef) and k.name == "main"), None)
+_zweige = [k for k in _ast.walk(_main)] if _main else []
+_treffer = [k for k in _zweige if isinstance(k, _ast.If)
+            and "neustart_ausfuehren" in _ast.dump(k.test)]
+check("main() entscheidet ueber neustart_ausfuehren()", len(_treffer) == 1,
+      len(_treffer))
+if len(_treffer) == 1:
+    _rumpf = _treffer[0].body
+    check("nach dem angestossenen Neustart kehrt die Schleife zurueck",
+          len(_rumpf) == 1 and isinstance(_rumpf[0], _ast.Return),
+          [type(k).__name__ for k in _rumpf])
 
 check("ohne Windows ist der Rueckweg bestaetigt",
       agent.rueckweg_bestaetigt() is True if not agent.IS_WINDOWS else True)

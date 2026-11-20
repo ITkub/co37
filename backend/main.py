@@ -2645,23 +2645,16 @@ def bundled_sauber(raw) -> dict:
 
     {} heisst immer "nichts Verwertbares gemeldet" und wird vom Vergleich
     als unbekannt behandelt, nicht als Abweichung.
+
+    Der Stand auf der Platte wird mit demselben Pruefer geholt wie der
+    des Prozesses: zwei Pruefer waeren zwei Wahrheiten, und sie laufen
+    unbemerkt auseinander.
     """
-    if not isinstance(raw, dict):
+    ergebnis = _stand_sauber(raw)
+    if not ergebnis:
         return {}
-    python = raw.get("python")
-    pakete = raw.get("packages")
-    if not isinstance(python, str) or not BUNDLED_FASSUNG.match(python):
-        return {}
-    if not isinstance(pakete, dict) or len(pakete) > BUNDLED_MAX:
-        return {}
-    for name, fassung in pakete.items():
-        if not isinstance(name, str) or not BUNDLED_NAME.match(name):
-            return {}
-        if not isinstance(fassung, str) or not BUNDLED_FASSUNG.match(fassung):
-            return {}
-    ergebnis = {"python": python, "packages": dict(pakete)}
     # Was der PROZESS des Hosts fuehrt - die Momentaufnahme von seinem
-    # Start. Dieselben Grenzen wie oben, deshalb derselbe Pruefer.
+    # Start.
     laeuft = _stand_sauber(raw.get("laeuft"))
     if laeuft:
         ergebnis["laeuft"] = laeuft
@@ -2872,7 +2865,6 @@ def laufzeit_zustand(host) -> tuple[str, list[dict]]:
     befund = bundled.get("laufzeit")
     if not isinstance(befund, dict) or befund.get("zustand") not in LAUFZEIT_ZUSTAENDE:
         return "unbekannt", []
-    bundled = bundled if isinstance(bundled, dict) else {}
     zustand = befund["zustand"]
     eintraege = []
     # Ein Prozess, der eine andere Laufzeit fuehrt als die auf der

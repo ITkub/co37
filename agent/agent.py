@@ -847,7 +847,9 @@ def installierte_python(wurzel: Optional[Path] = None) -> Optional[str]:
 LAUFT = bundled_stand()
 
 # Wie oft die Dateipruefung hoechstens laeuft. Sie liest rund 40 MB;
-# das gehoert nicht in einen Minutentakt.
+# das gehoert nicht in einen Minutentakt. Vor einem Selbstneustart wird
+# der Takt eigens zurueckgesetzt (neustart_faellig, Grund "warten"),
+# damit der zweite Blick wirklich ein zweiter ist.
 LAUFZEIT_TAKT = 3600
 
 # Solange etwas nicht stimmt, wird haeufiger nachgesehen. Zwei Gruende,
@@ -896,7 +898,9 @@ if ($exe) { $exe = $exe.Trim('"') }
 $arg = $a.Arguments
 if ($arg) { $arg = $arg.Trim('"') }
 if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { 'EXE_FEHLT'; exit }
-if ($arg -and -not (Test-Path -LiteralPath $arg)) { 'ARG_FEHLT'; exit }
+if ([IO.Path]::GetFileName($exe) -ne 'pythonw.exe') { 'EXE_FREMD'; exit }
+if (-not $arg -or -not (Test-Path -LiteralPath $arg)) { 'ARG_FEHLT'; exit }
+if ([IO.Path]::GetFileName($arg) -ne 'agent.py') { 'ARG_FREMD'; exit }
 'OK'
 """
 
@@ -950,19 +954,54 @@ def versuchtes_ziel() -> Optional[str]:
     try:
         return (Path(__file__).resolve().parent / NEUSTART_MERKER).read_text(
             encoding="utf-8").strip() or None
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: ein Merker mit Nullbytes laesst read_text() platzen.
+        # Kein Ziel ist harmlos, ein Absturz hier nicht.
         return None
 
 
-def ziel_vermerken(ziel: str) -> None:
-    """Vor dem Beenden festhalten, wofuer neu gestartet wurde."""
+def ziel_vermerken(ziel: str) -> bool:
+    """
+    Vor dem Beenden festhalten, wofuer neu gestartet wurde. Gibt zurueck,
+    ob es geklappt hat.
+
+    Dieser Merker ist die EINZIGE Sicherung gegen eine Neustartschleife,
+    die den Neustart selbst ueberlebt - der Speicher tut es nicht. Laesst
+    er sich nicht schreiben, wird deshalb nicht beendet; das entscheidet
+    neustart_ausfuehren().
+
+    Geschrieben wird daneben und dann umbenannt. Ein halb geschriebener
+    Merker waere ein Ziel, das zu keinem Stand passt - die Sicherung
+    waere lautlos unwirksam, und genau das faellt niemandem auf.
+    """
+    datei = Path(__file__).resolve().parent / NEUSTART_MERKER
+    neben = datei.with_name(NEUSTART_MERKER + ".neu")
     try:
-        (Path(__file__).resolve().parent / NEUSTART_MERKER).write_text(
-            ziel, encoding="utf-8")
+        neben.write_text(ziel, encoding="utf-8")
+        neben.replace(datei)
+        return True
     except OSError as exc:
-        # Nicht abbrechen: ohne Merker gibt es im schlimmsten Fall einen
-        # zweiten Neustart, mit abgebrochenem Neustart gar keinen.
-        log(f"Neustartziel nicht vermerkbar: {exc}", err=True)
+        log(f"Neustartziel nicht vermerkbar, daher kein Neustart: {exc}",
+            err=True)
+        try:
+            neben.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def ziel_vergessen() -> None:
+    """
+    Den Merker loeschen, sobald gelaufener und liegender Stand gleich sind.
+
+    Der Neustart hat gewirkt. Bliebe das Ziel liegen, waere ein spaeteres
+    Release, das wieder genau auf diesen Stand fuehrt, als "schon
+    erfolglos versucht" abgetan - der Neustart wuerde dann ausbleiben.
+    """
+    try:
+        (Path(__file__).resolve().parent / NEUSTART_MERKER).unlink()
+    except OSError:
+        pass
 
 
 def neustart_faellig(stand: Optional[dict], antwort: dict,
@@ -983,7 +1022,7 @@ def neustart_faellig(stand: Optional[dict], antwort: dict,
       2  Ziel schon versucht     -> "zweiter"
       3  Rueckweg unbestaetigt   -> "rueckweg"
     """
-    global _NEUSTART_GESEHEN, _NEUSTART_GRUND
+    global _NEUSTART_GESEHEN, _NEUSTART_GRUND, _STAND_GEPRUEFT
     grund = "gleich"
     beenden = False
     laeuft = (stand or {}).get("laeuft")
@@ -994,9 +1033,14 @@ def neustart_faellig(stand: Optional[dict], antwort: dict,
                   and (laeuft.get("packages") or {}) == platte["packages"])
         if gleich:
             _NEUSTART_GESEHEN = None
+            ziel_vergessen()
         else:
             ziel = _neustart_ziel(stand)
-            if antwort.get("agent_laufzeit_neustart") is False:
+            if not antwort.get("agent_laufzeit_neustart"):
+                # Nicht "is False": ein aelteres Backend kennt den
+                # Schluessel nicht und schickt ihn nicht mit. Dort gibt es
+                # auch keinen Schalter, mit dem ein Administrator das
+                # verhindern koennte - also gilt Schweigen als Nein.
                 grund = "aus"
             elif antwort.get("jobs"):
                 grund = "auftrag"
@@ -1007,6 +1051,11 @@ def neustart_faellig(stand: Optional[dict], antwort: dict,
                 grund = "laufzeit"
             elif _NEUSTART_GESEHEN != ziel:
                 _NEUSTART_GESEHEN = ziel
+                # Der zweite Blick soll zweimal MESSEN, nicht zweimal
+                # dieselbe Messung auswerten: ohne das hier haette
+                # stand_melden() den Befund aus dem Takt wiederverwendet,
+                # und die Sicherung waere nur eine Verzoegerung.
+                _STAND_GEPRUEFT = None
                 grund = "warten"
             elif versucht == ziel:
                 grund = "zweiter"
@@ -1017,6 +1066,30 @@ def neustart_faellig(stand: Optional[dict], antwort: dict,
                 beenden = True
     _NEUSTART_GRUND = grund
     return beenden, grund
+
+
+def neustart_ausfuehren(stand: dict) -> bool:
+    """
+    Der handelnde Teil: Ziel vermerken, dann neu starten. Gibt zurueck,
+    ob sich dieser Prozess jetzt beenden darf.
+
+    Die Reihenfolge ist selbst eine Sicherung. Erst der Merker, dann der
+    Neustart - andersherum koennte der neue Prozess dieselbe Abweichung
+    schon sehen, bevor der alte das Ziel geschrieben hat, und beide
+    starten sich im Fuenfminutentakt gegenseitig neu.
+
+    Beendet wird nur, wenn beides gelang. Scheitert der Merker, fehlt die
+    Schleifensicherung; scheitert der Neustart, kommt niemand wieder. In
+    beiden Faellen laeuft der Agent lieber mit alter Laufzeit weiter und
+    meldet den Befund - sichtbar ist er dann immer noch.
+    """
+    if not ziel_vermerken(_neustart_ziel(stand)):
+        return False
+    if not restart_self_detached():
+        log("Neustart nicht angestossen - der Agent laeuft weiter.",
+            err=True)
+        return False
+    return True
 
 
 def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
@@ -2581,6 +2654,10 @@ def restart_self_detached():
     Linux: systemd startet nach dem Beenden von selbst neu.
     Windows: die geplante Aufgabe muss angestossen werden, das uebernimmt
     ein abgekoppelter Helfer.
+
+    Gibt zurueck, ob der Neustart angestossen wurde. Wer sich danach
+    beendet, muss das wissen: ohne angestossenen Neustart ist der Host
+    dunkel, bis der Aufgabenplaner oder ein Systemneustart ihn holt.
     """
     if IS_WINDOWS:
         # Kein 'schtasks /End': der Agent beendet sich gleich selbst, und
@@ -2600,10 +2677,11 @@ def restart_self_detached():
         for flags in (DETACHED | NEW_GROUP | BREAKAWAY, DETACHED | NEW_GROUP):
             try:
                 subprocess.Popen(cmd, creationflags=flags)
-                return
+                return True
             except Exception as exc:  # noqa: BLE001
                 last = exc
         log(f"Neustart des Agents fehlgeschlagen: {last}", err=True)
+        return False
     else:
         try:
             subprocess.Popen(
@@ -2611,8 +2689,10 @@ def restart_self_detached():
                  "sleep 3; systemctl restart co37-agent.service"],
                 start_new_session=True,
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             log(f"Neustart des Agents fehlgeschlagen: {exc}", err=True)
+            return False
 
 
 def _strip_version(code: str) -> str:
@@ -2936,7 +3016,8 @@ def main():
             # geaendert? Dann beenden, damit der naechste sie wirklich
             # benutzt - ein laufender Python-Prozess kann seine eigene
             # Interpreter-DLL nicht tauschen. Die sechs Sicherungen
-            # stehen in neustart_faellig(); hier wird nur noch gehandelt.
+            # stehen in neustart_faellig(), das Handeln in
+            # neustart_ausfuehren() - hier wird nur beides verbunden.
             beenden, neustart_grund = neustart_faellig(
                 stand, resp, versuchtes_ziel())
             if neustart_grund != letzter_neustart_grund:
@@ -2946,9 +3027,7 @@ def main():
                         + ("Neustart des Agents." if neustart_grund == "ok"
                            else f"Kein Neustart: {neustart_grund}."),
                         err=(neustart_grund != "ok"))
-            if beenden:
-                ziel_vermerken(_neustart_ziel(stand))
-                restart_self_detached()
+            if beenden and neustart_ausfuehren(stand):
                 return
 
         except requests.HTTPError as exc:
