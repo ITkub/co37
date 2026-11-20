@@ -240,6 +240,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
   + "bundledNote, bundledDiffText, laufzeitNote, laufzeitDiffText, "
+  + "LAUFZEIT_VON_HAND, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
@@ -1902,6 +1903,15 @@ global.setTimeout = origSetTimeout;
   // am Tag der Veroeffentlichung jeden Host, der die neue MSI noch nicht
   // hat - ein Hinweis, der ueberall steht, wird nirgends gelesen.
   if (typeof api.laufzeitNote === "function") {
+    // Ein gescheiterter Neustart kommt nicht von selbst wieder: der
+    // Hinweis muss eine Hand verlangen, nicht "startet neu" sagen.
+    check("ein gescheitertes Handeln verlangt eine Hand",
+          (api.LAUFZEIT_VON_HAND || []).indexOf("gescheitert") >= 0,
+          api.LAUFZEIT_VON_HAND);
+    check("der Grund 'gescheitert' ist uebersetzt",
+          typeof api.laufzeitDiffText(
+            { art: "neustart", name: "gescheitert" }) === "string",
+          api.laufzeitDiffText({ art: "neustart", name: "gescheitert" }));
     check("laufzeitNote: unvollstaendig ergibt einen Hinweis",
           typeof api.laufzeitNote({ laufzeit_state: "unvollstaendig" }) === "string"
           && api.laufzeitNote({ laufzeit_state: "unvollstaendig" }).length > 0,
@@ -1944,6 +1954,61 @@ global.setTimeout = origSetTimeout;
           appjs.indexOf("note.laufzeit_fix") >= 0);
     check("die Hostzeile zeigt den Hinweis",
           appjs.indexOf("laufzeitNote(h)") >= 0);
+
+    // --- Prozess alt gegen Paket alt ---------------------------------
+    // Zwei verschiedene Handlungen: neu starten gegen neu installieren.
+    // Es darf nie beides zugleich in der Hostzeile stehen.
+    const autoText = api.laufzeitNote({ laufzeit_state: "prozess_alt" });
+    const handText = api.laufzeitNote({ laufzeit_state: "prozess_alt",
+      laufzeit_diff: [{ art: "neustart", name: "aus" }] });
+    check("prozess_alt mit Automatik ergibt einen Hinweis",
+          typeof autoText === "string" && autoText.length > 0, autoText);
+    check("prozess_alt ohne Automatik ergibt einen anderen",
+          typeof handText === "string" && handText !== autoText,
+          [autoText, handText]);
+    ["zweiter", "rueckweg"].forEach(g =>
+      check("auch bei " + g + " wird von Hand gestartet",
+            api.laufzeitNote({ laufzeit_state: "prozess_alt",
+              laufzeit_diff: [{ art: "neustart", name: g }] }) === handText));
+    check("ein voruebergehender Grund bleibt bei der Automatik",
+          api.laufzeitNote({ laufzeit_state: "prozess_alt",
+            laufzeit_diff: [{ art: "neustart", name: "auftrag" }] }) === autoText);
+    check("veraltetes Paket hat Vorrang: kein zweiter Hinweis",
+          api.laufzeitNote({ laufzeit_state: "prozess_alt",
+            bundled_state: "abweichend" }) === null);
+    ["ok", "unpruefbar", "unbekannt"].forEach(z =>
+      check("laufzeitNote: " + z + " ergibt keinen",
+            api.laufzeitNote({ laufzeit_state: z }) === null));
+    ["de", "en"].forEach(spr => {
+      api.setzeSprache(spr);
+      [api.laufzeitNote({ laufzeit_state: "prozess_alt" }),
+       api.laufzeitNote({ laufzeit_state: "prozess_alt",
+         laufzeit_diff: [{ art: "neustart", name: "aus" }] })].forEach(txt =>
+        check("auch die neuen Hinweise bleiben unter 50 Zeichen (" + spr + ")",
+              txt.length <= 50, txt.length + ": " + txt));
+    });
+    api.setzeSprache("de");
+    [["prozess_python", "3.14.7"], ["prozess_paket", "certifi"],
+     ["neustart", "rueckweg"]].forEach(([art, name]) =>
+      check("laufzeitDiffText kennt " + art,
+            typeof api.laufzeitDiffText({ art: art, name: name }) === "string",
+            api.laufzeitDiffText({ art: art, name: name })));
+    // Ein Grund, den diese Fassung der Oberflaeche nicht kennt, wird
+    // weggelassen statt als Kennung angezeigt - ein neuerer Server waere
+    // hier sonst unlesbar.
+    check("ein unbekannter Grund wird weggelassen",
+          api.laufzeitDiffText({ art: "neustart", name: "voelligneu" }) === null);
+    check("der Grund wird uebersetzt, nicht als Kennung gezeigt",
+          api.laufzeitDiffText({ art: "neustart", name: "rueckweg" })
+            .indexOf("rueckweg") < 0,
+          api.laufzeitDiffText({ art: "neustart", name: "rueckweg" }));
+
+    // --- Schalter in der Rollout-Kachel ------------------------------
+    check("die Kachel traegt den Schalter",
+          html.indexOf("roLaufzeitNeustart") >= 0);
+    check("er wird geladen und gespeichert",
+          appjs.indexOf("roLaufzeitNeustart.checked") >= 0
+          && appjs.indexOf("laufzeit_neustart:") >= 0);
     check("bundledNote: ein Host ohne das Feld ergibt keinen",
           api.bundledNote({}) === null);
     // Kein Knopf: die Selbstaktualisierung behebt das gerade NICHT, und

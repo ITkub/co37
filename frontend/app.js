@@ -600,6 +600,10 @@ const BUNDLED_ART = {
   python: "note.bundled_diff_python",
 };
 
+// Gruende, bei denen die Automatik NICHT mehr handeln wird. Alle anderen
+// sind voruebergehend: dann kommt der Neustart von selbst.
+const LAUFZEIT_VON_HAND = ["aus", "zweiter", "rueckweg", "gescheitert"];
+
 function laufzeitNote(h){
   // Der Hinweis steht NUR bei "unvollstaendig".
   //
@@ -611,8 +615,21 @@ function laufzeitNote(h){
   //
   // Auch hier bewusst OHNE Knopf: die Selbstaktualisierung behebt es
   // nicht. Das Paket muss repariert werden, und wie, steht im Verlauf.
-  if (!h || h.laufzeit_state !== "unvollstaendig") return null;
-  return t("note.laufzeit_broken");
+  if (!h) return null;
+  if (h.laufzeit_state === "unvollstaendig") return t("note.laufzeit_broken");
+  if (h.laufzeit_state === "prozess_alt"){
+    // Ein veraltetes Paket ist die dringendere Handlung: erst neu
+    // installieren, dann ist der Prozess ohnehin neu. Zwei Hinweise
+    // nebeneinander wuerden zwei Handlungen verlangen, von denen nur
+    // eine noetig ist.
+    if (h.bundled_state === "abweichend") return null;
+    const grund = (h.laufzeit_diff || [])
+      .filter(e => e && e.art === "neustart").map(e => e.name)[0];
+    return LAUFZEIT_VON_HAND.indexOf(grund) >= 0
+      ? t("note.laufzeit_restart_manual")
+      : t("note.laufzeit_restart_auto");
+  }
+  return null;
 }
 
 // Ein Eintrag aus laufzeit_diff als uebersetzte Zeile - dasselbe Muster
@@ -623,9 +640,28 @@ const LAUFZEIT_ART = {
   anders: "note.laufzeit_diff_changed",
   mehr: "note.laufzeit_more",
   rueckfall: "note.laufzeit_fallback",
+  prozess_python: "note.laufzeit_proc_python",
+  prozess_paket: "note.laufzeit_proc_package",
+};
+
+// Die Gruende kommen als Kennung vom Agenten - uebersetzt wird hier,
+// damit im englischen Dialog kein deutsches Stichwort steht. Dasselbe
+// Muster wie bei reboot_reasons.
+const LAUFZEIT_GRUND = {
+  aus: "note.laufzeit_reason_off",
+  zweiter: "note.laufzeit_reason_tried",
+  rueckweg: "note.laufzeit_reason_noway",
+  auftrag: "note.laufzeit_reason_job",
+  warten: "note.laufzeit_reason_wait",
+  laufzeit: "note.laufzeit_reason_incomplete",
+  gescheitert: "note.laufzeit_reason_failed",
 };
 
 function laufzeitDiffText(e){
+  if (e && e.art === "neustart"){
+    const gk = LAUFZEIT_GRUND[e.name];
+    return gk ? t(gk) : null;
+  }
   const key = LAUFZEIT_ART[e && e.art];
   if (!key) return null;
   return t(key, { name: (e && e.name) || "" });
@@ -1373,6 +1409,7 @@ async function detail(id){
       L.push("", t("note.laufzeit_detail") + ":");
       zeilen.forEach(z => L.push("  " + z));
       if (h.laufzeit_state === "unvollstaendig") L.push("  " + t("note.laufzeit_fix"));
+      if (h.laufzeit_state === "prozess_alt") L.push("  " + t("note.laufzeit_restart_fix"));
     }
   }
   L.push("", t("history.open_updates", { anzahl: ups.length }));
@@ -2094,6 +2131,7 @@ async function loadRollout(){
   try { r = await api("GET", "/api/v1/agent-rollout"); } catch(e){ return; }
 
   roAuto.checked = !!r.autoroll;
+  roLaufzeitNeustart.checked = !!r.laufzeit_neustart;
   roMode.value = r.mode || "staged";
 
   const sel = document.getElementById("roPilot");
@@ -2131,6 +2169,7 @@ document.getElementById("roSave").onclick = async () => {
   }
   await api("POST", "/api/v1/agent-rollout", {
     autoroll: roAuto.checked,
+    laufzeit_neustart: roLaufzeitNeustart.checked,
     mode: roMode.value,
     pilot_host_id: roPilot.value ? parseInt(roPilot.value) : 0
   });

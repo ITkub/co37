@@ -2563,6 +2563,11 @@ BUNDLED_FASSUNG = re.compile(r"^[A-Za-z0-9.+_-]{1,30}$")
 # uebernommener Host den Heartbeat frei bestimmt und die Grenze nicht beim
 # Absender liegen darf.
 LAUFZEIT_ZUSTAENDE = {"ok", "unvollstaendig", "unpruefbar"}
+# Die Gruende, die der Agent fuer einen ausgebliebenen Selbstneustart
+# nennen kann. Dieselbe Menge steht als NEUSTART_GRUENDE im Agenten; ein
+# Grund, den der Server nicht kennt, wird verworfen statt angezeigt.
+NEUSTART_GRUENDE = {"gleich", "aus", "auftrag", "laufzeit", "warten",
+                    "zweiter", "rueckweg", "gescheitert", "ok"}
 LAUFZEIT_MAX = 10
 LAUFZEIT_PFAD = re.compile(r"^[A-Za-z0-9 ._/\\+-]{1,200}$")
 LAUFZEIT_MEHR_MAX = 100000
@@ -2609,12 +2614,14 @@ def laufzeit_sauber(raw) -> dict:
             "liste": liste, "rueckfall": rueckfall}
 
 
-def bundled_sauber(raw) -> dict:
+def _stand_sauber(raw) -> dict:
     """
-    Prueft den gemeldeten Stand. Gibt ihn zurueck oder {} - nie eine Ausnahme.
+    Prueft EINEN Stand (Python-Fassung plus Paketliste) und gibt ihn
+    zurueck oder {}.
 
-    {} heisst immer "nichts Verwertbares gemeldet" und wird vom Vergleich
-    als unbekannt behandelt, nicht als Abweichung.
+    Steht als eigene Funktion da, weil es seit 0.51.5 zwei davon gibt:
+    was auf der Platte liegt und was der Prozess fuehrt. Zwei Pruefer
+    waeren zwei Wahrheiten - dieselbe Objektion wie bei normname().
     """
     if not isinstance(raw, dict):
         return {}
@@ -2629,7 +2636,31 @@ def bundled_sauber(raw) -> dict:
             return {}
         if not isinstance(fassung, str) or not BUNDLED_FASSUNG.match(fassung):
             return {}
-    ergebnis = {"python": python, "packages": dict(pakete)}
+    return {"python": python, "packages": dict(pakete)}
+
+
+def bundled_sauber(raw) -> dict:
+    """
+    Prueft den gemeldeten Stand. Gibt ihn zurueck oder {} - nie eine Ausnahme.
+
+    {} heisst immer "nichts Verwertbares gemeldet" und wird vom Vergleich
+    als unbekannt behandelt, nicht als Abweichung.
+
+    Der Stand auf der Platte wird mit demselben Pruefer geholt wie der
+    des Prozesses: zwei Pruefer waeren zwei Wahrheiten, und sie laufen
+    unbemerkt auseinander.
+    """
+    ergebnis = _stand_sauber(raw)
+    if not ergebnis:
+        return {}
+    # Was der PROZESS des Hosts fuehrt - die Momentaufnahme von seinem
+    # Start.
+    laeuft = _stand_sauber(raw.get("laeuft"))
+    if laeuft:
+        ergebnis["laeuft"] = laeuft
+    grund = raw.get("neustart")
+    if isinstance(grund, str) and grund in NEUSTART_GRUENDE:
+        ergebnis["neustart"] = grund
     # Nur wenn etwas Verwertbares gemeldet wurde. Ein leeres Feld waere
     # von "alter Agent, meldet noch nichts" nicht zu unterscheiden.
     laufzeit = laufzeit_sauber(raw.get("laufzeit"))
@@ -2836,6 +2867,33 @@ def laufzeit_zustand(host) -> tuple[str, list[dict]]:
         return "unbekannt", []
     zustand = befund["zustand"]
     eintraege = []
+    # Ein Prozess, der eine andere Laufzeit fuehrt als die auf der
+    # Platte, ist nicht "unvollstaendig" - er ist ALT. Das sind zwei
+    # verschiedene Handlungen: reparieren gegen neu starten. Der
+    # dringendere Befund gewinnt, deshalb erst nach unvollstaendig.
+    if zustand == "ok":
+        laeuft = bundled.get("laeuft")
+        platte = {"python": bundled.get("python"),
+                  "packages": bundled.get("packages") or {}}
+        if isinstance(laeuft, dict) and (
+                laeuft.get("python") != platte["python"]
+                or (laeuft.get("packages") or {}) != platte["packages"]):
+            zustand = "prozess_alt"
+            if laeuft.get("python") != platte["python"]:
+                eintraege.append({"art": "prozess_python",
+                                  "name": str(laeuft.get("python") or "?")})
+            for name in sorted(set(laeuft.get("packages") or {})
+                               | set(platte["packages"])):
+                if (laeuft.get("packages") or {}).get(name) != \
+                        platte["packages"].get(name):
+                    eintraege.append({"art": "prozess_paket", "name": name})
+            grund = bundled.get("neustart")
+            if isinstance(grund, str) and grund in NEUSTART_GRUENDE \
+                    and grund not in ("gleich", "ok", "warten"):
+                # Warum der Agent sich NICHT selbst neu gestartet hat.
+                # Ohne das stuende "Agent startet neu" auch dann, wenn
+                # nichts mehr passiert.
+                eintraege.append({"art": "neustart", "name": grund})
     if zustand == "unvollstaendig":
         eintraege = [{"art": "fehlt", "name": name}
                      for name in befund.get("fehlend", []) if isinstance(name, str)]
@@ -3381,6 +3439,11 @@ def agent_heartbeat(
         "jobs": out,
         "approval_state": "approved",
         "agent_version": agent_source_version(),
+        # Darf der Agent sich selbst neu starten, wenn seine Laufzeit
+        # ausgetauscht wurde? Reist hier mit, damit der Schalter zentral
+        # bleibt und kein Host dafuer angefasst werden muss.
+        "agent_laufzeit_neustart":
+            _setting(session, "agent_laufzeit_neustart", "true") == "true",
     }
 
 
@@ -3918,6 +3981,11 @@ def agent_code(x_agent_token: str = Header(...), session: Session = Depends(get_
 
 ROLL_DEFAULTS = {
     "agent_autoroll": "true",
+    # Darf ein Agent sich selbst neu starten, wenn seine mitgelieferte
+    # Laufzeit unter ihm ausgetauscht wurde? Ab Werk an - Entscheidung
+    # des Besitzers am 2026-11-19. Die sechs Sicherungen stehen im
+    # Agenten, nicht hier.
+    "agent_laufzeit_neustart": "true",
     "agent_roll_mode": "staged",     # "staged" oder "all"
     "agent_pilot_host": "",
     "agent_roll_state": "idle",      # idle | pilot | rest | done | failed
@@ -4174,6 +4242,7 @@ def advance_agent_rollout(session: Session):
 
 class RollConfig(BaseModel):
     autoroll: Optional[bool] = None
+    laufzeit_neustart: Optional[bool] = None
     mode: Optional[str] = None          # "staged" oder "all"
     pilot_host_id: Optional[KennungFeld] = None
 
@@ -4197,6 +4266,7 @@ def get_rollout(session: Session = Depends(get_session)):
 
     return {
         "autoroll": cfg["agent_autoroll"] == "true",
+        "laufzeit_neustart": cfg["agent_laufzeit_neustart"] == "true",
         "mode": cfg["agent_roll_mode"],
         "pilot_host_id": pilot.id if pilot else None,
         "pilot_hostname": pilot.hostname if pilot else None,
@@ -4220,6 +4290,9 @@ def get_rollout(session: Session = Depends(get_session)):
 def set_rollout(payload: RollConfig, session: Session = Depends(get_session)):
     if payload.autoroll is not None:
         _set(session, "agent_autoroll", "true" if payload.autoroll else "false")
+    if payload.laufzeit_neustart is not None:
+        _set(session, "agent_laufzeit_neustart",
+             "true" if payload.laufzeit_neustart else "false")
     if payload.mode in ("staged", "all"):
         _set(session, "agent_roll_mode", payload.mode)
     if payload.pilot_host_id is not None:

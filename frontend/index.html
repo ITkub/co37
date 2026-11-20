@@ -790,6 +790,8 @@ dialog#dlgSettings .hint{max-width:78ch}
       <div class="section">
         <div class="section-title" data-i18n="settings.rollout.title">Agent updates</div>
         <label class="check" data-i18n="settings.rollout.auto"><input type="checkbox" id="roAuto"> Roll out automatically after a system update</label>
+        <label class="check" data-i18n="settings.rollout.laufzeit_neustart"><input type="checkbox" id="roLaufzeitNeustart"> Restart the agent automatically after a package update</label>
+        <p class="hint" data-i18n="settings.rollout.laufzeit_neustart_hint">After a new MSI has been installed, the agent keeps running with the old bundled runtime until its process restarts. With this setting it restarts itself. If the option is switched off, the agent or the computer has to be restarted by hand after a package update.</p>
         <div class="row">
           <label data-i18n="settings.rollout.mode">Procedure
             <select id="roMode">

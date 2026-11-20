@@ -806,8 +806,50 @@ def laufzeit_pruefen(wurzel: Optional[Path] = None) -> Optional[dict]:
     }
 
 
+def installierte_python(wurzel: Optional[Path] = None) -> Optional[str]:
+    """
+    Die Python-Fassung, die auf der PLATTE liegt - nicht die, mit der
+    dieser Prozess laeuft.
+
+    Der Unterschied ist der Anlass fuer diese Funktion. Am 2026-11-19
+    meldete ein Host nach einer MSI-Installation weiter eine veraltete
+    Laufzeit, obwohl alles richtig installiert war:
+    platform.python_version() sagt, mit welchem Interpreter der Prozess
+    GESTARTET ist, und das laesst sich durch erneutes Lesen nicht
+    aktualisieren. Ein laufender Python-Prozess kann seine eigene
+    Interpreter-DLL nicht tauschen.
+
+    Deshalb wird die installierte Fassung beim Interpreter selbst
+    erfragt. None heisst "nicht ermittelbar" - dann gilt weiter die
+    laufende Zahl. Lieber die alte Wahrheit als eine geratene.
+    """
+    if wurzel is None:
+        wurzel = Path(__file__).resolve().parent
+    exe = Path(wurzel) / "python" / ("python.exe" if IS_WINDOWS else "python")
+    if not exe.is_file():
+        return None
+    try:
+        res = subprocess.run([str(exe), "-V"], capture_output=True, text=True,
+                             timeout=30)
+    except Exception:  # noqa: BLE001
+        return None
+    treffer = re.search(r"Python\s+([0-9][0-9.a-zA-Z+]*)",
+                        (res.stdout or "") + (res.stderr or ""))
+    return treffer.group(1) if treffer else None
+
+
+# Die Momentaufnahme des eigenen Prozesses, EINMAL beim Laden des Moduls.
+#
+# Das ist die einzige Stelle, an der sie entstehen kann: die Platte laesst
+# sich jederzeit erneut lesen, der Speicher des laufenden Prozesses nicht.
+# Wer diese Zeile in stand_melden() verschiebt, nimmt der Funktion ihren
+# Sinn - dann meldet der Agent zweimal die Platte und nie, was er fuehrt.
+LAUFT = bundled_stand()
+
 # Wie oft die Dateipruefung hoechstens laeuft. Sie liest rund 40 MB;
-# das gehoert nicht in einen Minutentakt.
+# das gehoert nicht in einen Minutentakt. Vor einem Selbstneustart wird
+# der Takt eigens zurueckgesetzt (neustart_faellig, Grund "warten"),
+# damit der zweite Blick wirklich ein zweiter ist.
 LAUFZEIT_TAKT = 3600
 
 # Solange etwas nicht stimmt, wird haeufiger nachgesehen. Zwei Gruende,
@@ -829,6 +871,277 @@ _STAND_PAKETE = None     # der zuletzt gelesene Paketstand
 _STAND_LAUFZEIT = None   # der zuletzt gebildete Laufzeitbefund
 _STAND_GEPRUEFT = None   # monotone Zeit der letzten Dateipruefung
 _STAND_ZUSTAND = None    # Zustand beim letzten Protokolleintrag
+_STAND_PY_PLATTE = None  # die zuletzt ermittelte installierte Python-Fassung
+
+
+# Wo das zuletzt versuchte Neustartziel steht. Neben agent.py, damit es
+# den Neustart ueberlebt - genau dafuer ist es da.
+NEUSTART_MERKER = "neustart-ziel"
+
+# Die moeglichen Gruende. Der Server kennt dieselbe Menge; ein Grund, den
+# er nicht kennt, wird dort verworfen statt angezeigt.
+NEUSTART_GRUENDE = ("gleich", "aus", "auftrag", "laufzeit", "warten",
+                    "zweiter", "rueckweg", "gescheitert", "ok")
+
+_NEUSTART_GESEHEN = None   # das Ziel, das beim vorigen Heartbeat abwich
+_NEUSTART_GRUND = None     # wird beim naechsten Heartbeat mitgemeldet
+_NEUSTART_FEHLER = None    # das Ziel, bei dem das Handeln misslang
+
+PS_AUFGABE_PRUEFEN = r"""
+$ErrorActionPreference = 'Stop'
+try { $t = Get-ScheduledTask -TaskPath '\' -TaskName 'CO37Agent' }
+catch { 'FEHLT'; exit }
+if ($t.State -eq 'Disabled') { 'AUS'; exit }
+$a = @($t.Actions)[0]
+if (-not $a) { 'OHNE_AKTION'; exit }
+$exe = $a.Execute
+if ($exe) { $exe = $exe.Trim('"') }
+$arg = $a.Arguments
+if ($arg) { $arg = $arg.Trim('"') }
+if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { 'EXE_FEHLT'; exit }
+if ([IO.Path]::GetFileName($exe) -ne 'pythonw.exe') { 'EXE_FREMD'; exit }
+if (-not $arg -or -not (Test-Path -LiteralPath $arg)) { 'ARG_FEHLT'; exit }
+if ([IO.Path]::GetFileName($arg) -ne 'agent.py') { 'ARG_FREMD'; exit }
+$w = @($t.Triggers)[0].Repetition
+if (-not $w -or $w.Interval -ne 'PT5M') { 'OHNE_WIEDERHOLUNG'; exit }
+if ($w.StopAtDurationEnd) { 'WIEDERHOLUNG_LAEUFT_AUS'; exit }
+'OK'
+"""
+
+
+def rueckweg_bestaetigt() -> bool:
+    """
+    Kommt der Agent nach dem Beenden wieder?
+
+    Unter Linux ja: die systemd-Unit traegt Restart=always.
+
+    Unter Windows haengt es an der geplanten Aufgabe, und hier wird
+    GENAUER hingesehen als nur "ist sie da". Eine Aufgabe kann vorhanden
+    und eingeschaltet sein und nach einer halb durchgelaufenen
+    Installation trotzdem ins Leere zeigen. Weil der Schalter ab Werk an
+    ist, wird deshalb auch geprueft, ob ihr Aufruf auf eine pythonw.exe
+    und eine agent.py zeigt, die es in diesem Moment gibt.
+
+    Und die WIEDERHOLUNG, denn die ist der Rueckweg: der Ausloeser der
+    Aufgabe ist ein Once, verbraucht nach der Installation. Erst die
+    Fuenfminutenwiederholung holt den Agenten zurueck. Der Installer
+    setzt sie nach und WARNT nur, wenn das misslingt ("Warnung:
+    5-Minuten-Wiederholung nicht gesetzt", packaging/build_msi.py) - auf
+    so einem Host waere ohne diese Pruefung alles in Ordnung gemeldet
+    und der Agent nach dem Beenden bis zum Systemstart weg.
+
+    Jede Ausnahme ergibt False. Nicht bestaetigt heisst nicht beenden -
+    ein Agent, der sich beendet und nicht wiederkommt, ist schlimmer als
+    ein falscher Hinweis.
+    """
+    if not IS_WINDOWS:
+        return True
+    try:
+        code, out = powershell(PS_AUFGABE_PRUEFEN, timeout=60)
+    except Exception:  # noqa: BLE001
+        return False
+    if code != 0:
+        return False
+    return any(zeile.strip() == "OK" for zeile in out.splitlines())
+
+
+def _neustart_ziel(stand: dict) -> str:
+    """
+    Kennung des Stands, der nach dem Neustart laufen soll.
+
+    Nicht die Fassungsnummer allein: es geht um Python UND die acht
+    Bibliotheken. Hebt ein Release nur eine Bibliothek an, bleibt die
+    Python-Zahl gleich - ein Vergleich nur darueber haette 0.48.0 nicht
+    gesehen und den Host stillschweigend mit altem certifi im Speicher
+    weiterlaufen lassen.
+    """
+    rohdaten = json.dumps({"python": stand.get("python"),
+                           "packages": stand.get("packages") or {}},
+                          sort_keys=True)
+    return hashlib.sha256(rohdaten.encode("utf-8")).hexdigest()[:16]
+
+
+def _merkerdatei(wurzel: Optional[Path] = None) -> Path:
+    """
+    Wo der Merker liegt. Das Verzeichnis ist ein Parameter, damit der
+    Rundlauf schreiben-lesen-loeschen pruefbar ist; ohne Angabe neben
+    agent.py, damit er den Neustart ueberlebt.
+    """
+    return (wurzel or Path(__file__).resolve().parent) / NEUSTART_MERKER
+
+
+def versuchtes_ziel(wurzel: Optional[Path] = None) -> Optional[str]:
+    """Das Ziel, fuer das schon einmal neu gestartet wurde."""
+    try:
+        with _merkerdatei(wurzel).open("rb") as datei:
+            # Das Ziel ist 16 Hexzeichen. Mehr wird nicht gelesen: wer ins
+            # Installationsverzeichnis schreiben kann, soll den Agenten
+            # nicht mit einer riesigen Datei in einen MemoryError treiben.
+            # Danach braeche jeder Heartbeat an derselben Stelle ab, und
+            # der Host wuerde im Backend still, waehrend er noch laeuft.
+            rohdaten = datei.read(64)
+    except OSError:
+        return None
+    try:
+        return rohdaten.decode("utf-8").strip() or None
+    except ValueError:
+        # UnicodeDecodeError ist eine Unterklasse davon: ungueltiges
+        # UTF-8. Nullbytes dagegen decodieren anstandslos - die fuehren
+        # nur dazu, dass der Vergleich nie anschlaegt.
+        return None
+
+
+def ziel_vermerken(ziel: str, wurzel: Optional[Path] = None) -> bool:
+    """
+    Vor dem Beenden festhalten, wofuer neu gestartet wurde. Gibt zurueck,
+    ob es geklappt hat.
+
+    Dieser Merker ist die EINZIGE Sicherung gegen eine Neustartschleife,
+    die den Neustart selbst ueberlebt - der Speicher tut es nicht. Laesst
+    er sich nicht schreiben, wird deshalb nicht beendet; das entscheidet
+    neustart_ausfuehren().
+
+    Geschrieben wird daneben und dann umbenannt. Ein halb geschriebener
+    Merker waere ein Ziel, das zu keinem Stand passt - die Sicherung
+    waere lautlos unwirksam, und genau das faellt niemandem auf.
+    """
+    datei = _merkerdatei(wurzel)
+    neben = datei.with_name(NEUSTART_MERKER + ".neu")
+    try:
+        neben.write_text(ziel, encoding="utf-8")
+        neben.replace(datei)
+        return True
+    except OSError as exc:
+        log(f"Neustartziel nicht vermerkbar, daher kein Neustart: {exc}",
+            err=True)
+        try:
+            neben.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def ziel_vergessen(wurzel: Optional[Path] = None) -> None:
+    """
+    Den Merker loeschen, sobald gelaufener und liegender Stand gleich sind.
+
+    Der Neustart hat gewirkt. Bliebe das Ziel liegen, waere ein spaeteres
+    Release, das wieder genau auf diesen Stand fuehrt, als "schon
+    erfolglos versucht" abgetan - der Neustart wuerde dann ausbleiben.
+    """
+    try:
+        # missing_ok: im Normalfall gibt es keinen Merker, und das ist
+        # kein Fehler - sonst entstuende bei jedem gesunden Heartbeat
+        # eine verworfene Ausnahme.
+        _merkerdatei(wurzel).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def neustart_faellig(stand: Optional[dict], antwort: dict,
+                     versucht: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Darf dieser Agent sich beenden, damit er mit der neuen Laufzeit
+    wiederkommt? Gibt (beenden, grund) zurueck.
+
+    Die Reihenfolge ist Absicht: der GENAUESTE Grund gewinnt, und die
+    teuerste Pruefung (der Rueckweg, ein PowerShell-Aufruf) kommt
+    zuletzt.
+
+    Die sechs Sicherungen in dieser Reihenfolge:
+      5  Schalter aus            -> "aus"
+      1  Auftrag in der Antwort  -> "auftrag"   (sonst verbrennt job.delivered)
+      6a Laufzeit nicht ok       -> "laufzeit"  (Installation laeuft noch)
+      6b erst einmal gesehen     -> "warten"
+      2  Ziel schon versucht     -> "zweiter"
+      3  Rueckweg unbestaetigt   -> "rueckweg"
+    """
+    global _NEUSTART_GESEHEN, _NEUSTART_GRUND, _STAND_GEPRUEFT
+    grund = "gleich"
+    beenden = False
+    laeuft = (stand or {}).get("laeuft")
+    if isinstance(laeuft, dict) and stand:
+        platte = {"python": stand.get("python"),
+                  "packages": stand.get("packages") or {}}
+        gleich = (laeuft.get("python") == platte["python"]
+                  and (laeuft.get("packages") or {}) == platte["packages"])
+        if gleich:
+            _NEUSTART_GESEHEN = None
+            # Nur auf BELASTBAREN Befund vergessen. Ist die Laufzeit
+            # nicht als "ok" vermessen, kann "gleich" auch daher kommen,
+            # dass die Messung ausgefallen ist - und dann wuerde die
+            # einzige Sicherung gegen eine Neustartschleife ausgerechnet
+            # auf fehlende Belege geloescht.
+            if ((stand.get("laufzeit") or {}).get("zustand")) == "ok":
+                ziel_vergessen()
+        else:
+            ziel = _neustart_ziel(stand)
+            if not antwort.get("agent_laufzeit_neustart"):
+                # Nicht "is False": ein aelteres Backend kennt den
+                # Schluessel nicht und schickt ihn nicht mit. Dort gibt es
+                # auch keinen Schalter, mit dem ein Administrator das
+                # verhindern koennte - also gilt Schweigen als Nein.
+                grund = "aus"
+            elif antwort.get("jobs"):
+                grund = "auftrag"
+            elif ((stand.get("laufzeit") or {}).get("zustand")) != "ok":
+                # Der Installer tauscht noch Dateien: python.exe -V sagt
+                # schon die neue Zahl, der Baum ist aber unvollstaendig.
+                # Ein Beenden hier ist der teuerste Fehlschlag.
+                grund = "laufzeit"
+            elif _NEUSTART_GESEHEN != ziel:
+                _NEUSTART_GESEHEN = ziel
+                # Der zweite Blick soll zweimal MESSEN, nicht zweimal
+                # dieselbe Messung auswerten: ohne das hier haette
+                # stand_melden() den Befund aus dem Takt wiederverwendet,
+                # und die Sicherung waere nur eine Verzoegerung.
+                _STAND_GEPRUEFT = None
+                grund = "warten"
+            elif versucht == ziel:
+                grund = "zweiter"
+            elif _NEUSTART_FEHLER == ziel:
+                # Das Handeln selbst ist schon einmal misslungen - etwa
+                # weil der Merker nicht schreibbar war. Ohne diesen Zweig
+                # stuende weiter "ok" im Stand, das Backend blendet
+                # genau das aus, und der Operator saehe "prozess_alt"
+                # ohne Grund. Dazu rief der Agent in JEDEM Heartbeat
+                # wieder PowerShell fuer den Rueckweg.
+                grund = "gescheitert"
+            elif not rueckweg_bestaetigt():
+                grund = "rueckweg"
+            else:
+                grund = "ok"
+                beenden = True
+    _NEUSTART_GRUND = grund
+    return beenden, grund
+
+
+def neustart_ausfuehren(stand: dict) -> bool:
+    """
+    Der handelnde Teil: Ziel vermerken, dann neu starten. Gibt zurueck,
+    ob sich dieser Prozess jetzt beenden darf.
+
+    Die Reihenfolge ist selbst eine Sicherung. Erst der Merker, dann der
+    Neustart - andersherum koennte der neue Prozess dieselbe Abweichung
+    schon sehen, bevor der alte das Ziel geschrieben hat, und beide
+    starten sich im Fuenfminutentakt gegenseitig neu.
+
+    Beendet wird nur, wenn beides gelang. Scheitert der Merker, fehlt die
+    Schleifensicherung; scheitert der Neustart, kommt niemand wieder. In
+    beiden Faellen laeuft der Agent lieber mit alter Laufzeit weiter und
+    meldet den Befund - sichtbar ist er dann immer noch.
+    """
+    global _NEUSTART_FEHLER
+    ziel = _neustart_ziel(stand)
+    if not ziel_vermerken(ziel):
+        _NEUSTART_FEHLER = ziel
+        return False
+    if not restart_self_detached():
+        log("Neustart nicht angestossen - der Agent laeuft weiter.",
+            err=True)
+        _NEUSTART_FEHLER = ziel
+        return False
+    return True
 
 
 def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
@@ -857,6 +1170,7 @@ def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
     Takt sonst beliebig weit, in beide Richtungen.
     """
     global _STAND_PAKETE, _STAND_LAUFZEIT, _STAND_GEPRUEFT, _STAND_ZUSTAND
+    global _STAND_PY_PLATTE
     if jetzt is None:
         jetzt = time.monotonic()
     try:
@@ -882,10 +1196,38 @@ def stand_melden(jetzt: Optional[float] = None) -> Optional[dict]:
             _STAND_LAUFZEIT = laufzeit_pruefen()
         except Exception:  # noqa: BLE001
             _STAND_LAUFZEIT = None
+        # Im selben Takt: ein Unterprozess, rund 50 ms. Nicht bei jedem
+        # Heartbeat, aber bei jedem, der ohnehin die Dateien liest.
+        try:
+            gemessen = installierte_python()
+        except Exception:  # noqa: BLE001
+            gemessen = None
+        # Nur ueberschreiben, wenn wirklich gemessen wurde. Sonst fiel
+        # stand["python"] auf platform.python_version() zurueck - die
+        # Fassung des LAUFENDEN Prozesses. Damit sah die Abweichung
+        # ausgerechnet dann wie "alles gleich" aus, wenn python.exe
+        # gesperrt ist oder in den Zeitablauf laeuft, und
+        # ziel_vergessen() nahm das als "der Neustart hat gewirkt".
+        if gemessen:
+            _STAND_PY_PLATTE = gemessen
         _STAND_GEPRUEFT = jetzt
     _STAND_PAKETE = pakete
 
     stand = dict(pakete)
+    # Die Bibliotheken kommen schon von der Platte; die Python-Fassung
+    # muss ausdruecklich von dort geholt werden, sonst stuende hier die
+    # des laufenden Prozesses.
+    if _STAND_PY_PLATTE:
+        stand["python"] = _STAND_PY_PLATTE
+    if LAUFT:
+        stand["laeuft"] = dict(LAUFT)
+    # Der Grund aus dem VORIGEN Heartbeat. Die Entscheidung braucht die
+    # Antwort des Servers, diese Nutzlast ist dann schon unterwegs - der
+    # Grund reist also eine Runde spaeter. Fuer den Fall "ok" gibt es
+    # keine naechste Runde; dort erklaert der Zustand selbst, warum der
+    # Host kurz schweigt.
+    if _NEUSTART_GRUND and _NEUSTART_GRUND != "gleich":
+        stand["neustart"] = _NEUSTART_GRUND
     if _STAND_LAUFZEIT is not None:
         stand["laufzeit"] = dict(_STAND_LAUFZEIT)
         zustand = _STAND_LAUFZEIT["zustand"]
@@ -2372,6 +2714,10 @@ def restart_self_detached():
     Linux: systemd startet nach dem Beenden von selbst neu.
     Windows: die geplante Aufgabe muss angestossen werden, das uebernimmt
     ein abgekoppelter Helfer.
+
+    Gibt zurueck, ob der Neustart angestossen wurde. Wer sich danach
+    beendet, muss das wissen: ohne angestossenen Neustart ist der Host
+    dunkel, bis der Aufgabenplaner oder ein Systemneustart ihn holt.
     """
     if IS_WINDOWS:
         # Kein 'schtasks /End': der Agent beendet sich gleich selbst, und
@@ -2388,13 +2734,19 @@ def restart_self_detached():
         DETACHED, NEW_GROUP, BREAKAWAY = 0x00000008, 0x00000200, 0x01000000
         cmd = [POWERSHELL, "-NoProfile", "-WindowStyle", "Hidden",
                "-Command", helper]
-        for flags in (DETACHED | NEW_GROUP | BREAKAWAY, DETACHED | NEW_GROUP):
-            try:
-                subprocess.Popen(cmd, creationflags=flags)
-                return
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-        log(f"Neustart des Agents fehlgeschlagen: {last}", err=True)
+        try:
+            subprocess.Popen(cmd,
+                             creationflags=DETACHED | NEW_GROUP | BREAKAWAY)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            # Ohne BREAKAWAY zu starten hat keinen Sinn: CreateProcess
+            # verweigert die Flagge nur, wenn dieser Prozess in einem
+            # Job-Objekt steckt, das Ausbrechen verbietet - und dann
+            # raeumt der Aufgabenplaner den schlafenden Helfer mit ab.
+            # Bis 0.51.5 stand hier ein zweiter Versuch ohne die Flagge,
+            # der "gelungen" meldete und sicher nichts bewirkte.
+            log(f"Neustart des Agents fehlgeschlagen: {exc}", err=True)
+            return False
     else:
         try:
             subprocess.Popen(
@@ -2402,8 +2754,10 @@ def restart_self_detached():
                  "sleep 3; systemctl restart co37-agent.service"],
                 start_new_session=True,
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             log(f"Neustart des Agents fehlgeschlagen: {exc}", err=True)
+            return False
 
 
 def _strip_version(code: str) -> str:
@@ -2626,6 +2980,7 @@ def main():
         log("Es laeuft bereits ein Agent. Dieser Start wird beendet.")
         return
     interval = 60
+    letzter_neustart_grund = None
     recover_failed_update()
     log(f"CO-37 Agent {own_version()} - Server {SERVER}")
 
@@ -2721,6 +3076,24 @@ def main():
             for job in resp.get("jobs", []):
                 log(f"Job {job['id']} ({job['type']}) wird ausgefuehrt")
                 handle_job(job)
+
+            # Hat sich die mitgelieferte Laufzeit unter diesem Prozess
+            # geaendert? Dann beenden, damit der naechste sie wirklich
+            # benutzt - ein laufender Python-Prozess kann seine eigene
+            # Interpreter-DLL nicht tauschen. Die sechs Sicherungen
+            # stehen in neustart_faellig(), das Handeln in
+            # neustart_ausfuehren() - hier wird nur beides verbunden.
+            beenden, neustart_grund = neustart_faellig(
+                stand, resp, versuchtes_ziel())
+            if neustart_grund != letzter_neustart_grund:
+                letzter_neustart_grund = neustart_grund
+                if neustart_grund not in ("gleich", "warten"):
+                    log("Die mitgelieferte Laufzeit wurde ausgetauscht. "
+                        + ("Neustart des Agents." if neustart_grund == "ok"
+                           else f"Kein Neustart: {neustart_grund}."),
+                        err=(neustart_grund != "ok"))
+            if beenden and neustart_ausfuehren(stand):
+                return
 
         except requests.HTTPError as exc:
             code = exc.response.status_code if exc.response is not None else 0

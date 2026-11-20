@@ -1361,5 +1361,570 @@ check("der Heartbeat ruft stand_melden()", "stand_melden(" in agent_quelle)
 check("es gibt keine Modulkonstante BUNDLED mehr",
       "\nBUNDLED = " not in agent_quelle)
 
+_echt_lauft = getattr(agent, "LAUFT", None)
+_echt_inst_py = getattr(agent, "installierte_python", None)
+
+print("\n--- Teil 10: was laeuft gegen was installiert ist ---")
+
+# Anlass, am 2026-11-19 im Feld gemessen: nach einer MSI-Installation
+# meldete ein Host weiter "Paketupdate - Agent muss neu installiert
+# werden", obwohl Platte, Paketfassung und Agent-Code stimmten. In der
+# Detailansicht stand der Grund: "Python: 3.14.7, package has 3.14.10".
+#
+# bundled_stand() liest zwei Dinge aus zwei Quellen - die Bibliotheken
+# von der PLATTE, die Python-Fassung aus dem LAUFENDEN PROZESS. Die
+# zweite laesst sich durch erneutes Lesen nicht aktualisieren: ein
+# Prozess kann seine eigene Interpreter-DLL nicht tauschen.
+
+check("LAUFT ist die Momentaufnahme vom Prozessstart",
+      hasattr(agent, "LAUFT")
+      and (agent.LAUFT == agent.bundled_stand() if agent.IS_WINDOWS
+           else agent.LAUFT is None),
+      getattr(agent, "LAUFT", "fehlt"))
+
+check("installierte_python() gibt es", hasattr(agent, "installierte_python"))
+
+if hasattr(agent, "installierte_python"):
+    # Ohne Windows und ohne python.exe im Pfad: nicht ermittelbar, und
+    # dann wird das Feld weggelassen statt geraten.
+    check("ohne python.exe liefert sie None",
+          agent.installierte_python(TMP / "gibtsnicht") is None,
+          agent.installierte_python(TMP / "gibtsnicht"))
+
+    # Eine Attrappe, die sich wie python.exe -V verhaelt.
+    PYDIR = TMP / "pyattrappe" / "python"
+    PYDIR.mkdir(parents=True, exist_ok=True)
+    attrappe = PYDIR / ("python.exe" if agent.IS_WINDOWS else "python")
+    attrappe.write_text("#!/bin/sh\necho 'Python 3.14.10'\n", encoding="utf-8")
+    attrappe.chmod(0o755)
+    check("sie liest die Fassung aus der Ausgabe",
+          agent.installierte_python(TMP / "pyattrappe") == "3.14.10",
+          agent.installierte_python(TMP / "pyattrappe"))
+
+if hasattr(agent, "stand_melden") and hasattr(agent, "LAUFT"):
+    try:
+        # Platte sagt 3.14.10, der Prozess faehrt 3.14.7.
+        # Die Platte meldet ueber bundled_stand() die Zahl des LAUFENDEN
+        # Interpreters (3.14.7) - genau das war der Fehler. Die
+        # installierte Fassung muss sie ueberschreiben, und das ist nur
+        # unterscheidbar, wenn beide Zahlen verschieden sind.
+        pakete, lauf = mit_stand(lambda: dict(ALT), lambda *a, **k: dict(OK))
+        agent.LAUFT = {"python": "3.14.7",
+                       "packages": {"certifi": "2026.7.22"}}
+        agent.installierte_python = lambda *a, **k: "3.14.10"
+        stand = agent.stand_melden(jetzt=100.0)
+        check("der gemeldete Stand traegt laeuft", "laeuft" in stand, stand)
+        check("laeuft bleibt der Stand des Prozesses",
+              stand["laeuft"]["python"] == "3.14.7", stand["laeuft"])
+        check("python ist die INSTALLIERTE Fassung",
+              stand["python"] == "3.14.10", stand["python"])
+
+        # Ist die installierte Fassung nicht zu ermitteln, bleibt es bei
+        # der laufenden - lieber die alte Wahrheit als eine geratene.
+        # Mit ALT auf der Platte, damit die beiden Zahlen sich
+        # unterscheiden - sonst waere die Pruefung gruen, ohne etwas zu
+        # unterscheiden.
+        pakete.wert = lambda: dict(ALT)
+        agent.installierte_python = lambda *a, **k: None
+        agent._STAND_GEPRUEFT = None
+        agent._STAND_PY_PLATTE = None
+        stand2 = agent.stand_melden(jetzt=200.0)
+        check("ohne installierte Fassung gilt die laufende",
+              stand2["python"] == "3.14.7" and ALT["python"] != "3.14.10",
+              stand2["python"])
+
+        agent.LAUFT = None
+        agent._STAND_GEPRUEFT = None
+        check("ohne Momentaufnahme kein Feld",
+              "laeuft" not in agent.stand_melden(jetzt=300.0))
+    finally:
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+        agent.LAUFT = _echt_lauft
+        agent.installierte_python = _echt_inst_py
+
+print("\n--- Teil 11: die sechs Sicherungen vor dem Selbstneustart ---")
+
+# Ein Agent, der sich beendet und nicht wiederkommt, ist schlimmer als
+# ein falscher Hinweis: der Host geht dunkel, und sichtbar ist nur "seit
+# X Minuten nicht gesehen". Jede der sechs Sicherungen hat hier ihre
+# eigene Pruefung, und jede ist einzeln abschaltbar gemacht.
+
+GLEICH = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"},
+          "laeuft": {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}},
+          "laufzeit": dict(OK)}
+ABW = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"},
+       "laeuft": {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}},
+       "laufzeit": dict(OK)}
+
+
+ERLAUBT = {"agent_laufzeit_neustart": True}
+
+
+def grund(stand, antwort=None, versucht=None, rueckweg=True, zweimal=True):
+    """
+    Einmal durch neustart_faellig(). zweimal=True heisst: die Abweichung
+    gilt als beim vorigen Heartbeat schon gesehen (Sicherung 6).
+
+    Die Erlaubnis muss ausdruecklich in der Antwort stehen - ein
+    Schweigen des Servers ist KEINE Zustimmung.
+    """
+    if not hasattr(agent, "neustart_faellig"):
+        return "(fehlt)"
+    echt = agent.rueckweg_bestaetigt
+    agent.rueckweg_bestaetigt = lambda: rueckweg
+    agent._NEUSTART_GESEHEN = None
+    antwort = dict(ERLAUBT, **(antwort or {}))
+    try:
+        if zweimal:
+            agent.neustart_faellig(stand, antwort, versucht)
+        return agent.neustart_faellig(stand, antwort, versucht)[1]
+    finally:
+        agent.rueckweg_bestaetigt = echt
+
+
+check("neustart_faellig() gibt es", hasattr(agent, "neustart_faellig"))
+check("rueckweg_bestaetigt() gibt es", hasattr(agent, "rueckweg_bestaetigt"))
+
+if hasattr(agent, "neustart_faellig"):
+    check("gleicher Stand: kein Neustart", grund(GLEICH) == "gleich",
+          grund(GLEICH))
+    # Sicherung 5
+    check("Schalter aus: kein Neustart",
+          grund(ABW, {"agent_laufzeit_neustart": False}) == "aus",
+          grund(ABW, {"agent_laufzeit_neustart": False}))
+    # Sicherung 1
+    check("Auftrag in der Antwort: kein Neustart",
+          grund(ABW, {"jobs": [{"id": 1}]}) == "auftrag",
+          grund(ABW, {"jobs": [{"id": 1}]}))
+    # Sicherung 6, erste Haelfte
+    for zustand in ("unvollstaendig", "unpruefbar"):
+        st = {**ABW, "laufzeit": {**OK, "zustand": zustand}}
+        check(f"Laufzeit {zustand}: kein Neustart", grund(st) == "laufzeit",
+              grund(st))
+    # Sicherung 6, zweite Haelfte: erst beim zweiten Sehen
+    check("beim ersten Sehen wird gewartet",
+          grund(ABW, zweimal=False) == "warten", grund(ABW, zweimal=False))
+    # Sicherung 2
+    ziel = agent._neustart_ziel(ABW)
+    check("Ziel schon erfolglos versucht: kein zweiter Neustart",
+          grund(ABW, versucht=ziel) == "zweiter", grund(ABW, versucht=ziel))
+    check("ein ANDERES Ziel ist kein verbrauchter Versuch",
+          grund(ABW, versucht="deadbeefdeadbeef") == "ok",
+          grund(ABW, versucht="deadbeefdeadbeef"))
+    # Sicherung 3
+    check("Rueckweg nicht bestaetigt: kein Neustart",
+          grund(ABW, rueckweg=False) == "rueckweg", grund(ABW, rueckweg=False))
+    # alles erfuellt
+    check("alles erfuellt: Neustart", grund(ABW) == "ok", grund(ABW))
+
+    # I2: ein Schweigen des Servers ist keine Zustimmung. Ein aelteres
+    # Backend kennt den Schluessel nicht und schickt ihn nicht - dort
+    # darf sich kein Agent von selbst beenden, und es gibt dort auch
+    # keinen Schalter, mit dem man es verhindern koennte.
+    check("ohne ausdrueckliche Erlaubnis kein Neustart",
+          grund(ABW, {"agent_laufzeit_neustart": None}) == "aus",
+          grund(ABW, {"agent_laufzeit_neustart": None}))
+
+    # I1: der zweite Blick muss zweimal MESSEN, nicht zweimal dieselbe
+    # Messung auswerten. Dafuer wird der Takt zurueckgesetzt.
+    agent._NEUSTART_GESEHEN = None
+    agent._STAND_GEPRUEFT = 12345.0
+    agent.neustart_faellig(ABW, dict(ERLAUBT), None)
+    check("nach 'warten' wird neu gemessen", agent._STAND_GEPRUEFT is None,
+          agent._STAND_GEPRUEFT)
+
+    # I2: ist das HANDELN schon einmal misslungen, muss das einen
+    # eigenen Grund haben. Vorher blieb "ok" stehen - und genau "ok"
+    # blendet das Backend aus, der Operator sah "prozess_alt" ohne Grund,
+    # unbegrenzt lange, und der Agent rief dabei in jedem Heartbeat
+    # erneut PowerShell fuer den Rueckweg.
+    agent._NEUSTART_FEHLER = agent._neustart_ziel(ABW)
+    try:
+        check("nach einem gescheiterten Handeln: eigener Grund",
+              grund(ABW) == "gescheitert", grund(ABW))
+        check("ein anderes Ziel ist davon nicht betroffen",
+              grund({**ABW, "python": "3.14.11"}) == "ok",
+              grund({**ABW, "python": "3.14.11"}))
+    finally:
+        agent._NEUSTART_FEHLER = None
+    check("der Grund steht in der gemeinsamen Menge",
+          "gescheitert" in agent.NEUSTART_GRUENDE)
+
+    # I3b: der Merker wird NUR auf belastbaren Befund geloescht. Ist die
+    # Laufzeit nicht als "ok" vermessen, kann "gleich" auch von einer
+    # ausgefallenen Messung kommen - dann waere das Loeschen ein
+    # Freibrief fuer den naechsten Neustart derselben Fassung.
+    for zustand, erwartet in (("ok", ["weg"]), ("unpruefbar", [])):
+        geloescht = []
+        _echt_vg = getattr(agent, "ziel_vergessen", None)
+        if _echt_vg:
+            agent.ziel_vergessen = lambda *a, **k: geloescht.append("weg")
+            try:
+                agent.neustart_faellig(
+                    {**GLEICH, "laufzeit": {**OK, "zustand": zustand}},
+                    dict(ERLAUBT), None)
+            finally:
+                agent.ziel_vergessen = _echt_vg
+            check(f"Laufzeit {zustand}: Merker loeschen {erwartet != []}",
+                  geloescht == erwartet, geloescht)
+
+    # Kleinigkeit 5: ein gleicher Stand loescht den Merker - der Neustart
+    # hat gewirkt, und dieselbe Fassung soll spaeter wieder duerfen.
+    gemerkt = []
+    echt_vergessen = getattr(agent, "ziel_vergessen", None)
+    if echt_vergessen:
+        agent.ziel_vergessen = lambda: gemerkt.append("weg")
+        try:
+            agent.neustart_faellig(GLEICH, dict(ERLAUBT), None)
+        finally:
+            agent.ziel_vergessen = echt_vergessen
+        check("ein gleicher Stand loescht den Merker", gemerkt == ["weg"],
+              gemerkt)
+    else:
+        check("ziel_vergessen() gibt es", False, "fehlt")
+
+    # Der Grund reist beim naechsten Heartbeat mit.
+    try:
+        pakete, lauf = mit_stand(lambda: dict(NEU), lambda *a, **k: dict(OK))
+        agent.LAUFT = {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}}
+        agent.installierte_python = lambda *a, **k: "3.14.10"
+        echt_rw = agent.rueckweg_bestaetigt
+        agent.rueckweg_bestaetigt = lambda: False
+        agent._NEUSTART_GESEHEN = None
+        agent._NEUSTART_GRUND = None
+        try:
+            s1 = agent.stand_melden(jetzt=400.0)
+            agent.neustart_faellig(s1, dict(ERLAUBT), None)
+            agent.neustart_faellig(s1, dict(ERLAUBT), None)
+            s2 = agent.stand_melden(jetzt=460.0)
+            check("der Grund reist im Stand mit",
+                  s2.get("neustart") == "rueckweg", s2.get("neustart"))
+        finally:
+            agent.rueckweg_bestaetigt = echt_rw
+    finally:
+        agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+        agent.LAUFT = _echt_lauft
+        agent.installierte_python = _echt_inst_py
+
+# I3a: faellt die Messung aus, gilt weiter die LETZTE gemessene Fassung.
+# Vorher wurde sie mit None ueberschrieben, und stand["python"] fiel auf
+# den Wert aus bundled_stand() zurueck - platform.python_version(), also
+# die des LAUFENDEN Prozesses. Damit sah eine echte Abweichung bis zu
+# einer Stunde lang wie "alles gleich" aus, ausgerechnet wenn python.exe
+# gesperrt ist oder in den Zeitablauf laeuft, und ziel_vergessen() nahm
+# das als "der Neustart hat gewirkt".
+#
+# Die beiden Seiten muessen AUSEINANDERLIEGEN: bundled_stand liefert hier
+# 3.14.7, die Messung 3.14.10. Mit demselben Wert auf beiden Seiten war
+# diese Pruefung gruen, egal was der Code tut - die Mutation hat sie
+# ueberlebt.
+try:
+    mit_stand(lambda: dict(ALT), lambda *a, **k: dict(OK))
+    agent.LAUFT = dict(ALT)
+    agent.installierte_python = lambda *a, **k: "3.14.10"
+    agent._NEUSTART_GRUND = None
+    s1 = agent.stand_melden(jetzt=1000.0)
+    check("die gemessene Fassung steht im Stand",
+          s1.get("python") == "3.14.10", s1.get("python"))
+    agent.installierte_python = lambda *a, **k: None
+    agent._STAND_GEPRUEFT = None
+    s2 = agent.stand_melden(jetzt=1060.0)
+    check("eine misslungene Messung behaelt die letzte gute",
+          s2.get("python") == "3.14.10", s2.get("python"))
+    check("und damit bleibt die Abweichung sichtbar",
+          s2.get("python") != (s2.get("laeuft") or {}).get("python"),
+          (s2.get("python"), (s2.get("laeuft") or {}).get("python")))
+finally:
+    agent.bundled_stand, agent.laufzeit_pruefen = _echt_bundled, _echt_lauf
+    agent.LAUFT = _echt_lauft
+    agent.installierte_python = _echt_inst_py
+    agent._STAND_PY_PLATTE = None
+    agent._STAND_GEPRUEFT = None
+
+# rueckweg_bestaetigt() prueft die Aufgabe im Detail: vorhanden,
+# eingeschaltet, und ihr Aufruf zeigt auf Dateien, die es gibt. Eine
+# Aufgabe kann vorhanden und aktiv sein und nach einer halb
+# durchgelaufenen Installation ins Leere zeigen - dann darf nicht
+# beendet werden. Geprueft wird am Quelltext, weil die Abfrage Windows
+# braucht.
+import inspect  # noqa: E402
+
+# C1, I3 und I4: die HANDLUNG, nicht nur die Entscheidung.
+check("neustart_ausfuehren() gibt es", hasattr(agent, "neustart_ausfuehren"))
+
+if hasattr(agent, "neustart_ausfuehren"):
+    def ausfuehren(merker_ok=True, neustart_ok=True):
+        ruf = []
+        e1, e2 = agent.ziel_vermerken, agent.restart_self_detached
+        agent.ziel_vermerken = lambda z: (ruf.append("merker"), merker_ok)[1]
+        agent.restart_self_detached = lambda: (ruf.append("neustart"),
+                                               neustart_ok)[1]
+        try:
+            return agent.neustart_ausfuehren(ABW), ruf
+        finally:
+            agent.ziel_vermerken, agent.restart_self_detached = e1, e2
+
+    ok, ruf = ausfuehren()
+    check("im guten Fall wird vermerkt und dann neu gestartet",
+          ok is True and ruf == ["merker", "neustart"], (ok, ruf))
+    # C1: ohne Merker kein Neustart. Der Merker ist die EINZIGE Sicherung
+    # gegen eine Schleife; er ueberlebt den Neustart, der Speicher nicht.
+    ok, ruf = ausfuehren(merker_ok=False)
+    check("ohne vermerktes Ziel wird NICHT neu gestartet",
+          ok is False and ruf == ["merker"], (ok, ruf))
+    # I3: scheitert der Neustart selbst, darf sich der Agent nicht
+    # beenden - sonst ist er weg und niemand holt ihn.
+    ok, ruf = ausfuehren(neustart_ok=False)
+    check("scheitert der Neustart, wird nicht beendet", ok is False, (ok, ruf))
+
+# Der Merker im echten Rundlauf, nicht am Quelltext. Dafuer nehmen die
+# drei Funktionen das Verzeichnis als Parameter - wie laufzeit_pruefen()
+# auch. Vorher stand hier eine Suche nach ".replace(" im Quelltext; die
+# blieb gruen, als eine Mutation direkt in die Zieldatei schrieb.
+_mk = TMP / "merkerprobe"
+_mk.mkdir(parents=True, exist_ok=True)
+check("ohne Merker gibt es kein versuchtes Ziel",
+      agent.versuchtes_ziel(_mk) is None, agent.versuchtes_ziel(_mk))
+check("vermerken gelingt und sagt das",
+      agent.ziel_vermerken("640d8602c61140ec", _mk) is True)
+check("das vermerkte Ziel kommt zurueck",
+      agent.versuchtes_ziel(_mk) == "640d8602c61140ec",
+      agent.versuchtes_ziel(_mk))
+check("vergessen loescht es",
+      (agent.ziel_vergessen(_mk), agent.versuchtes_ziel(_mk))[1] is None)
+check("vergessen ohne Merker wirft nicht",
+      (agent.ziel_vergessen(_mk), True)[1])
+# Laesst sich der Merker nicht schreiben, muss ziel_vermerken() False
+# sagen und nicht nur protokollieren - sonst beendet sich der Agent ohne
+# Schleifensicherung. Erzwungen ueber ein Verzeichnis, das es nicht gibt,
+# nicht ueber Dateirechte: die Pruefreihe laeuft als root, und dort
+# greifen Rechte nicht - eine Pruefung, die davon abhaengt, ist hier
+# gruen, ohne etwas zu messen.
+check("ein unbeschreibbares Verzeichnis ergibt False",
+      agent.ziel_vermerken("deadbeefdeadbeef",
+                           TMP / "gibtsnicht" / "tiefer") is False)
+# Ein bestehender Merker darf bei einem Fehlschlag NICHT verloren gehen.
+# Hier steht ein VERZEICHNIS an der Stelle der Nebendatei, in die
+# geschrieben wird - das scheitert fuer jeden Benutzer.
+agent.ziel_vermerken("aaaabbbbccccdddd", _mk)
+(_mk / (agent.NEUSTART_MERKER + ".neu")).mkdir(exist_ok=True)
+try:
+    check("ein Fehlschlag meldet sich",
+          agent.ziel_vermerken("1111222233334444", _mk) is False)
+    check("nach einem Fehlschlag steht der alte Merker noch",
+          agent.versuchtes_ziel(_mk) == "aaaabbbbccccdddd",
+          agent.versuchtes_ziel(_mk))
+finally:
+    (_mk / (agent.NEUSTART_MERKER + ".neu")).rmdir()
+# M2: ungueltiges UTF-8 - nicht Nullbytes - laesst read_text() platzen.
+(_mk / agent.NEUSTART_MERKER).write_bytes(b"\xff\xfe nicht utf-8")
+check("ein unlesbarer Merker ergibt kein Ziel",
+      agent.versuchtes_ziel(_mk) is None, agent.versuchtes_ziel(_mk))
+# M2: wer ins Installationsverzeichnis schreiben kann, darf den Agenten
+# nicht mit einer riesigen Datei zum Absturz bringen.
+(_mk / agent.NEUSTART_MERKER).write_bytes(b"a" * 5_000_000)
+check("ein riesiger Merker wirft nicht",
+      agent.versuchtes_ziel(_mk) != "a" * 5_000_000)
+agent.ziel_vergessen(_mk)
+
+# Die Abfrage steht als Konstante neben der Funktion - dort wird
+# geprueft, und zusaetzlich, dass die Funktion sie wirklich benutzt.
+rw_quelle = getattr(agent, "PS_AUFGABE_PRUEFEN", "")
+check("die Funktion benutzt die Abfrage",
+      hasattr(agent, "rueckweg_bestaetigt")
+      and "PS_AUFGABE_PRUEFEN" in inspect.getsource(agent.rueckweg_bestaetigt))
+# Am 2026-11-20 auf einem Windows-Testhost gemessen, nicht angenommen:
+#
+#   Execute   : "C:\Program Files\CO37\python\pythonw.exe"
+#   Arguments : "C:\Program Files\CO37\agent.py"
+#   Interval  : PT5M   Duration : (leer)   StopAtDurationEnd : False
+#
+# Zwei Dinge daran sind tragend. Erstens zerlegt schtasks das /TR
+# wirklich in Execute und Arguments - sonst stuende die ganze
+# Befehlszeile in Execute und Test-Path scheiterte auf jedem gesunden
+# Host. Zweitens stehen die ANFUEHRUNGSZEICHEN im Wert: ohne Trim('"')
+# zeigt der Pfad auf "C:\...pythonw.exe" samt Zeichen, Test-Path sagt
+# nein, und rueckweg_bestaetigt() ergibt ueberall False - das Merkmal
+# waere lautlos wirkungslos, sichtbar nur als Grund "rueckweg".
+#
+# Geprueft wird am Quelltext, weil die Abfrage Windows braucht. Das ist
+# die schwaechere Sorte Pruefung; sie steht hier mit der Messung daneben,
+# damit niemand das Trim fuer Zierat haelt und herausnimmt.
+for teil, was in (("CO37Agent", "die Aufgabe beim Namen"),
+                  ("Disabled", "den ausgeschalteten Zustand"),
+                  ("$exe = $exe.Trim('\"')",
+                   "die Anfuehrungszeichen um den Aufruf"),
+                  ("$arg = $arg.Trim('\"')",
+                   "die Anfuehrungszeichen um das Argument"),
+                  ("Test-Path -LiteralPath $exe", "die Datei des Aufrufs"),
+                  ("Test-Path -LiteralPath $arg", "die Datei des Arguments"),
+                  ("pythonw.exe", "dass der Aufruf pythonw.exe ist"),
+                  ("agent.py", "dass das Argument agent.py ist"),
+                  # Die Wiederholung IST der Rueckweg. Der Installer sagt
+                  # selbst, dass sie fehlen kann ("Warnung: 5-Minuten-
+                  # Wiederholung nicht gesetzt", build_msi.py), und bricht
+                  # dort nicht ab. Ohne sie ist der Once-Ausloeser nach der
+                  # Installation verbraucht und holt nie wieder.
+                  ("Repetition", "die Wiederholung des Ausloesers"),
+                  ("PT5M", "deren Abstand"),
+                  ("StopAtDurationEnd", "dass sie nicht auslaeuft")):
+    check(f"rueckweg_bestaetigt() prueft {was}", teil in rw_quelle,
+          None if teil in rw_quelle else rw_quelle[:0])
+# Die Schleife muss die Entscheidung treffen und handeln. Geprueft am
+# Quelltext der jeweiligen Funktion - nicht an der ganzen Datei: eine
+# Suche in agent_quelle blieb gruen, nachdem genau diese zwei Aufrufe aus
+# der Schleife herausgezogen worden waren.
+_main_quelle = inspect.getsource(agent.main)
+for teil in ("neustart_faellig(", "neustart_ausfuehren("):
+    check(f"die Heartbeat-Schleife ruft {teil}", teil in _main_quelle)
+_tun_quelle = inspect.getsource(agent.neustart_ausfuehren)
+for teil in ("ziel_vermerken(", "restart_self_detached()"):
+    check(f"neustart_ausfuehren() ruft {teil}", teil in _tun_quelle)
+
+# Und sie muss danach AUFHOEREN. Ohne das return laeuft der alte Prozess
+# weiter, haelt die Einzelinstanz-Sperre, und der angestossene Neustart
+# beendet sich sofort wieder ("Es laeuft bereits ein Agent") - der Host
+# bliebe auf der alten Laufzeit stehen, und der Merker haette den
+# zweiten Versuch schon verbraucht. Genau der Fehlschlag, wegen dem es
+# 0.51.4 und 0.51.5 gab. Geprueft wird am Baum, nicht an Zeichenketten:
+# ein "return" irgendwo in der Naehe beweist nichts.
+import ast as _ast  # noqa: E402
+
+_baum = _ast.parse(agent_quelle)
+_main = next((k for k in _ast.walk(_baum)
+              if isinstance(k, _ast.FunctionDef) and k.name == "main"), None)
+_zweige = [k for k in _ast.walk(_main)] if _main else []
+_treffer = [k for k in _zweige if isinstance(k, _ast.If)
+            and "neustart_ausfuehren" in _ast.dump(k.test)]
+check("main() entscheidet ueber neustart_ausfuehren()", len(_treffer) == 1,
+      len(_treffer))
+if len(_treffer) == 1:
+    _rumpf = _treffer[0].body
+    check("nach dem angestossenen Neustart kehrt die Schleife zurueck",
+          len(_rumpf) == 1 and isinstance(_rumpf[0], _ast.Return),
+          [type(k).__name__ for k in _rumpf])
+    # Und die REIHENFOLGE. "neustart_ausfuehren(stand) and beenden" haette
+    # alle sechs Sicherungen umgangen: der Aufruf liefe in jedem
+    # Heartbeat, schriebe den Merker und stiesse einen Neustart an, ohne
+    # dass beenden auch nur gelesen wird. Diese Mutation hat die Pruefung
+    # am Baum zunaechst ueberlebt.
+    _test = _treffer[0].test
+    check("die Entscheidung steht VOR dem Handeln",
+          isinstance(_test, _ast.BoolOp) and isinstance(_test.op, _ast.And)
+          and isinstance(_test.values[0], _ast.Name)
+          and _test.values[0].id == "beenden",
+          _ast.dump(_test)[:80])
+
+# I1: der Neustart wird NUR mit BREAKAWAY angestossen. Die Flagge
+# verweigert CreateProcess genau dann, wenn dieser Prozess in einem
+# Job-Objekt steckt, das Ausbrechen verbietet - und dann raeumt der
+# Aufgabenplaner den schlafenden Helfer mit ab. Ein zweiter Versuch ohne
+# die Flagge meldete "gelungen" und bewirkte sicher nichts. Geprueft am
+# Quelltext, weil der Fall Windows und ein Job-Objekt braucht.
+_rsd = inspect.getsource(agent.restart_self_detached)
+check("der Neustart laeuft nur mit BREAKAWAY",
+      _rsd.count("creationflags=") == 1
+      and "BREAKAWAY" in _rsd.split("creationflags=")[1].split(")")[0],
+      _rsd.count("creationflags="))
+check("keine Schleife ueber Flaggenvarianten mehr",
+      "for flags in" not in _rsd)
+
+check("ohne Windows ist der Rueckweg bestaetigt",
+      agent.rueckweg_bestaetigt() is True if not agent.IS_WINDOWS else True)
+
+print("\n--- Teil 12: das Backend nimmt den Prozessstand auf ---")
+
+LAEUFT_ALT = {"python": "3.14.7", "packages": {"certifi": "2026.7.22"}}
+
+if hasattr(main, "bundled_sauber"):
+    check("laeuft kommt durch",
+          main.bundled_sauber({**GUT, "laeuft": LAEUFT_ALT}).get("laeuft")
+          == LAEUFT_ALT,
+          main.bundled_sauber({**GUT, "laeuft": LAEUFT_ALT}))
+    check("ein Grund kommt durch",
+          main.bundled_sauber({**GUT, "neustart": "rueckweg"}).get("neustart")
+          == "rueckweg")
+    krumm_lauft = {
+        "Liste": ["3.14.7"],
+        "Zeichenkette": "3.14.7",
+        "Zahl": 7,
+        "packages als Zeichenkette": {"python": "3.14.7", "packages": "viele"},
+        "Name mit Leerzeichen": {"python": "3.14.7",
+                                 "packages": {"cer tifi": "1.0"}},
+        "zu viele Eintraege": {"python": "3.14.7",
+                               "packages": {f"p{i}": "1.0" for i in range(21)}},
+    }
+    for was, wert in krumm_lauft.items():
+        ergebnis = main.bundled_sauber({**GUT, "laeuft": wert})
+        check(f"verworfen, aber nur laeuft: {was}",
+              "laeuft" not in ergebnis
+              and ergebnis.get("packages") == GUT["packages"], ergebnis)
+    check("ein unbekannter Grund wird verworfen",
+          "neustart" not in main.bundled_sauber({**GUT, "neustart": "erfunden"}))
+    check("ein Grund als Zahl wird verworfen",
+          "neustart" not in main.bundled_sauber({**GUT, "neustart": 7}))
+
+if hasattr(main, "laufzeit_zustand"):
+    def host_lauft(laeuft, laufzeit=None, neustart=None):
+        bundled = {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}
+        if laeuft is not None:
+            bundled["laeuft"] = laeuft
+        bundled["laufzeit"] = laufzeit or dict(
+            {"zustand": "ok", "fehlend": [], "abweichend": [], "mehr": 0,
+             "liste": "0.51.4"})
+        if neustart:
+            bundled["neustart"] = neustart
+        return type("H", (), {"os_type": main.OSType.windows,
+                              "bundled": bundled})()
+
+    check("abweichender Prozessstand ergibt prozess_alt",
+          main.laufzeit_zustand(host_lauft(LAEUFT_ALT))[0] == "prozess_alt",
+          main.laufzeit_zustand(host_lauft(LAEUFT_ALT)))
+    # Der Name traegt den Wert, die Art sagt, worum es geht - dasselbe
+    # Muster wie bei bundled_diff.
+    _eintr = main.laufzeit_zustand(host_lauft(LAEUFT_ALT))[1]
+    check("und nennt, was abweicht",
+          any(e.get("art") == "prozess_python" and e.get("name") == "3.14.7"
+              for e in _eintr)
+          and any(e.get("art") == "prozess_paket" and e.get("name") == "certifi"
+                  for e in _eintr), _eintr)
+    check("gleicher Prozessstand bleibt ok",
+          main.laufzeit_zustand(host_lauft(
+              {"python": "3.14.10", "packages": {"certifi": "2026.10.23"}}))[0]
+          == "ok")
+    # Eine unvollstaendige Laufzeit ist der dringendere Befund.
+    check("unvollstaendig hat Vorrang vor prozess_alt",
+          main.laufzeit_zustand(host_lauft(
+              LAEUFT_ALT, {"zustand": "unvollstaendig", "fehlend": ["x"],
+                           "abweichend": [], "mehr": 0, "liste": "0.51.4"}
+          ))[0] == "unvollstaendig")
+    check("ein gescheitertes Handeln reist nach aussen",
+          {"art": "neustart", "name": "gescheitert"} in main.laufzeit_zustand(
+              type("H", (), {"os_type": main.OSType.windows,
+                             "bundled": {**GUT, "laeuft": LAEUFT_ALT,
+                                         "laufzeit": dict(OK),
+                                         "neustart": "gescheitert"}})())[1],
+          main.laufzeit_zustand(
+              type("H", (), {"os_type": main.OSType.windows,
+                             "bundled": {**GUT, "laeuft": LAEUFT_ALT,
+                                         "laufzeit": dict(OK),
+                                         "neustart": "gescheitert"}})())[1])
+    check("beide Seiten kennen dieselben Gruende",
+          set(agent.NEUSTART_GRUENDE) == set(main.NEUSTART_GRUENDE),
+          set(agent.NEUSTART_GRUENDE) ^ set(main.NEUSTART_GRUENDE))
+    check("der verbrauchte Versuch reist nach aussen",
+          any(e.get("art") == "neustart" for e in main.laufzeit_zustand(
+              host_lauft(LAEUFT_ALT, neustart="zweiter"))[1]),
+          main.laufzeit_zustand(host_lauft(LAEUFT_ALT, neustart="zweiter"))[1])
+
+check("der Schalter steht in den Vorgaben mit true",
+      main.ROLL_DEFAULTS.get("agent_laufzeit_neustart") == "true",
+      main.ROLL_DEFAULTS.get("agent_laufzeit_neustart"))
+check("RollConfig kennt ihn",
+      "laufzeit_neustart" in main.RollConfig.model_fields)
+check("die Heartbeat-Antwort traegt ihn",
+      "agent_laufzeit_neustart" in (main.__dict__ and
+      (WURZEL / "backend" / "main.py").read_text(encoding="utf-8")))
+
 print(f"\nFehler: {fails}")
 sys.exit(1 if fails else 0)
