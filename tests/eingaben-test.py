@@ -571,6 +571,11 @@ _h4 = next((h["id"] for h in _hosts if h["hostname"] == "EINGABE-GRENZ-04"), Non
 check("zweiter Testhost angemeldet", bool(_tok) and _h4 is not None)
 call(f"/api/v1/hosts/{_h4}/approve", {}, hdr=ADM)
 AGT = {"X-Agent-Token": _tok or ""}
+# Sofort-Auftraege gibt es nur fuer Hosts, die sich gemeldet haben - also
+# meldet sich der Testhost einmal, wie ein Agent es taete.
+call("/api/v1/agent/heartbeat", {
+    "hostname": "EINGABE-GRENZ-04", "os_type": "linux",
+    "os_version": "Debian 13", "agent_version": "0.51.5"}, hdr=AGT)
 
 code, res = call(f"/api/v1/hosts/{_h4}/jobs", {"job_type": "scan"}, hdr=ADM)
 _jid = res.get("id")

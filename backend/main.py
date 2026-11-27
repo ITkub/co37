@@ -4666,6 +4666,18 @@ def host_updates(host_id: Kennung, session: Session = Depends(get_session)):
 # ======================================================================
 # Jobs
 # ======================================================================
+def host_ist_online(host, now) -> bool:
+    """
+    Freigegeben und innerhalb von AGENT_OFFLINE_AFTER gemeldet.
+
+    Eine Definition fuer den Statusbericht und fuer die Auftragsanlage.
+    Ein Host, der sich nie gemeldet hat (last_seen leer), ist offline.
+    """
+    if host.approval_state != ApprovalState.approved or not host.last_seen:
+        return False
+    return (now - ensure_utc(host.last_seen)).total_seconds() <= AGENT_OFFLINE_AFTER
+
+
 @app.post("/api/v1/hosts/{host_id}/jobs", response_model=JobRead,
           dependencies=[Depends(require_login)])
 def create_job(
@@ -4717,6 +4729,35 @@ def create_job(
     # beides, deshalb hier nur fuer Administratoren.
     if payload.job_type == JobType.selfupdate and not who.is_admin:
         raise HTTPException(403, "Nur fuer Administratoren")
+
+    # Sofort-Auftraege nur fuer Hosts, die gerade erreichbar sind.
+    #
+    # Ein von Hand angelegter Scan oder Patch blieb bei einem Host, der
+    # offline war, bis zu JOB_MAX_WAIT (sieben Tage) auf "pending" und lief
+    # beim Wiederkommen nachtraeglich - mehrere Klicks stauten sich, und
+    # ein alter Patch-Auftrag installierte veraltete Updates. Jetzt wird er
+    # gar nicht erst angelegt.
+    #
+    # Eingeplante Auftraege (scheduled_at) bleiben erlaubt: dort ist das
+    # Warten gewollt, und expires_at begrenzt es. Neustart hat seine eigene
+    # kurze Frist und bleibt unberuehrt.
+    #
+    # Ein Termin, der schon vorbei ist, ist keiner: der Auftrag waere sofort
+    # faellig und wuerde ebenso warten. Er zaehlt als Sofort-Auftrag.
+    #
+    # Die Pruefung steht NACH der Rechtepruefung: ob ein Konto ohne
+    # Neustart-Recht abgewiesen wird, darf nicht davon abhaengen, ob der
+    # Host gerade online ist.
+    if (payload.job_type in (JobType.scan, JobType.patch)
+            and (payload.scheduled_at is None
+                 or ensure_utc(payload.scheduled_at) <= utcnow())
+            and not host_ist_online(host, utcnow())):
+        raise HTTPException(
+            409,
+            "Host ist offline"
+            + (f" (letzte Meldung {host.last_seen:%d.%m. %H:%M} UTC)"
+               if host.last_seen else " (noch nie gemeldet)")
+            + ". Auftrag nicht angelegt.")
 
     # Was der Aufrufer an params mitschicken darf - und sonst nichts.
     #
@@ -6966,9 +7007,7 @@ def monitoring(request: Request, x_monitor_token: str = Header(default="")):
         hosts = session.exec(select(Host)).all()
 
         def _online(h) -> bool:
-            if h.approval_state != ApprovalState.approved or not h.last_seen:
-                return False
-            return (now - ensure_utc(h.last_seen)).total_seconds() <= AGENT_OFFLINE_AFTER
+            return host_ist_online(h, now)
 
         def _age(h):
             return int((now - ensure_utc(h.last_seen)).total_seconds()) if h.last_seen else None
