@@ -145,6 +145,42 @@ with tempfile.TemporaryDirectory(prefix="co37-harness-") as tmp:
           "Kein Python 3 gefunden" not in ausgabe, ausgabe.strip()[:120])
 
 # ----------------------------------------------------------------------
+# Installiertes System: das venv liegt unter venv/, nicht unter .venv/
+# ----------------------------------------------------------------------
+# setup.sh legt das venv unter $BASE/venv an, und run-tests.sh liegt dort
+# daneben. Gesucht wurde nur .venv; auf einem installierten System fand
+# das Skript dann einen Python ohne die Backend-Pakete. Hier liegt neben der
+# Kopie ein venv/bin/python (ein Aufruf des laufenden Python, der die Pakete
+# hat), und alle Namen im Pfad sind unbrauchbar - nur dieser Kandidat kann
+# das Skript retten.
+with tempfile.TemporaryDirectory(prefix="co37-harness-") as tmp:
+    ordner = Path(tmp)
+    store_attrappen(ordner)
+    (ordner / "venv" / "bin").mkdir(parents=True)
+    venv_python = ordner / "venv" / "bin" / "python"
+    venv_python.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    venv_python.chmod(venv_python.stat().st_mode | stat.S_IEXEC)
+
+    umgebung = dict(os.environ)
+    umgebung["PATH"] = f"{ordner}{os.pathsep}{umgebung.get('PATH', '')}"
+    umgebung.pop("CO37_PYTHON", None)
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    umgebung["CO37_TEST_PORT"] = str(s.getsockname()[1])
+
+    code, ausgabe = lauf(umgebung, skript=abseits(ordner))
+    s.close()
+
+    check("installiertes System: venv/bin/python wird gefunden",
+          "Kein Python 3 gefunden" not in ausgabe
+          and "ohne die Pakete" not in ausgabe, ausgabe.strip()[:160])
+    check("und das Geruest kommt bis zum Portcheck",
+          "ist belegt" in ausgabe, ausgabe.strip()[:160])
+
+# ----------------------------------------------------------------------
 # Der richtige Grund muss weiterhin kommen
 # ----------------------------------------------------------------------
 # Sonst waere nur ein irrefuehrender Abbruch durch einen anderen ersetzt.
