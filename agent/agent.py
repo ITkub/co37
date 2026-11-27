@@ -31,7 +31,7 @@ import urllib3
 import requests
 from requests.adapters import HTTPAdapter
 
-AGENT_VERSION = "0.51.5"
+AGENT_VERSION = "0.51.6"
 IS_WINDOWS = platform.system() == "Windows"
 
 
