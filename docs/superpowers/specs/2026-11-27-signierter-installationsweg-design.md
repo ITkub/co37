@@ -1,7 +1,7 @@
 # Signierter Installationsweg für den Windows-Agenten — Entwurf
 
 Stand 2026-11-27. Gehört zu B-2026-11-17-01 (`komponenten-und-fassungen`).
-Status: Entwurf, noch nicht freigegeben.
+Status: Entwurf, zur Freigabe vorgelegt.
 
 ## Anlass und Ziel
 
@@ -158,6 +158,15 @@ Auftrag `install`:
    zeigt es.
 
 ### 4. Rückweg
+
+**Entscheidung von Mike (2026-11-27): keine automatische Rücknahme im ersten
+Wurf.** Läuft `msiexec` durch, der neue Agent ist aber kaputt oder meldet sich
+nicht, wird der Auftrag nach der Frist als „fehlgeschlagen" angezeigt; der
+Host wird von Hand wiederhergestellt (MSI wie bisher, siehe
+`agent-msi-ausrollen`). Das Risiko für die Fläche begrenzt die Staffelung:
+der Pilot-Host kommt zuerst, die übrigen erst nach der Bestätigungszeit. Eine
+automatische Rücknahme (alte MSI behalten und bei ausbleibender Meldung neu
+installieren) ist ein möglicher späterer, eigener Schritt.
 
 - Scheitert `msiexec`, rollt der Installer selbst zurück; die alte Fassung und
   die Aufgabe bleiben.
