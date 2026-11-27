@@ -88,6 +88,10 @@ sys.exit(0 if sys.version_info[0] == 3 else 1)" >/dev/null 2>&1
 # gehoert zu diesem Verzeichnis, ein Python aus dem Pfad zu irgendetwas.
 VENV_L="$HIER/.venv/bin/python"
 VENV_W="$HIER/.venv/Scripts/python.exe"
+# Auf einem installierten System: setup.sh legt das venv unter $BASE/venv an,
+# ohne Punkt, und diese Datei liegt dort daneben. Ohne diesen Kandidaten
+# fand die Suche nur einen Python ohne die Backend-Pakete.
+VENV_I="$HIER/venv/bin/python"
 
 # Ein ausdruecklich gesetztes CO37_PYTHON wird nicht stillschweigend
 # uebergangen. Taugt es nicht, ist das eine Meldung wert - sonst liefe
@@ -102,7 +106,7 @@ if [ -n "${CO37_PYTHON:-}" ] && ! taugt "${CO37_PYTHON:-}"; then
 fi
 
 PY=""
-for kandidat in "${CO37_PYTHON:-}" "$VENV_L" "$VENV_W" python3 python py; do
+for kandidat in "${CO37_PYTHON:-}" "$VENV_L" "$VENV_W" "$VENV_I" python3 python py; do
   if taugt "$kandidat"; then
     PY="$kandidat"; break
   fi
