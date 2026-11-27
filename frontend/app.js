@@ -334,7 +334,7 @@ function verbindungDa(){
 }
 
 /* ---------- API ---------- */
-async function api(method, path, body){
+async function api(method, path, body, opts){
   let res;
   try {
     res = await fetch(API + path, {
@@ -365,8 +365,12 @@ async function api(method, path, body){
   if (!res.ok){
     let msg = await res.text();
     try { msg = JSON.parse(msg).detail || msg; } catch(e){}
-    toast(String(msg).slice(0,220), true);
-    throw new Error(msg);
+    // Sammelaktionen melden abgewiesene Hosts (409: offline) selbst, einmal
+    // gezaehlt - sonst kaeme fuer jeden Host eine eigene Meldung.
+    if (!(opts && opts.ohneToast409 && res.status === 409)){
+      toast(String(msg).slice(0,220), true);
+    }
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   return res.status === 204 ? null : res.json();
 }
@@ -1254,6 +1258,33 @@ async function load(){
   render();
 }
 
+/*
+ * Auftrag fuer mehrere Hosts anlegen und mitzaehlen.
+ *
+ * Der Server legt Scan und Patch ohne Termin nicht an, wenn der Host
+ * offline ist (409). Frueher schluckte jede Sammelaktion alle Fehler und
+ * meldete trotzdem "fuer N Hosts eingeplant" - bei offline-Hosts stimmte
+ * die Zahl nicht. Jetzt wird gezaehlt, was angelegt wurde, was offline war
+ * und was aus anderem Grund scheiterte.
+ *
+ * senden(host) legt den Auftrag an und wirft bei einem Fehler.
+ */
+async function sammelAuftraege(hosts, senden){
+  const r = { angelegt: 0, offline: 0, fehler: 0 };
+  for (const h of hosts){
+    try { await senden(h); r.angelegt++; }
+    catch(e){ if (e && e.status === 409) r.offline++; else r.fehler++; }
+  }
+  return r;
+}
+
+// Meldung zu einer Sammelaktion: was angelegt wurde, und getrennt davon,
+// was wegen "offline" uebersprungen wurde.
+function sammelMeldung(schluessel, r){
+  if (r.angelegt > 0) toast(t(schluessel, { anzahl: r.angelegt }));
+  if (r.offline > 0) toast(t("msg.skipped_offline", { anzahl: r.offline }), r.angelegt === 0);
+}
+
 async function afterAction(){
   await load().catch(() => {});
   scheduleRefresh();
@@ -1347,8 +1378,9 @@ async function reject(id){
 
 async function scanAll(){
   const ok = HOSTS.filter(h => h.approval_state === "approved");
-  for (const h of ok){ try { await api("POST", `/api/v1/hosts/${h.id}/jobs`, {job_type:"scan", params:{}}); } catch(e){} }
-  toast(t("msg.scan_many", { anzahl: ok.length }));
+  const r = await sammelAuftraege(ok, h => api("POST", `/api/v1/hosts/${h.id}/jobs`,
+                                                {job_type:"scan", params:{}}, {ohneToast409: true}));
+  sammelMeldung("msg.scan_many", r);
   afterAction();
 }
 
@@ -1368,13 +1400,9 @@ async function scanAll(){
 async function scanPatchAll(){
   const ok = HOSTS.filter(h => h.approval_state === "approved");
   if (!confirm(t("ask.scan_patch_all", { anzahl: ok.length }))) return;
-  for (const h of ok){
-    try {
-      await api("POST", `/api/v1/hosts/${h.id}/jobs`,
-                {job_type:"scan", patch_after: true, params:{}});
-    } catch(e){}
-  }
-  toast(t("msg.scan_patch_many", { anzahl: ok.length }));
+  const r = await sammelAuftraege(ok, h => api("POST", `/api/v1/hosts/${h.id}/jobs`,
+                {job_type:"scan", patch_after: true, params:{}}, {ohneToast409: true}));
+  sammelMeldung("msg.scan_patch_many", r);
   afterAction();
 }
 
@@ -3179,10 +3207,9 @@ document.getElementById("aDelete").onclick = () => removeArea(EDIT_AREA_ID, true
 
 async function scanArea(areaId){
   const hosts = HOSTS.filter(h => h.area_id === areaId && h.approval_state === "approved");
-  for (const h of hosts){
-    try { await api("POST", `/api/v1/hosts/${h.id}/jobs`, {job_type:"scan", params:{}}); } catch(e){}
-  }
-  toast(t("msg.scan_many", { anzahl: hosts.length }));
+  const r = await sammelAuftraege(hosts, h => api("POST", `/api/v1/hosts/${h.id}/jobs`,
+                                                  {job_type:"scan", params:{}}, {ohneToast409: true}));
+  sammelMeldung("msg.scan_many", r);
   afterAction();
 }
 
@@ -3192,17 +3219,13 @@ async function patchArea(areaId){
                                     && (h.updates_available||0) > 0);
   if (!hosts.length){ toast(t("area.nothing_to_patch"), true); return; }
   if (!confirm(t("ask.patch_area", { anzahl: hosts.length, bereich: a ? a.name : "" }))) return;
-  for (const h of hosts){
-    try {
-      // source_area_id genau wie beim automatisch ausgeloesten Auftrag
-      // (Schritt 2) - ein spaeter daraus genehmigter Neustart nutzt dann
-      // die Downtime des Bereichs, nicht die des einzelnen Hosts.
-      await api("POST", `/api/v1/hosts/${h.id}/jobs`, {
-        job_type: "patch", params: { source_area_id: areaId },
-      });
-    } catch(e){}
-  }
-  toast(t("msg.patch_many", { anzahl: hosts.length }));
+  // source_area_id genau wie beim automatisch ausgeloesten Auftrag
+  // (Schritt 2) - ein spaeter daraus genehmigter Neustart nutzt dann
+  // die Downtime des Bereichs, nicht die des einzelnen Hosts.
+  const r = await sammelAuftraege(hosts, h => api("POST", `/api/v1/hosts/${h.id}/jobs`, {
+    job_type: "patch", params: { source_area_id: areaId },
+  }, {ohneToast409: true}));
+  sammelMeldung("msg.patch_many", r);
   afterAction();
 }
 

@@ -240,6 +240,7 @@ REIHEN=(
   "proxy-https     $PY tests/proxy-https-test.py"
   "agent-api       $PY tests/agent-api-test.py"
   "heartbeat-plan  $PY tests/heartbeat-plan-test.py"
+  "offline-auftraege $PY tests/offline-auftraege-test.py"
   "area            $PY tests/area-test.py"
   "host-patch      $PY tests/host-patch-test.py"
   "eingaben        $PY tests/eingaben-test.py"
@@ -381,6 +382,9 @@ fi
 # Reihen durchlaufen
 # ---------------------------------------------------------------------
 export CO37_TEST_URL="http://127.0.0.1:$PORT"
+# Fuer Reihen, die den Zeitpunkt der letzten Meldung eines Hosts verschieben
+# muessen (offline-auftraege).
+export CO37_TEST_DB="$TMP_NATIV/co37.db"
 
 # ---------------------------------------------------------------------
 # Eine Sitzung fuer alle Reihen

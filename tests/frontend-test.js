@@ -240,7 +240,7 @@ const EXPORTS = "\nreturn { loadAgentsTab, loadCmk, loadCmkForm, copy, fmtSize, 
   + "getEditAreaId: () => EDIT_AREA_ID, getAreas: () => AREAS, renderAreaHead, renderUnit, "
   + "setLastAction: (o) => { LAST_ACTION = o; }, removeArea, t, fmtTime, "
   + "bundledNote, bundledDiffText, laufzeitNote, laufzeitDiffText, "
-  + "LAUFZEIT_VON_HAND, "
+  + "LAUFZEIT_VON_HAND, sammelAuftraege, "
   + "setAgentVer: (v) => { AGENT_VER = v; }, setActive: (a) => { ACTIVE = a; } };";
 const wrapped = new Function(script + EXPORTS);
 let api;
@@ -1367,6 +1367,15 @@ global.setTimeout = origSetTimeout;
     const hid = hostsNow.find(h => h.hostname === `ST-AREA-HOST-${suffix}`).id;
     await adminCall(`/api/v1/hosts/${hid}/approve`, { body: {} });
     await adminCall(`/api/v1/hosts/${hid}/area`, { body: { area_id: areaA.id } });
+    // Sofort-Auftraege gibt es nur fuer Hosts, die sich gemeldet haben.
+    await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/heartbeat`, {
+      method: "POST",
+      headers: {"X-Agent-Token": token, "Content-Type": "application/json"},
+      body: JSON.stringify({
+        hostname: `ST-AREA-HOST-${suffix}`, os_type: "linux",
+        os_version: "Debian 13", agent_version: "0.35.4",
+      }),
+    });
 
     const holeHosts = async () => {
       const [, hs] = await adminCall("/api/v1/hosts");
@@ -1677,6 +1686,15 @@ global.setTimeout = origSetTimeout;
     const [, hosts6] = await adminCall("/api/v1/hosts");
     const hid6 = hosts6.find(h => h.hostname === `S6-JOB-HOST-${suffix6}`).id;
     await adminCall(`/api/v1/hosts/${hid6}/approve`, { body: {} });
+    // Sofort-Auftraege gibt es nur fuer Hosts, die sich gemeldet haben.
+    await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/heartbeat`, {
+      method: "POST",
+      headers: {"X-Agent-Token": token6, "Content-Type": "application/json"},
+      body: JSON.stringify({
+        hostname: `S6-JOB-HOST-${suffix6}`, os_type: "linux",
+        os_version: "Debian 13", agent_version: "0.36.0",
+      }),
+    });
 
     const agentReport = async (job_id, state) => {
       const r = await fetch(`http://127.0.0.1:${PORT}/api/v1/agent/report`, {
@@ -2050,6 +2068,45 @@ global.setTimeout = origSetTimeout;
           api.bundledDiffText({ art: "irgendwas", name: "x" }));
   } else {
     check("bundledNote() ist exportiert", false, typeof api.bundledNote);
+  }
+
+  console.log("\n=== Sammelaktionen und Hosts, die offline sind ===");
+  if (typeof api.sammelAuftraege === "function") {
+    const fehlerMit = (status) => Object.assign(new Error("x"), { status });
+    const hs = [1, 2, 3, 4, 5].map(id => ({ id }));
+
+    // Zwei von fuenf Hosts sind offline (der Server antwortet 409).
+    let gesendet = [];
+    let r = await api.sammelAuftraege(hs, async (h) => {
+      gesendet.push(h.id);
+      if (h.id === 2 || h.id === 4) throw fehlerMit(409);
+    });
+    check("Sammelaktion: jeder Host wird versucht", gesendet.join() === "1,2,3,4,5", gesendet);
+    check("Sammelaktion: 3 angelegt, 2 offline, 0 Fehler",
+          r.angelegt === 3 && r.offline === 2 && r.fehler === 0, r);
+
+    // Ein anderer Fehler ist kein "offline".
+    r = await api.sammelAuftraege(hs, async (h) => {
+      if (h.id === 1) throw fehlerMit(500);
+      if (h.id === 2) throw new Error("kein Status");
+    });
+    check("Sammelaktion: andere Fehler zaehlen als Fehler, nicht als offline",
+          r.angelegt === 3 && r.offline === 0 && r.fehler === 2, r);
+
+    // Alle offline.
+    r = await api.sammelAuftraege(hs, async () => { throw fehlerMit(409); });
+    check("Sammelaktion: alle offline -> nichts angelegt",
+          r.angelegt === 0 && r.offline === 5 && r.fehler === 0, r);
+
+    // Die Meldung fuer uebersprungene Hosts gibt es in beiden Sprachen.
+    for (const sprache of ["de", "en"]) {
+      api.setzeSprache(sprache);
+      const text = api.t("msg.skipped_offline", { anzahl: 2 });
+      check(`msg.skipped_offline (${sprache}) ist uebersetzt und nennt die Zahl`,
+            !text.startsWith("msg.") && text.includes("2"), text);
+    }
+  } else {
+    check("sammelAuftraege() ist exportiert", false, typeof api.sammelAuftraege);
   }
 
   console.log(`\nFehler: ${fails}`);

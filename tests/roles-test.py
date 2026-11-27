@@ -21,6 +21,8 @@ Arbeitsspeicher - ein Neustart des Backends leert ihn.
 """
 import json
 import os
+import sqlite3
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 
@@ -397,6 +399,21 @@ hid = next((h["id"] for h in hosts
     if isinstance(hosts, list) else None
 check("ein freigegebener Host steht zur Verfuegung", hid is not None)
 if hid:
+    # Scan und Patch ohne Termin gibt es nur fuer Hosts, die sich gemeldet
+    # haben. Dieser Host stammt aus einer fruehren Reihe; ob er sich dort
+    # gemeldet hat und wie lange das her ist, ist Zufall - und der Gesamtlauf
+    # dauert laenger als die 180 Sekunden, die als "online" gelten. Also die
+    # letzte Meldung hier selbst auf "gerade eben" setzen.
+    _db = os.getenv("CO37_TEST_DB", "")
+    check("CO37_TEST_DB ist gesetzt (letzte Meldung des Testhosts)",
+          bool(_db) and os.path.exists(_db), _db)
+    if _db:
+        _con = sqlite3.connect(_db)
+        _jetzt = datetime.now(timezone.utc).replace(tzinfo=None)
+        _con.execute("UPDATE host SET last_seen=? WHERE id=?",
+                     (_jetzt.strftime("%Y-%m-%d %H:%M:%S.%f"), hid))
+        _con.commit()
+        _con.close()
     # Ohne das Recht: Scan und Patch ja, Neustart nein.
     code, _ = call(f"/api/v1/hosts/{hid}/jobs", {"job_type": "scan"}, hdr=usr)
     check("ohne Recht: Scan erlaubt", code == 200, code)

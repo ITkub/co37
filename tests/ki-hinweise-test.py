@@ -29,7 +29,8 @@ Commit-Nachricht.
 
 WAS NICHT GEPRUEFT WIRD, und das ist ausdruecklich so entschieden:
 
-- Die HISTORIE. Die drei Funde von 2026-11-11 stehen weiter in den
+- Die ALTE HISTORIE (die NEUEN Commits eines Zweigs seit origin/main werden
+  dagegen geprueft, siehe Pruefung 5 unten). Die drei Funde von 2026-11-11 stehen weiter in den
   Commits de17c30, ff3e4da und 5004f24. Das bleibt bewusst so: beim
   Vorfall vom 2026-09-23 ging es um 18 MB unveroeffentlichte Medien,
   hier um einen Ordnernamen in drei Kommentarzeilen, und ein zweiter
@@ -227,6 +228,41 @@ check("kein Werkzeughinweis in Inhalt, Pfaden oder Kopfdaten",
       f"{len(treffer)} Treffer" if gesucht else "nicht durchsucht")
 for zeile in treffer:
     print(f"       {zeile}")
+
+# ----------------------------------------------------------------------
+# 5. Keine Werkzeughinweise in den NEUEN Commits (seit origin/main)
+# ----------------------------------------------------------------------
+# Die Pruefung oben liest nur den Stand von HEAD. Ein Hinweis, der in einem
+# frueheren Commit eines Zweigs stand und im naechsten entfernt wurde,
+# bliebe darin unsichtbar - und wuerde mit dem Zweig veroeffentlicht
+# (am 2026-11-25 passiert: ein Plan nannte die verbotenen Begriffe als
+# Gegenbeispiel, der Test war gruen, die Historie nicht).
+#
+# Darum zusaetzlich: alles, was dieser Zweig gegenueber origin/main NEU
+# mitbringt - Nachricht, Autor, Dateinamen und hinzugefuegte Zeilen jedes
+# Commits. Die alte Historie bleibt wie oben beschrieben unberuehrt.
+#
+# Fehlt origin/main (flacher Klon, frisches Repository), laesst sich das
+# nicht messen. Das wird ausgesprochen, statt als Erfolg zu zaehlen.
+basis = git("rev-parse", "--verify", "-q", "origin/main")
+if basis is None:
+    print("hinweis: origin/main fehlt - die neuen Commits wurden nicht geprueft")
+else:
+    commits = (git("rev-list", "origin/main..HEAD") or "").split()
+    neu = []
+    for c in commits:
+        kopf_c = git("log", "-1", "--format=%an%n%ae%n%B", c) or ""
+        dateien = git("show", "--name-only", "--format=", c) or ""
+        zeilen = [z[1:] for z in (git("show", "--format=", "-U0", c) or "")
+                  .splitlines() if z.startswith("+") and not z.startswith("+++")]
+        for stelle, text in (("Nachricht", kopf_c), ("Datei", dateien),
+                             ("Zeile", "\n".join(zeilen))):
+            for fund in MUSTER.findall(text):
+                neu.append(f"Commit   {c[:7]} {stelle}  {fund}")
+    check("kein Werkzeughinweis in den neuen Commits seit origin/main",
+          not neu, f"{len(neu)} Treffer in {len(commits)} Commit(s)")
+    for zeile in neu:
+        print(f"       {zeile}")
 
 print(f"\nFehler: {fails}")
 raise SystemExit(1 if fails else 0)
