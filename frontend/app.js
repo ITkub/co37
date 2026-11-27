@@ -1333,7 +1333,12 @@ function rebootHost(id){
     t("reboot.dialog_title", { host: h.display_name || h.hostname });
   document.getElementById("rbInfo").innerHTML =
     t("reboot.dialog_info", { host: esc(h.hostname) });
-  rbDowntime.checked = true;
+  // Der Haken ist nur vorbelegt, wenn es etwas gibt, worauf die Downtime
+  // gesetzt werden kann: ein oder mehrere verknuepfte Checkmk-Hosts oder
+  // "alle Checkmk-Hosts". Ohne Ziel bleibt er aus - er liesse sich ohnehin
+  // nicht erfuellen, und der Hinweis darunter sagt es. Wer es trotzdem will,
+  // kann ihn setzen.
+  rbDowntime.checked = linked;
   rbDtMin.value = h.downtime_minutes || 30;
   rbGrace.value = 10;
 

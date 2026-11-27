@@ -460,12 +460,54 @@ global.setTimeout = origSetTimeout;
       check("Dialog gefuellt", el("rbTitle").textContent.length > 0, el("rbTitle").textContent);
       check("Nachlauf Vorgabe 10", el("rbGrace").value === 10 || el("rbGrace").value === "10",
             String(el("rbGrace").value));
-      check("Downtime-Haken gesetzt", el("rbDowntime").checked === true);
       check("Downtime-Dauer vorbelegt", Number(el("rbDtMin").value) > 0, String(el("rbDtMin").value));
       check("Warnhinweis vorhanden", el("rbWarn").innerHTML.length > 0);
     } catch(e){ check("rebootHost laeuft durch", false, e.message); }
   } else {
     console.log("      (kein Host vorhanden, uebersprungen)");
+  }
+
+  console.log("\n=== Neustart-Dialog: Downtime-Haken je nach Checkmk-Verknuepfung ===");
+  {
+    const mk = (id, extra) => Object.assign({
+      id, hostname: `NH-${id}`, display_name: null, approval_state: "approved",
+      status: "online", os_type: "linux", downtime_minutes: 30,
+      checkmk_hosts: [], checkmk_downtime_all: false,
+    }, extra);
+    const ohne = mk(95001, {});
+    const einer = mk(95002, { checkmk_hosts: ["srv-a"] });
+    const mehrere = mk(95003, { checkmk_hosts: ["srv-a", "srv-b"] });
+    const alle = mk(95004, { checkmk_downtime_all: true });
+    const fehlt = mk(95005, { checkmk_hosts: undefined });
+    api.setHosts([ohne, einer, mehrere, alle, fehlt]);
+
+    api.rebootHost(ohne.id);
+    check("ohne Checkmk-Verknuepfung: Haken ist nicht gesetzt",
+          el("rbDowntime").checked === false);
+    check("ohne Verknuepfung: der Hinweis auf fehlende Verknuepfung steht da",
+          el("rbWarn").innerHTML.includes(api.t("reboot.no_link")));
+
+    api.rebootHost(einer.id);
+    check("mit einem Checkmk-Host: Haken ist gesetzt",
+          el("rbDowntime").checked === true);
+
+    api.rebootHost(ohne.id);
+    api.rebootHost(mehrere.id);
+    check("mit mehreren Checkmk-Hosts: Haken ist gesetzt, auch nach einem Host ohne",
+          el("rbDowntime").checked === true);
+
+    api.rebootHost(alle.id);
+    check("mit 'alle Checkmk-Hosts': Haken ist gesetzt",
+          el("rbDowntime").checked === true);
+
+    api.rebootHost(einer.id);
+    api.rebootHost(ohne.id);
+    check("ohne Verknuepfung nach einem Host mit Verknuepfung: Haken ist wieder aus",
+          el("rbDowntime").checked === false);
+
+    api.rebootHost(fehlt.id);
+    check("fehlendes Feld checkmk_hosts zaehlt als ohne Verknuepfung",
+          el("rbDowntime").checked === false);
   }
 
   console.log("\n=== Zeitzonen ===");
