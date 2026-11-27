@@ -159,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix="co37-harness-") as tmp:
     (ordner / "venv" / "bin").mkdir(parents=True)
     venv_python = ordner / "venv" / "bin" / "python"
     venv_python.write_text(
-        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        f"#!/bin/sh\nexec '{PY_SH}' \"$@\"\n", encoding="utf-8", newline="\n")
     venv_python.chmod(venv_python.stat().st_mode | stat.S_IEXEC)
 
     umgebung = dict(os.environ)
