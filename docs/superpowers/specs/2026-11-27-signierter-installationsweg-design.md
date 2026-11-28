@@ -106,6 +106,7 @@ zu seiner Datei einen eigenen Beweis. Das ist dasselbe Muster wie
 - Übernommen am 2026-11-28: kein eigenes Installer-Skript; Upgrade und
   Reparatur getrennt; erwarteter Stand in der signierten Erklärung; nur eine
   MSI je Version; Bauablauf als eigener Punkt (siehe „Release-Bau").
+- MSI-Bau auf dem eigenen Linux-Server aus sauberem Checkout (2026-11-28).
 
 ## Entwurf
 
@@ -116,14 +117,21 @@ zu seiner Datei einen eigenen Beweis. Das ist dasselbe Muster wie
   `wixl`. Die Python-Laufzeit wird gegen einen **festen SHA-256**
   (`PY_SHA256` neben `PY_VERSION` in `build_msi.py`) geprüft; stimmt er nicht,
   bricht der Bau ab.
-- **Offen, Entscheidung Mike:** wo der Linux-Schritt läuft.
-  - *Bevorzugt:* auf dem Signierrechner selbst (WSL oder Docker). Dann bleibt
-    der ganze Release-Bau ein Aufruf an einem Ort; `build_release.py` ruft
-    den MSI-Bau dort auf.
-  - *Sonst:* auf einem eigenen Linux-Baurechner. Dann wird `build_release.py`
-    zweigeteilt (Versionen setzen; später mit `--msi <Datei>` signieren und
-    packen), und es **prüft**, dass das `agent.py` in der MSI byte-gleich mit
-    dem im ZIP ist, bevor es signiert.
+- **Entscheidung Mike (2026-11-28): der Linux-Schritt läuft auf dem eigenen
+  Linux-Server des Herausgebers**, auf dem `wixl` schon installiert ist.
+  Verworfen: WSL auf dem Signierrechner (nicht installiert) und ein Bau in
+  GitHub Actions (änderte die Entscheidung „CI baut nicht").
+  - Der Bau läuft aus einem **sauberen Checkout des gestempelten Commits** in
+    einem eigenen Arbeitsverzeichnis, nicht aus der installierten Anlage und
+    nicht mit deren venv oder Paketordner.
+  - `build_release.py` wird dafür zweigeteilt: zuerst Versionen setzen (wie
+    heute, dann Commit und Push); nach dem MSI-Bau mit `--msi <Datei>`
+    signieren und packen.
+  - Vor dem Signieren **prüft** `build_release.py`, dass das `agent.py` in der
+    MSI byte-gleich mit dem im ZIP ist und die MSI-Version zu `AGENT_VERSION`
+    passt; sonst bricht es ab.
+  - Die MSI kommt per Kopie vom Linux-Server zum Signierrechner; der private
+    Schlüssel verlässt den Signierrechner nie.
 - `build_release.py` signiert die MSI und legt sie samt Erklärung und Signatur
   in das ZIP (Verzeichnis `agent-pakete/`). Ohne MSI ist das Verhalten wie
   heute (das ZIP enthält keine MSI, der Installationsweg meldet „kein Paket
@@ -269,8 +277,9 @@ installieren) ist ein möglicher späterer, eigener Schritt.
 
 ## Offene Punkte für die Umsetzung
 
-- Wo der Linux-Schritt des Release-Baus läuft (Entscheidung Mike, siehe
-  „Release-Bau").
+- Wie die MSI vom Linux-Server zum Signierrechner kommt (Kopierbefehl, Prüfung
+  der Prüfsumme nach dem Kopieren) — wird im Plan als Schrittfolge für den
+  Release-Ablauf festgelegt.
 - Wohin der Watcher die signierte MSI legt und wie das Dienstkonto davon
   getrennt bleibt (Umsetzungsdetail; das Muster von `build_packages.sh` gilt).
 - Prüfgrenzen (Größe, Frist für die Meldung des neuen Agenten) legt die
