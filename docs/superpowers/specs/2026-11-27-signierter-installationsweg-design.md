@@ -127,9 +127,19 @@ zu seiner Datei einen eigenen Beweis. Das ist dasselbe Muster wie
   - `build_release.py` wird dafür zweigeteilt: zuerst Versionen setzen (wie
     heute, dann Commit und Push); nach dem MSI-Bau mit `--msi <Datei>`
     signieren und packen.
-  - Vor dem Signieren **prüft** `build_release.py`, dass das `agent.py` in der
-    MSI byte-gleich mit dem im ZIP ist und die MSI-Version zu `AGENT_VERSION`
-    passt; sonst bricht es ab.
+  - Vor dem Signieren **prüft** `build_release.py` auf dem Signierrechner,
+    dass das `agent.py` in der MSI byte-gleich mit dem im ZIP ist und die
+    MSI-Version zu `AGENT_VERSION` passt; sonst bricht es ab.
+  - Zusätzlich prüft es den **gesamten Inhalt** der MSI, weil der Baurechner
+    kein Vertrauensanker ist (dort läuft auch das Backend): jede Datei der
+    Python-Laufzeit gegen den Inhalt der Embeddable-Datei mit `PY_SHA256`, die
+    acht Bibliotheken gegen die gepinnten Hashes aus
+    `agent/requirements.txt`, und es darf keine Datei in der MSI stehen, die in
+    keiner dieser Quellen vorkommt (außer den Dateien des Pakets selbst).
+    Gelesen wird die MSI auf dem Signierrechner, entweder über die
+    Dateitabelle oder über einen administrativen Auszug (`msiexec /a` in ein
+    leeres Verzeichnis); welcher Weg ohne Zusatzwerkzeug geht, wird gemessen,
+    bevor der Plan ihn festlegt.
   - Die MSI kommt per Kopie vom Linux-Server zum Signierrechner; der private
     Schlüssel verlässt den Signierrechner nie.
 - `build_release.py` signiert die MSI und legt sie samt Erklärung und Signatur
@@ -186,10 +196,17 @@ Auftrag `install`:
    und abweichender oder unvollständiger Stand → Reparatur (`msiexec /fa`);
    gleiche Version und Stand stimmt → **nichts tun**, Auftrag erledigt mit
    „bereits aktuell" (Schutz gegen Schleifen).
-4. MSI in ein Verzeichnis schreiben, das nur SYSTEM und Administratoren
-   beschreiben dürfen (unter `ProgramData\CO37`, das schon so geschützt ist),
-   per Umbenennen erst nach der Prüfung. Daneben die **Markierung**: Auftrag
-   und erwarteter Stand aus der Erklärung.
+4. MSI in ein Unterverzeichnis von `C:\Program Files\CO37` schreiben, per
+   Umbenennen erst nach der Prüfung. Dieses Verzeichnis ist standardmäßig nur
+   für SYSTEM und Administratoren beschreibbar. **Nicht** unter
+   `C:\ProgramData\CO37`: dort darf jeder lokale Benutzer ein Unterverzeichnis
+   anlegen und bleibt dessen Besitzer (im Bestand belegt, F-06/F-46; abgesichert
+   ist dort nur die Datei `agent.conf`, nicht das Verzeichnis). Ein Benutzer
+   könnte die MSI zwischen Prüfung und Start der Aufgabe austauschen. Vor dem
+   Schreiben prüft der Agent trotzdem, dass das Zielverzeichnis SYSTEM oder den
+   Administratoren gehört und kein anderer Schreibrecht hat; sonst Ablehnung.
+   Daneben die **Markierung**: Auftrag und erwarteter Stand aus der Erklärung,
+   im selben Verzeichnis.
 5. Eine **einmalige SYSTEM-Aufgabe** anlegen, die nur `msiexec` mit festen
    Argumenten ausführt (Pfad zur geprüften Datei, `/qn`,
    `REBOOT=ReallySuppress`, Protokolldatei, kein `CO37SERVER`), sie starten
@@ -252,6 +269,12 @@ installieren) ist ein möglicher späterer, eigener Schritt.
   festen Argumenten auf, ohne Zeichenkette aus Server- oder Auftragsdaten.
   Damit greifen auch keine PowerShell-Ausführungsrichtlinien oder AppLocker-
   Regeln des Kunden dazwischen.
+- Die Signatur beglaubigt, was der Herausgeber vor dem Signieren geprüft hat:
+  der Inhalt der MSI wird auf dem Signierrechner gegen feste Hashes
+  abgeglichen, nicht nur `agent.py`. Ein kompromittierter Baurechner kann so
+  keine fremde Datei in ein signiertes Paket bringen.
+- Die MSI liegt nur in einem Verzeichnis, das ohne Zutun der Anwendung nur
+  SYSTEM und Administratoren beschreiben; der Agent prüft das vor dem Schreiben.
 - Auftrag nur für Administratoren, protokolliert; Pilot vor der Fläche; ein
   Auftrag für einen Host, dessen Stand stimmt, tut nichts.
 - Der Server kann den Agenten zu einer Installation auffordern, aber kein
@@ -267,12 +290,17 @@ installieren) ist ein möglicher späterer, eigener Schritt.
   `msiexec`-Argumente, übergroße Datei, Auftrag für Offline-Host (409), für
   Linux-Host (abgewiesen), für zu alten Agenten (abgewiesen), nur
   Administratoren, Pilotstaffelung, Watcher übernimmt die signierte MSI und
-  baut keine eigene. Jede Prüfung mit benannter Mutation belegt.
+  baut keine eigene; MSI mit fremder Datei, mit abweichender
+  Bibliothek oder abweichender Laufzeit wird vor dem Signieren abgewiesen;
+  Zielverzeichnis mit fremdem Besitzer oder fremdem Schreibrecht wird
+  abgewiesen. Jede Prüfung mit benannter Mutation belegt.
 - Was im Container nicht prüfbar ist (`msiexec`, Aufgabenplaner, Restart
   Manager), wird **auf einem Windows-Testhost gemessen**, bevor ein Release
   dies enthält: die einmalige Aufgabe überlebt das Ende des Agenten, der neue
   Agent meldet den erwarteten Stand, die Aufgabe `CO37Agent` bleibt, die
   Reparatur mit `/fa` stellt eine entfernte `certifi\cacert.pem` wieder her,
+  das Zielverzeichnis unter `Program Files` hat die erwarteten Rechte und
+  übersteht das Upgrade,
   und bei absichtlich kaputter MSI bleibt ein laufender Agent.
 
 ## Offene Punkte für die Umsetzung
